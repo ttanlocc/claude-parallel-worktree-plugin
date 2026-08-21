@@ -25,10 +25,21 @@
 <script>
 let selected = null;
 
+function checkResponse(res, data) {
+  if (res.ok && !data.error) return null;
+  return data.error || `HTTP ${res.status}`;
+}
+
 async function pollTasks() {
   const res = await fetch("/api/tasks");
-  const tasks = await res.json();
+  const data = await res.json();
   const rows = document.getElementById("taskRows");
+  const err = checkResponse(res, data);
+  if (err) {
+    rows.innerHTML = `<tr><td colspan="4">error: ${err}</td></tr>`;
+    return;
+  }
+  const tasks = data;
   rows.innerHTML = "";
   for (const t of tasks) {
     const tr = document.createElement("tr");
@@ -46,6 +57,11 @@ async function pollLog() {
   const res = await fetch(`/api/tasks/${encodeURIComponent(selected)}/log`);
   const data = await res.json();
   const log = document.getElementById("log");
+  const err = checkResponse(res, data);
+  if (err) {
+    log.textContent = `error: ${err}`;
+    return;
+  }
   if (data.status === "not-available") {
     log.textContent = "no session dispatched yet";
     return;
