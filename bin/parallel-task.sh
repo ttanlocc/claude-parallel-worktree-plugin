@@ -196,6 +196,10 @@ cmd_start() {
 }
 
 cmd_list() {
+  if [[ "${1:-}" == "--json" ]]; then
+    list_json
+    return
+  fi
   local tasks
   tasks="$(reg_get 'keys[]')"
   [[ -z "$tasks" ]] && { echo "(no parallel copies registered)"; return 0; }
@@ -215,6 +219,41 @@ cmd_list() {
     fi
     printf '%-24s %-10s %-40s %-8s %-30s %s\n' "$task" "$mode" "$branch" "$num" "$ports" "$status"
   done <<< "$tasks"
+}
+
+list_json() {
+  local tasks
+  tasks="$(reg_get 'keys[]')"
+  if [[ -z "$tasks" ]]; then
+    echo "[]"
+    return 0
+  fi
+  {
+    while IFS= read -r task; do
+      local entry mode num gw dev_status session_id agent_obj
+      entry="$(reg_get --arg k "$task" '.[$k]')"
+      mode="$(jq -r '.mode' <<<"$entry")"
+      num="$(jq -r '.num' <<<"$entry")"
+      gw="$(jq -r '.ports.gateway' <<<"$entry")"
+      if [[ "$mode" == "docker" ]]; then
+        docker_slot_busy "$num" && dev_status="running" || dev_status="stopped"
+      else
+        port_busy "$gw" && dev_status="running" || dev_status="stopped"
+      fi
+      session_id="$(jq -r '.session_id // empty' <<<"$entry")"
+      agent_obj="{}"
+      if [[ -n "$session_id" ]]; then
+        agent_obj="$(claude agents --json --all 2>/dev/null \
+          | jq -c --arg sid "$session_id" '([.[] | select(.sessionId==$sid)] | last) // {}')"
+        [[ -n "$agent_obj" ]] || agent_obj="{}"
+      fi
+      jq -c --arg task "$task" --arg dev_status "$dev_status" --argjson agent "$agent_obj" \
+        '. + {task: $task, dev_status: $dev_status,
+              agent_status: ($agent.status // null),
+              agent_state: ($agent.state // null)}' \
+        <<<"$entry"
+    done <<< "$tasks"
+  } | jq -s '.'
 }
 
 cmd_stop() {
