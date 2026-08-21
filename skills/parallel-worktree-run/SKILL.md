@@ -69,36 +69,44 @@ Port scheme, so the user knows what to expect:
 - `native` mode: task *N* → gateway `8500+N`, frontend `5500+N` (a different, smaller offset;
   shared Postgres/Azurite across all native tasks)
 
-## Step 3 — dispatch the implementing subagent
+## Step 3 — dispatch the implementing session
 
-Spawn a **background** `Agent` call (default subagent type is fine — don't pass
-`isolation: "worktree"`, the worktree already exists from Step 2). The prompt must:
+Build the task prompt (do NOT skip any of these — this becomes the literal `<prompt>` argument
+to `dispatch`):
 
-1. Tell it the worktree's **absolute path** and instruct it to call
-   `EnterWorktree(path="<abs path>")` as its very first action — this moves only *that
-   subagent's* own cwd/statusline/hooks, never the root session's. Then verify with `pwd` and
-   `git branch --show-current` before touching any file (same split-brain trap
-   `worktree-new-feature` warns about, just via `path` instead of `name` since the worktree
-   already exists). Don't just describe the path in prose and hope — the prompt must literally
-   instruct the `EnterWorktree` tool call; a subagent that only reads the path from prose and
-   never calls it can drift back to the root session's cwd.
-2. Give it the actual task/requirements verbatim.
-3. Give it the dev URLs from Step 2, so it can verify its work against a live server instead
-   of only static analysis.
-4. Point it at the repo's normal gates: any rules under `.claude/rules/*` or `CLAUDE.md`,
-   commit message format, and any post-task note-taking convention the repo has.
-5. **Forbid `--frontend-only` as a workaround.** If this slot's `dev-stack.sh N up -d` (or a
-   restart of it) fails, the subagent must diagnose and retry the full stack — never fall back
-   to `dev-stack.sh N up --frontend-only`. That flag repoints the frontend at the
-   *shared* slot-0 gateway, silently breaking the own-DB/own-backend isolation this skill
-   exists to guarantee (a real regression: a subagent hit a half-created stack from a prior
-   failed run and "fixed" it by switching to `--frontend-only`, so the task ran against the
-   wrong tenant's DB until caught). `--frontend-only` belongs to `worktree-new-feature` only.
-6. Ask it to end with a summary: files changed, tests run + result, URLs — this is what gets
-   relayed to the user when the task-notification arrives.
+1. The actual task/requirements verbatim.
+2. The dev URLs from Step 2, so it can verify its work against a live server instead of only
+   static analysis.
+3. The repo's normal gates: any rules under `.claude/rules/*` or `CLAUDE.md`, commit message
+   format, and any post-task note-taking convention the repo has.
+4. **Forbid `--frontend-only` as a workaround.** If this slot's `dev-stack.sh N up -d` (or a
+   restart of it) fails, it must diagnose and retry the full stack — never fall back to
+   `dev-stack.sh N up --frontend-only`. That flag repoints the frontend at the *shared* slot-0
+   gateway, silently breaking the own-DB/own-backend isolation this skill exists to guarantee (a
+   real regression: a dispatched session hit a half-created stack from a prior failed run and
+   "fixed" it by switching to `--frontend-only`, so the task ran against the wrong tenant's DB
+   until caught). `--frontend-only` belongs to `worktree-new-feature` only.
+5. Ask it to end with a summary: files changed, tests run + result, URLs.
 
-Launch one `Agent` call per task-name. To start several at once, send multiple `Agent` calls
-in a single message so they run concurrently.
+Then dispatch:
+
+```bash
+parallel-task.sh dispatch <task-name> "<prompt>"
+```
+
+This launches an independent, addressable top-level Claude Code session in that worktree
+(`claude --bg`) and records its id in the registry — it is NOT a subagent of this root session.
+There is no `EnterWorktree` step to instruct here: the dispatched session's process starts with
+its cwd already inside the worktree (`dispatch` runs `claude --bg` from there directly), so the
+split-brain trap `worktree-new-feature` warns about for subagents (drifting back to the root
+session's cwd) doesn't apply to this path.
+
+`dispatch` returns immediately once the session is backgrounded — no need to batch multiple calls
+in one message the way background `Agent` calls did; issue them one after another.
+
+Because the dispatched session is a real, addressable Claude Code session (not a one-shot
+subagent), it can also be talked to mid-task — `claude attach <short-id>` opens it in the current
+terminal, or another session can message it once it appears in that session's peer list.
 
 ## Step 4 — repeat for more tasks
 
