@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Live status/log dashboard for parallel-task.sh copies."""
+
+import json
+
+
+def _flatten_tool_result(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        return " ".join(parts)
+    return ""
+
+
+def render_transcript_line(obj: dict) -> list[str]:
+    """Return zero or more human-readable log lines for one transcript JSON record."""
+    if obj.get("type") not in ("user", "assistant"):
+        return []
+    message = obj.get("message")
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
+    if isinstance(content, str):
+        return [content]
+    if not isinstance(content, list):
+        return []
+    lines = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "text":
+            text = item.get("text", "")
+            if text:
+                lines.append(text)
+        elif item_type == "tool_use":
+            name = item.get("name", "?")
+            args = json.dumps(item.get("input", {}))[:80]
+            lines.append(f"→ {name}({args})")
+        elif item_type == "tool_result":
+            lines.append(f"← {_flatten_tool_result(item.get('content'))[:200]}")
+    return lines
+
+
+def render_task_log(transcript_path: str, limit: int = 200) -> list[str]:
+    """Read a session transcript JSONL file and return the last `limit` rendered log lines."""
+    lines: list[str] = []
+    with open(transcript_path, encoding="utf-8") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            lines.extend(render_transcript_line(obj))
+    return lines[-limit:]
