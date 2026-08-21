@@ -99,11 +99,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/tasks":
-            self._json(get_tasks())
+            try:
+                self._json(get_tasks())
+            except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as e:
+                self._json({"error": str(e)}, status=500)
             return
         if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/log"):
             name = parsed.path[len("/api/tasks/") : -len("/log")]
-            tasks = {t["task"]: t for t in get_tasks()}
+            try:
+                tasks = {t["task"]: t for t in get_tasks()}
+            except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as e:
+                self._json({"error": str(e)}, status=500)
+                return
             task = tasks.get(name)
             path = transcript_path_for(task) if task else None
             if not path or not os.path.exists(path):
