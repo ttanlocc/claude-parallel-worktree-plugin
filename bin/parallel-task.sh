@@ -18,10 +18,11 @@
 # which worktree owns which number, and give one place to list/stop/remove them.
 #
 # Usage:
-#   parallel-task.sh start <task-name> <native|docker> [base-ref]
-#   parallel-task.sh list
-#   parallel-task.sh stop  <task-name>
-#   parallel-task.sh rm    <task-name> [--force]
+#   parallel-task.sh start    <task-name> <native|docker> [base-ref]
+#   parallel-task.sh dispatch <task-name> <prompt>
+#   parallel-task.sh list     [--json]
+#   parallel-task.sh stop     <task-name>
+#   parallel-task.sh rm       <task-name> [--force]
 set -euo pipefail
 
 usage() {
@@ -55,6 +56,14 @@ reg_del_entry() {
   local tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/parallel-task-registry.XXXXXX.json")"
   jq --arg k "$1" 'del(.[$k])' "$REGISTRY" > "$tmp"
+  mv "$tmp" "$REGISTRY"
+}
+
+reg_merge_entry() {
+  # reg_merge_entry <task-name> <json-object-to-merge-in>
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/parallel-task-registry.XXXXXX.json")"
+  jq --arg k "$1" --argjson v "$2" '.[$k] += $v' "$REGISTRY" > "$tmp"
   mv "$tmp" "$REGISTRY"
 }
 
@@ -248,11 +257,48 @@ cmd_rm() {
   echo "   git -C '$REPO_ROOT' branch -d <branch>"
 }
 
+cmd_dispatch() {
+  [[ $# -ge 2 ]] || { echo "error: dispatch needs <task-name> <prompt>" >&2; usage; }
+  local task="$1"; shift
+  local prompt="$1"
+  [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]] || { echo "error: unknown task '$task' (see: $0 list)" >&2; exit 1; }
+  local wt_path
+  wt_path="$(reg_get --arg k "$task" '.[$k].path')"
+
+  local launch_out
+  if ! launch_out="$( cd "$wt_path" && claude --bg -n "$task" "$prompt" 2>&1 )"; then
+    echo "error: claude --bg failed to launch for '$task':" >&2
+    echo "$launch_out" >&2
+    exit 1
+  fi
+
+  local short_id
+  if [[ "$launch_out" =~ backgrounded[[:space:]]·[[:space:]]([a-f0-9]+)[[:space:]]· ]]; then
+    short_id="${BASH_REMATCH[1]}"
+  else
+    echo "error: could not find a 'backgrounded · <id> · ...' line in claude --bg output for '$task':" >&2
+    echo "$launch_out" >&2
+    exit 1
+  fi
+
+  local session_id
+  session_id="$(claude agents --json --all --cwd "$wt_path" \
+    | jq -r --arg n "$task" '[.[] | select(.name==$n)] | sort_by(.startedAt) | last | .sessionId // empty')"
+  if [[ -z "$session_id" ]]; then
+    echo "error: dispatched '$task' (short id $short_id) but could not resolve its session_id via 'claude agents --json'" >&2
+    exit 1
+  fi
+
+  reg_merge_entry "$task" "$(jq -n --arg sid "$short_id" --arg fid "$session_id" '{short_id:$sid, session_id:$fid}')"
+  echo ">> $task dispatched: short id $short_id  session $session_id"
+}
+
 case "$COMMAND" in
-  start) cmd_start "$@" ;;
-  list)  cmd_list "$@" ;;
-  stop)  cmd_stop "$@" ;;
-  rm)    cmd_rm "$@" ;;
+  start)    cmd_start "$@" ;;
+  dispatch) cmd_dispatch "$@" ;;
+  list)     cmd_list "$@" ;;
+  stop)     cmd_stop "$@" ;;
+  rm)       cmd_rm "$@" ;;
   *)
     echo "error: unknown command '$COMMAND'" >&2
     usage
