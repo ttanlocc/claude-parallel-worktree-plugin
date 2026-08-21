@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>parallel-task dashboard</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0; display: flex; height: 100vh; }
+  #tasks { width: 380px; overflow-y: auto; border-right: 1px solid #ccc; }
+  #tasks table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #tasks th, #tasks td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #eee; }
+  #tasks tr { cursor: pointer; }
+  #tasks tr.selected { background: #e8f0fe; }
+  #log { flex: 1; overflow-y: auto; padding: 8px; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+  .status-running, .status-idle { color: #1a7f37; }
+  .status-stopped { color: #999; }
+  .status-busy { color: #b35900; }
+</style>
+</head>
+<body>
+<div id="tasks"><table>
+  <thead><tr><th>Task</th><th>Mode</th><th>Dev</th><th>Agent</th></tr></thead>
+  <tbody id="taskRows"></tbody>
+</table></div>
+<div id="log">select a task</div>
+<script>
+let selected = null;
+
+async function pollTasks() {
+  const res = await fetch("/api/tasks");
+  const tasks = await res.json();
+  const rows = document.getElementById("taskRows");
+  rows.innerHTML = "";
+  for (const t of tasks) {
+    const tr = document.createElement("tr");
+    if (t.task === selected) tr.className = "selected";
+    tr.innerHTML = `<td>${t.task}</td><td>${t.mode}</td>` +
+      `<td class="status-${t.dev_status}">${t.dev_status}</td>` +
+      `<td class="status-${t.agent_status || 'none'}">${t.agent_status || '-'}</td>`;
+    tr.onclick = () => { selected = t.task; pollLog(); };
+    rows.appendChild(tr);
+  }
+}
+
+async function pollLog() {
+  if (!selected) return;
+  const res = await fetch(`/api/tasks/${encodeURIComponent(selected)}/log`);
+  const data = await res.json();
+  const log = document.getElementById("log");
+  if (data.status === "not-available") {
+    log.textContent = "no session dispatched yet";
+    return;
+  }
+  log.textContent = data.lines.join("\n");
+  log.scrollTop = log.scrollHeight;
+}
+
+pollTasks();
+setInterval(pollTasks, 2000);
+setInterval(pollLog, 2000);
+</script>
+</body>
+</html>
