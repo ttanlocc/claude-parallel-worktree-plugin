@@ -1,6 +1,6 @@
 ---
 name: parallel-worktree-run
-description: Spin up a fully running, independent copy of the current repo (own git worktree + branch + own docker/native dev stack + own ports) from the ROOT Claude Code session, and dispatch a background subagent to implement a task inside it — all without the root session ever leaving the repo root. Trigger when the user wants to work on a new task WHILE another task is already in flight, explicitly asks to run things "song song" / "chạy song song" / "clone thêm bản" / in parallel, or wants multiple live preview URLs up at once for different branches. Covers provisioning via `parallel-task.sh`, dispatching the implementing subagent, and listing/stopping/removing copies. For a task that only needs isolated CODE (no separate running dev server), a plain `git worktree` is enough — this skill is for when a live, independently-addressable dev stack is also needed.
+description: Spin up a fully running, independent copy of the current repo (own git worktree + branch + own docker/native dev stack + own ports) from the ROOT Claude Code session, and dispatch a background session to implement a task inside it — all without the root session ever leaving the repo root. Trigger when the user wants to work on a new task WHILE another task is already in flight, explicitly asks to run things "song song" / "chạy song song" / "clone thêm bản" / in parallel, or wants multiple live preview URLs up at once for different branches. Covers provisioning via `parallel-task.sh`, dispatching the implementing session, and listing/stopping/removing copies. For a task that only needs isolated CODE (no separate running dev server), a plain `git worktree` is enough — this skill is for when a live, independently-addressable dev stack is also needed.
 ---
 
 # Parallel worktree + dev-stack, controlled from one root session
@@ -10,7 +10,7 @@ branch, in its own worktree, with its own running dev stack on its own ports —
 user only ever talks to **one** Claude Code session, parked at the repo root.
 
 The root session's own `pwd` must never change for this. It provisions copies and dispatches
-background subagents to work inside them; it does not `EnterWorktree` itself.
+background sessions to work inside them; it does not `EnterWorktree` itself.
 
 ## Prerequisites — repo layout this plugin assumes
 
@@ -32,7 +32,7 @@ conventions for `bin/dev-stack.sh` / `bin/dev-native.sh` to work unmodified:
   If a paired "worktree-new-feature"-style skill exists in this project's own `.claude/skills/`,
   prefer it for that case instead of this one.
 - **This skill**: isolate code AND run a separate live dev stack (own ports, own URLs) AND
-  dispatch the implementation to a background subagent, so multiple tasks can be live and
+  dispatch the implementation to a background session, so multiple tasks can be live and
   being worked simultaneously.
 
 If you're not sure a separate running stack is actually needed, ask — don't create
@@ -126,8 +126,10 @@ parallel-task.sh rm    <task-name> --force  # also discard uncommitted changes
 `rm` never deletes the branch — after the PR merges, clean up with
 `git branch -d feature/<task-name>` same as `worktree-new-feature`'s convention.
 
-When a dispatched subagent's task-notification arrives, relay its summary to the user and ask
-whether to keep that copy running (for review / follow-up) or tear it down with `rm`.
+Check on a dispatched session's progress via `parallel-task.sh list` (or the dashboard, if running)
+for its live status, or `claude attach <short-id>` to check in directly. When it reports done, relay
+its summary to the user and ask whether to keep that copy running (for review / follow-up) or tear it
+down with `rm`.
 
 ## Troubleshooting
 
