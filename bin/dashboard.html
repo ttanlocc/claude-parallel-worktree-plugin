@@ -14,6 +14,8 @@
   .status-running, .status-idle { color: #1a7f37; }
   .status-stopped { color: #999; }
   .status-busy { color: #b35900; }
+  .status-done { color: #1a7f37; }
+  .status-blocked { color: #cc3333; }
 </style>
 </head>
 <body>
@@ -31,10 +33,15 @@ function checkResponse(res, data) {
 }
 
 async function pollTasks() {
-  const res = await fetch("/api/tasks");
-  const data = await res.json();
   const rows = document.getElementById("taskRows");
-  const err = checkResponse(res, data);
+  let data, err;
+  try {
+    const res = await fetch("/api/tasks");
+    data = await res.json();
+    err = checkResponse(res, data);
+  } catch (e) {
+    err = e.message || "request failed";
+  }
   if (err) {
     rows.innerHTML = `<tr><td colspan="4">error: ${err}</td></tr>`;
     return;
@@ -44,9 +51,10 @@ async function pollTasks() {
   for (const t of tasks) {
     const tr = document.createElement("tr");
     if (t.task === selected) tr.className = "selected";
+    const agent = t.agent_state || t.agent_status || '-';
     tr.innerHTML = `<td>${t.task}</td><td>${t.mode}</td>` +
       `<td class="status-${t.dev_status}">${t.dev_status}</td>` +
-      `<td class="status-${t.agent_status || 'none'}">${t.agent_status || '-'}</td>`;
+      `<td class="status-${t.agent_state || t.agent_status || 'none'}">${agent}</td>`;
     tr.onclick = () => { selected = t.task; pollLog(); };
     rows.appendChild(tr);
   }
@@ -54,10 +62,15 @@ async function pollTasks() {
 
 async function pollLog() {
   if (!selected) return;
-  const res = await fetch(`/api/tasks/${encodeURIComponent(selected)}/log`);
-  const data = await res.json();
   const log = document.getElementById("log");
-  const err = checkResponse(res, data);
+  let data, err;
+  try {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(selected)}/log`);
+    data = await res.json();
+    err = checkResponse(res, data);
+  } catch (e) {
+    err = e.message || "request failed";
+  }
   if (err) {
     log.textContent = `error: ${err}`;
     return;
@@ -66,8 +79,9 @@ async function pollLog() {
     log.textContent = "no session dispatched yet";
     return;
   }
+  const wasAtBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 20;
   log.textContent = data.lines.join("\n");
-  log.scrollTop = log.scrollHeight;
+  if (wasAtBottom) log.scrollTop = log.scrollHeight;
 }
 
 pollTasks();
