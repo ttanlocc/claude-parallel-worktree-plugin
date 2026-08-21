@@ -282,7 +282,7 @@ cmd_dispatch() {
   fi
 
   local session_id
-  session_id="$(claude agents --json --all --cwd "$wt_path" \
+  session_id="$(claude agents --json --all \
     | jq -r --arg n "$task" '[.[] | select(.name==$n)] | sort_by(.startedAt) | last | .sessionId // empty')" || true
   if [[ -z "$session_id" ]]; then
     echo "error: dispatched '$task' (short id $short_id) but could not resolve its session_id via 'claude agents --json'" >&2
