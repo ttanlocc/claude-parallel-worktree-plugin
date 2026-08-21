@@ -126,7 +126,7 @@ parallel-task.sh rm    <task-name> --force  # also discard uncommitted changes
 `rm` never deletes the branch — after the PR merges, clean up with
 `git branch -d feature/<task-name>` same as `worktree-new-feature`'s convention.
 
-Check on a dispatched session's progress via `parallel-task.sh list` (or the dashboard, if running)
+Check on a dispatched session's progress via `parallel-task.sh list --json` (or the dashboard, if running)
 for its live status, or `claude attach <short-id>` to check in directly. When it reports done, relay
 its summary to the user and ask whether to keep that copy running (for review / follow-up) or tear it
 down with `rm`.
