@@ -2,7 +2,7 @@
 
 Claude Code plugin: spin up N independent, fully running copies of a repo — each its own
 git worktree, branch, dev stack, and ports — from a single Claude Code session, and dispatch
-background subagents to implement tasks inside them.
+background sessions to implement tasks inside them.
 
 Extracted from a working setup in a monorepo (aiquinta-platform); see
 [Prerequisites](skills/parallel-worktree-run/SKILL.md#prerequisites--repo-layout-this-plugin-assumes)
@@ -23,7 +23,7 @@ or add as a marketplace source and install by name — see Claude Code plugin do
 ## What's in here
 
 - `skills/parallel-worktree-run/SKILL.md` — the skill Claude Code loads to drive the workflow.
-- `bin/parallel-task.sh` — orchestrator: `start <task> <native|docker>`, `list`, `stop`, `rm`.
+- `bin/parallel-task.sh` — orchestrator: `start <task> <native|docker>`, `dispatch`, `list`, `stop`, `rm`.
   Wraps `git worktree add` + slot/port allocation + a JSON registry
   (`.claude/worktrees/.parallel-registry.json` in the target repo).
 - `bin/dev-stack.sh` — docker-compose slot runner. Slot *N* offsets every host port by
@@ -35,8 +35,8 @@ or add as a marketplace source and install by name — see Claude Code plugin do
   status + live log per running copy, reading `parallel-task.sh list --json` and each task's
   session transcript. Stdlib-only, no build step.
 
-All three are added to `PATH` while the plugin is active — the skill invokes them by bare
-name (`parallel-task.sh`, `dev-stack.sh`, `dev-native.sh`).
+All four are added to `PATH` while the plugin is active — the skill invokes them by bare
+name (`parallel-task.sh`, `dev-stack.sh`, `dev-native.sh`, `dashboard.py`).
 
 ## Usage
 
