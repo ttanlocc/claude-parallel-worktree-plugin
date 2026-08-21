@@ -70,7 +70,9 @@ PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
 
 
 def get_tasks() -> list[dict]:
-    result = subprocess.run([PARALLEL_TASK_SH, "list", "--json"], capture_output=True, text=True, check=True)
+    result = subprocess.run(
+        [PARALLEL_TASK_SH, "list", "--json"], capture_output=True, text=True, check=True, cwd=PLUGIN_BIN
+    )
     return json.loads(result.stdout)
 
 
@@ -116,7 +118,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not path or not os.path.exists(path):
                 self._json({"status": "not-available"})
                 return
-            self._json({"lines": render_task_log(path)})
+            try:
+                self._json({"lines": render_task_log(path)})
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
             return
         if parsed.path == "/":
             html_path = os.path.join(PLUGIN_BIN, "dashboard.html")
