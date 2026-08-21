@@ -75,7 +75,7 @@ def get_tasks() -> list[dict]:
 
 
 def _slugify_cwd(path: str) -> str:
-    return path.replace("/", "-")
+    return path.replace("/", "-").replace(".", "-")
 
 
 def transcript_path_for(task: dict) -> str | None:
