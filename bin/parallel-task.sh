@@ -26,7 +26,7 @@
 set -euo pipefail
 
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
@@ -228,6 +228,9 @@ list_json() {
     echo "[]"
     return 0
   fi
+  local agents_json
+  agents_json="$(claude agents --json --all 2>/dev/null)" || true
+  [[ -n "$agents_json" ]] || agents_json="[]"
   {
     while IFS= read -r task; do
       local entry mode num gw dev_status session_id agent_obj
@@ -243,8 +246,7 @@ list_json() {
       session_id="$(jq -r '.session_id // empty' <<<"$entry")"
       agent_obj="{}"
       if [[ -n "$session_id" ]]; then
-        agent_obj="$(claude agents --json --all 2>/dev/null \
-          | jq -c --arg sid "$session_id" '([.[] | select(.sessionId==$sid)] | last) // {}')"
+        agent_obj="$(jq -c --arg sid "$session_id" '([.[] | select(.sessionId==$sid)] | last) // {}' <<<"$agents_json")"
         [[ -n "$agent_obj" ]] || agent_obj="{}"
       fi
       jq -c --arg task "$task" --arg dev_status "$dev_status" --argjson agent "$agent_obj" \
@@ -260,6 +262,13 @@ cmd_stop() {
   [[ $# -ge 1 ]] || { echo "error: stop needs <task-name>" >&2; usage; }
   local task="$1"
   [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]] || { echo "error: unknown task '$task'" >&2; exit 1; }
+
+  local short_id
+  short_id="$(reg_get --arg k "$task" '.[$k].short_id // empty')"
+  if [[ -n "$short_id" ]]; then
+    claude stop "$short_id" || true
+  fi
+
   local mode num path
   mode="$(reg_get --arg k "$task" '.[$k].mode')"
   num="$(reg_get --arg k "$task" '.[$k].num')"
@@ -299,7 +308,7 @@ cmd_rm() {
 cmd_dispatch() {
   [[ $# -ge 2 ]] || { echo "error: dispatch needs <task-name> <prompt>" >&2; usage; }
   local task="$1"; shift
-  local prompt="$1"
+  local prompt="$*"
   [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]] || { echo "error: unknown task '$task' (see: $0 list)" >&2; exit 1; }
   local wt_path
   wt_path="$(reg_get --arg k "$task" '.[$k].path')"
