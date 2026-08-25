@@ -287,6 +287,21 @@ def test_clean_changed_files_shapes_stay_tier2():
         assert tier == "tier2", f"clean {shape!r} must stay tier2, got {reason}"
 
 
+def test_changed_files_as_non_list_scalar_is_tier3():
+    # A number/bool isn't a file list at all. _sensitive() can scan its str() form and find no
+    # marker, but "no marker" is not the same as "a disclosed, clean file list" — this must not
+    # read as compliance any more than an outright missing field does.
+    for shape in (42, 3.14, True, 1, -1):
+        r = new_record(
+            "s",
+            "diff_review",
+            "merge?",
+            evidence={"tests": "green", "deps_added": [], "migration": False, "changed_files": shape},
+        )
+        tier, reason = classify(r)
+        assert tier == "tier3", f"changed_files={shape!r} must not read as a clean file list, got {reason}"
+
+
 def test_tier3_evidence_beats_any_tier2_kind():
     for ev, why in (
         ({"deps_added": ["requests"]}, "dependency"),

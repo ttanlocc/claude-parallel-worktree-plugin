@@ -163,6 +163,10 @@ def classify(record: dict) -> tuple[str, str]:
         for key in ("deps_added", "migration", "changed_files"):
             if ev.get(key) is None:
                 return "tier3", f"evidence does not disclose {key}"
+        # A number/bool/other scalar here isn't a file list at all — _sensitive() can scan its
+        # str() form and find nothing, but that's not the same as a disclosed, clean file list.
+        if not isinstance(ev.get("changed_files"), (str, list, tuple, dict)):
+            return "tier3", "changed_files is not a file list"
         return "tier2", "tests green, no new deps, no migration, no sensitive path"
 
     if kind in _TIER2_KINDS:
