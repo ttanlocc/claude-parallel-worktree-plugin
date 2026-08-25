@@ -67,7 +67,7 @@ import threading
 import time
 from urllib.parse import urlparse
 
-from escalations import QUEUE_PATH, current_state, record_answer
+from escalations import QUEUE_PATH, classify, current_state, record_answer
 
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
@@ -78,6 +78,14 @@ def get_escalations() -> dict:
     """What the human still has to answer, and what the manager already decided for them."""
     state = current_state(QUEUE_PATH)
     needs_human = [r for r in state if r.get("status") == "needs_human"]
+    for r in state:
+        if r.get("status") == "open":
+            try:
+                is_tier3 = classify(r)[0] == "tier3"
+            except Exception:
+                is_tier3 = True  # can't classify it -> fail closed, show it to a human
+            if is_tier3:
+                needs_human.append(r)
     decisions = [r for r in state if r.get("decided_by") == "manager"]
     decisions.sort(key=lambda r: r.get("answered_at") or 0, reverse=True)
     return {"needs_human": needs_human, "recent_decisions": decisions[:20]}

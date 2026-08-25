@@ -543,7 +543,11 @@ async function pollEscalations() {
     data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
   } catch (e) {
-    return;  // the sessions view still works if this endpoint is down
+    const panel = document.getElementById("decisions-panel");
+    const list = document.getElementById("decisions");
+    panel.style.display = "";
+    list.replaceChildren(el("div", "esc", "Could not load escalations: " + (e.message || e)));
+    return;
   }
   const panel = document.getElementById("decisions-panel");
   const list = document.getElementById("decisions");

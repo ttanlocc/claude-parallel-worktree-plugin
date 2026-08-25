@@ -78,6 +78,24 @@ def test_read_all_skips_malformed_lines():
         os.unlink(path)
 
 
+def test_read_all_skips_non_object_json_lines():
+    # Valid JSON that isn't an object reads back as an int/str/None/list, and every consumer
+    # downstream calls .get() on it. Skipping it here is what keeps them from crashing.
+    path = _tmp()
+    try:
+        good = new_record("s", "k", "good")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(good) + "\n")
+            f.writelines(junk + "\n" for junk in ("123", '"done"', "null", "[]"))
+        got = read_all(path)
+        assert len(got) == 1, f"non-object lines must be skipped, got {got}"
+        assert got[0]["question"] == "good"
+        state = current_state(path)  # must not raise
+        assert [r["id"] for r in state] == [good["id"]]
+    finally:
+        os.unlink(path)
+
+
 def test_tier2_mechanical_kinds():
     for kind in ("red_tests", "looping", "pick_implementation", "scope_question"):
         tier, reason = classify(new_record("s", kind, "q"))
@@ -172,6 +190,27 @@ def test_diff_touching_sensitive_path_is_tier3():
         assert tier == "tier3", f"{path} should force tier3 ({reason})"
 
 
+def _clean_diff_evidence(**extra) -> dict:
+    return {"tests": "green", "deps_added": [], "changed_files": ["bin/x.py"], "migration": False, **extra}
+
+
+def test_target_branch_main_is_tier3():
+    # Evidence, not the self-declared kind, decides: a diff_review that looks clean but targets
+    # main is still "anything touching main", so the manager must not be able to approve it.
+    for branch in ("main", "master", "MAIN", " main "):
+        r = new_record("s", "diff_review", "merge?", evidence=_clean_diff_evidence(branch=branch))
+        tier, reason = classify(r)
+        assert tier == "tier3", f"branch {branch!r} must be tier3, got {reason}"
+        assert "branch" in reason
+
+
+def test_feature_branch_stays_tier2():
+    for branch in ("feature/x", "fix/thing", "dev"):
+        r = new_record("s", "diff_review", "merge?", evidence=_clean_diff_evidence(branch=branch))
+        tier, reason = classify(r)
+        assert tier == "tier2", f"branch {branch!r} must stay tier2, got {reason}"
+
+
 def test_tier3_wins_ties():
     # A mechanical kind that nonetheless carries an irreversible flag stays tier3.
     r = new_record("s", "red_tests", "q", evidence={"irreversible": True})
@@ -214,6 +253,38 @@ def test_changed_files_as_string_still_scanned():
     tier, reason = classify(r)
     assert tier == "tier3"
     assert "sensitive" in reason
+
+
+def test_changed_files_as_dict_still_scanned():
+    # A dict wrapping the list is worker-authored evidence too. Iterating it yields keys,
+    # never the nested paths, so an unscanned shape passes every secret file as clean.
+    r = new_record(
+        "s",
+        "diff_review",
+        "merge?",
+        evidence={
+            "tests": "green",
+            "deps_added": [],
+            "migration": False,
+            "changed_files": {"files": ["services/auth/login.py"]},
+        },
+    )
+    tier, reason = classify(r)
+    assert tier == "tier3", reason
+    assert "sensitive" in reason
+
+
+def test_clean_changed_files_shapes_stay_tier2():
+    # The fail-closed scan must not turn every unusual shape into a false positive.
+    for shape in ("bin/ok.py", ["bin/ok.py", "README.md"], {"files": ["bin/ok.py", "README.md"]}):
+        r = new_record(
+            "s",
+            "diff_review",
+            "merge?",
+            evidence={"tests": "green", "deps_added": [], "migration": False, "changed_files": shape},
+        )
+        tier, reason = classify(r)
+        assert tier == "tier2", f"clean {shape!r} must stay tier2, got {reason}"
 
 
 def test_tier3_evidence_beats_any_tier2_kind():

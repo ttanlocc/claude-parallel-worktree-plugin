@@ -240,14 +240,17 @@ def test_malformed_record_falls_back_to_human():
     calls = []
     spy = lambda rec: calls.append(rec) or '{"answer":"a","reason":"b","confidence":"high"}'
 
-    for bad in (
-        {"kind": "diff_review", "question": "q", "options": [], "evidence": "green"},
-        {"kind": "diff_review", "question": "q", "options": [], "evidence": {"changed_files": 42}},
+    for bad, expect in (
+        # evidence is not a dict at all — classify() cannot read it, and says so
+        ({"kind": "diff_review", "question": "q", "options": [], "evidence": "green"}, "classify"),
+        # evidence is a dict of the wrong shape — classifiable, and it fails closed on its own
+        ({"kind": "diff_review", "question": "q", "options": [], "evidence": {"changed_files": 42}}, "not green"),
     ):
         out = decide(bad, spy)
         assert out["outcome"] == "needs_human", f"{bad} must degrade, not raise"
-        assert "classify" in out["reason"]
-    assert calls == [], "a record that cannot even be classified must not reach the model"
+        assert out["decided_by"] is None
+        assert expect in out["reason"], f"{bad} -> {out['reason']}"
+    assert calls == [], "a record the manager cannot settle must not reach the model"
 
 
 def test_non_string_answer_is_rejected():

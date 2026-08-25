@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Escalation queue: one append-only JSONL record per report a worker cannot decide alone."""
 
+import fcntl
 import json
 import os
 import time
@@ -28,12 +29,22 @@ def new_record(session_id: str, kind: str, question: str, options=None, evidence
 
 
 def append(path: str, record: dict) -> None:
-    """Append one record. Append-only: history is never rewritten, only added to."""
+    """Append one record. Append-only: history is never rewritten, only added to.
+
+    Locked around the write: several processes (daemon, dashboard, worker sessions) append
+    concurrently, and an unlocked interleaved write produces a line `read_all` can only skip
+    as garbage — silently losing the escalation.
+    """
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(json.dumps(record) + "\n")
+            f.flush()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def read_all(path: str) -> list[dict]:
@@ -47,9 +58,11 @@ def read_all(path: str) -> list[dict]:
             if not raw:
                 continue
             try:
-                out.append(json.loads(raw))
+                obj = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if isinstance(obj, dict):
+                out.append(obj)
     return out
 
 
@@ -97,11 +110,20 @@ def _sensitive(changed_files) -> str | None:
     # would match no marker and silently pass every secret file as clean.
     if isinstance(changed_files, str):
         changed_files = [changed_files]
-    for path in changed_files or []:
-        low = str(path).lower()
+    if isinstance(changed_files, (list, tuple)):
+        for path in changed_files:
+            low = str(path).lower()
+            for marker in SENSITIVE_PATH_MARKERS:
+                if marker in low:
+                    return str(path)
+        return None
+    # Any other shape (dict, nested container, model-authored oddity) is untrusted,
+    # worker-authored evidence — scan its whole string form rather than assume a structure.
+    if changed_files:
+        low = str(changed_files).lower()
         for marker in SENSITIVE_PATH_MARKERS:
             if marker in low:
-                return str(path)
+                return str(changed_files)
     return None
 
 
@@ -123,6 +145,9 @@ def classify(record: dict) -> tuple[str, str]:
     hit = _sensitive(ev.get("changed_files"))
     if hit:
         return "tier3", f"touches a sensitive path: {hit}"
+    branch = str(ev.get("branch") or "").strip().lower()
+    if branch in ("main", "master"):
+        return "tier3", f"target branch is {branch}"
 
     if kind in _TIER3_KINDS:
         return "tier3", f"{kind} always needs a human"

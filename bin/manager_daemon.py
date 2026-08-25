@@ -28,7 +28,7 @@ def _try_deliver(path: str, rec: dict, message: str, deliver) -> str:
         update = {**rec, "delivery_attempts": attempts}
         if attempts >= DELIVERY_ATTEMPTS:
             update["status"] = "needs_human"
-            update["reason"] = f"could not deliver to {rec['session_id']} after {attempts} tries: {e}"
+            update["reason"] = f"could not deliver to {rec.get('session_id', '?')} after {attempts} tries: {e}"
         append(path, update)
         return "delivery_failed"
     append(path, {**rec, "delivered": True})
@@ -58,12 +58,12 @@ def process_open(path: str, ask_model, deliver) -> list[dict]:
             acted.append(outcome)
 
         elif status == "answered" and not rec.get("delivered"):
-            result = _try_deliver(path, rec, rec["answer"], deliver)
+            result = _try_deliver(path, rec, rec.get("answer"), deliver)
             acted.append(
                 {
                     "outcome": result,
-                    "reason": f"{rec['session_id']} ← {rec['answer']}",
-                    "answer": rec["answer"],
+                    "reason": f"{rec.get('session_id', '?')} ← {rec.get('answer', '?')}",
+                    "answer": rec.get("answer"),
                     "decided_by": rec.get("decided_by"),
                 }
             )
