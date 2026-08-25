@@ -101,6 +101,33 @@ def test_resume_argv_targets_the_session():
     assert argv[-1] == "the answer"
 
 
+def test_parse_decision_handles_nested_objects():
+    text = '{"answer": "retry", "reason": "flaky", "confidence": "high", "meta": {"attempt": 2}}'
+    got = parse_decision(text)
+    assert got is not None, "a nested field must not destroy the whole decision"
+    assert got["answer"] == "retry"
+    assert got["meta"] == {"attempt": 2}
+
+
+def test_parse_decision_skips_a_decoy_object():
+    text = (
+        'Echoing the record: {"kind": "red_tests", "question": "retry?", "answer": null}\n'
+        'My decision: {"answer": "retry once", "reason": "transient", "confidence": "high"}'
+    )
+    got = parse_decision(text)
+    assert got["answer"] == "retry once", "should prefer the object that looks like a decision"
+    assert got["confidence"] == "high"
+
+
+def test_parse_decision_handles_nested_inside_prose_and_fences():
+    text = (
+        'Result:\n```json\n{"answer": "A", "reason": "r", "confidence": "high", "evidence": {"tests": "green"}}\n```\n'
+    )
+    got = parse_decision(text)
+    assert got is not None
+    assert got["evidence"]["tests"] == "green"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

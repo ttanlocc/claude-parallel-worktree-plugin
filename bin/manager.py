@@ -6,7 +6,6 @@ without spawning a model.
 """
 
 import json
-import re
 import subprocess
 
 MANAGER_MODEL = "claude-fable-5"
@@ -42,15 +41,31 @@ def build_prompt(record: dict) -> str:
 
 
 def parse_decision(text: str) -> dict | None:
-    """Pull the decision object out of the model's reply — bare, fenced, or embedded in prose."""
+    """Pull the decision object out of the model's reply — bare, fenced, or embedded in prose.
+
+    Walks a real JSON decoder across every `{` rather than regex-matching braces: a regex cannot
+    balance nesting, and a decision carrying any nested field would otherwise be dropped entirely.
+    Among the objects found, prefers one shaped like a decision, so a model that echoes its input
+    before answering does not get its echo mistaken for the answer.
+    """
     if not text:
         return None
-    for candidate in re.findall(r"\{.*?\}", text, re.DOTALL):
-        try:
-            obj = json.loads(candidate)
-        except json.JSONDecodeError:
+    decoder = json.JSONDecoder()
+    candidates = []
+    for i, ch in enumerate(text):
+        if ch != "{":
             continue
-        if isinstance(obj, dict) and "answer" in obj:
+        try:
+            obj, _ = decoder.raw_decode(text, i)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            candidates.append(obj)
+    for obj in candidates:
+        if all(k in obj for k in ("answer", "reason", "confidence")):
+            return obj
+    for obj in candidates:
+        if "answer" in obj:
             return obj
     return None
 
