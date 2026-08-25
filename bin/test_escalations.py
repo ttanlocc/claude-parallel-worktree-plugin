@@ -78,6 +78,115 @@ def test_read_all_skips_malformed_lines():
         os.unlink(path)
 
 
+from escalations import classify
+
+
+def test_tier2_mechanical_kinds():
+    for kind in ("red_tests", "looping", "pick_implementation", "scope_question"):
+        tier, reason = classify(new_record("s", kind, "q"))
+        assert tier == "tier2", f"{kind} should be tier2, got {tier} ({reason})"
+        assert reason
+
+
+def test_tier3_always_human_kinds():
+    for kind in ("irreversible", "push_or_pr", "credentials", "spec_ambiguity", "no_convergence", "worktree_collision"):
+        tier, reason = classify(new_record("s", kind, "q"))
+        assert tier == "tier3", f"{kind} should be tier3, got {tier} ({reason})"
+        assert reason
+
+
+def test_clean_diff_is_tier2():
+    r = new_record(
+        "s",
+        "diff_review",
+        "merge?",
+        evidence={
+            "tests": "green",
+            "deps_added": [],
+            "changed_files": ["bin/dashboard.py"],
+            "migration": False,
+        },
+    )
+    tier, reason = classify(r)
+    assert tier == "tier2", reason
+
+
+def test_diff_with_red_tests_is_tier3():
+    r = new_record(
+        "s",
+        "diff_review",
+        "merge?",
+        evidence={
+            "tests": "red",
+            "deps_added": [],
+            "changed_files": ["bin/dashboard.py"],
+            "migration": False,
+        },
+    )
+    assert classify(r)[0] == "tier3"
+
+
+def test_diff_adding_dependency_is_tier3():
+    r = new_record(
+        "s",
+        "diff_review",
+        "merge?",
+        evidence={
+            "tests": "green",
+            "deps_added": ["requests"],
+            "changed_files": ["bin/x.py"],
+            "migration": False,
+        },
+    )
+    tier, reason = classify(r)
+    assert tier == "tier3"
+    assert "depend" in reason.lower()
+
+
+def test_diff_with_migration_is_tier3():
+    r = new_record(
+        "s",
+        "diff_review",
+        "merge?",
+        evidence={
+            "tests": "green",
+            "deps_added": [],
+            "changed_files": ["bin/x.py"],
+            "migration": True,
+        },
+    )
+    assert classify(r)[0] == "tier3"
+
+
+def test_diff_touching_sensitive_path_is_tier3():
+    for path in ("services/gateway/auth/token.py", "config/.env", "app/secrets.yaml", "migrations/0042_add.py"):
+        r = new_record(
+            "s",
+            "diff_review",
+            "merge?",
+            evidence={
+                "tests": "green",
+                "deps_added": [],
+                "changed_files": ["bin/ok.py", path],
+                "migration": False,
+            },
+        )
+        tier, reason = classify(r)
+        assert tier == "tier3", f"{path} should force tier3 ({reason})"
+
+
+def test_tier3_wins_ties():
+    # A mechanical kind that nonetheless carries an irreversible flag stays tier3.
+    r = new_record("s", "red_tests", "q", evidence={"irreversible": True})
+    assert classify(r)[0] == "tier3"
+
+
+def test_unknown_kind_defaults_to_tier3():
+    tier, reason = classify(new_record("s", "something_new", "q"))
+    assert tier == "tier3"
+    assert "unknown" in reason.lower()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
