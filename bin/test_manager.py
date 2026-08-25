@@ -270,15 +270,20 @@ def test_malformed_options_falls_back_to_human():
 
 
 def test_decide_degrades_on_an_unanticipated_error():
-    # Whatever breaks inside routing, the caller gets a decision object, never an exception.
-    class Exploding(dict):
-        def get(self, *a, **k):
-            raise RuntimeError("boom")
+    # Explodes only on `options`, so classify() succeeds and its inner guard never fires —
+    # this can only be caught by decide()'s outer boundary.
+    class SelectivelyExploding(dict):
+        def get(self, key, default=None):
+            if key == "options":
+                raise RuntimeError("options lookup exploded")
+            return super().get(key, default)
 
-    out = decide(Exploding(), lambda rec: "")
+    record = SelectivelyExploding({"kind": "pick_implementation", "question": "which?", "evidence": {}})
+    out = decide(record, lambda rec: '{"answer": "A", "reason": "r", "confidence": "high"}')
     assert out["outcome"] == "needs_human"
     assert out["decided_by"] is None
-    assert "boom" in out["reason"]
+    assert "could not route" in out["reason"], "must be caught by the outer boundary, not an inner guard"
+    assert "options lookup exploded" in out["reason"]
 
 
 if __name__ == "__main__":
