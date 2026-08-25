@@ -1,90 +1,423 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>parallel-task dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Control Center</title>
 <style>
-  body { font-family: -apple-system, sans-serif; margin: 0; display: flex; height: 100vh; }
-  #tasks { width: 380px; overflow-y: auto; border-right: 1px solid #ccc; }
-  #tasks table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  #tasks th, #tasks td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #eee; }
-  #tasks tr { cursor: pointer; }
-  #tasks tr.selected { background: #e8f0fe; }
-  #log { flex: 1; overflow-y: auto; padding: 8px; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
-  .status-running, .status-idle { color: #1a7f37; }
-  .status-stopped { color: #999; }
-  .status-busy { color: #b35900; }
-  .status-done { color: #1a7f37; }
-  .status-blocked { color: #cc3333; }
+  :root {
+    --bg: #F7F9FC;
+    --card: #FFFFFF;
+    --line: #E8EDF5;
+    --navy: #0B2447;
+    --ink: #1B2C4B;
+    --muted: #64748B;
+    --faint: #98A5BA;
+
+    --ok-bg: #E7F7EE;   --ok-fg: #197A46;   --ok-dot: #21A366;
+    --run-bg: #E8F1FE;  --run-fg: #1D6FD8;  --run-dot: #2E7DE0;
+    --warn-bg: #FEF3E2; --warn-fg: #B4690E; --warn-dot: #E2960F;
+    --stop-bg: #FDECEC; --stop-fg: #C6352E; --stop-dot: #DC4A42;
+    --idle-bg: #EFF3F9; --idle-fg: #5A6B87; --idle-dot: #98A5BA;
+
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif;
+    --shadow: 0 1px 3px rgba(16,24,40,.04), 0 1px 2px rgba(16,24,40,.03);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--sans); display: flex; }
+
+  /* ---------- icon rail ---------- */
+  #rail {
+    width: 72px; flex-shrink: 0; background: var(--card); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; align-items: center; padding: 16px 0; gap: 6px;
+  }
+  .logo {
+    width: 42px; height: 42px; border-radius: 11px; background: var(--navy); color: #fff;
+    display: grid; place-items: center; font-weight: 700; font-size: 19px; margin-bottom: 14px;
+  }
+  .rail-btn {
+    width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
+    color: var(--faint); background: transparent; border: 0; cursor: default;
+  }
+  .rail-btn.on { background: #EAF1FD; color: var(--run-fg); }
+  .rail-spacer { flex: 1; }
+
+  /* ---------- main ---------- */
+  #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #topbar {
+    display: flex; align-items: center; gap: 14px; padding: 16px 30px;
+    border-bottom: 1px solid var(--line); background: var(--card);
+  }
+  .brand h1 { margin: 0; font-size: 19px; font-weight: 700; color: var(--navy); letter-spacing: -.015em; }
+  .brand p  { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
+  .topbar-spacer { flex: 1; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    font-size: 13.5px; font-weight: 500; color: var(--ink); white-space: nowrap;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok-dot); flex-shrink: 0; }
+  .avatar {
+    width: 40px; height: 40px; border-radius: 50%; background: #EAF1FD; color: var(--run-fg);
+    display: grid; place-items: center; font-size: 13px; font-weight: 650;
+  }
+
+  #content { flex: 1; overflow-y: auto; padding: 26px 30px 34px; }
+  .page-title { margin: 0 0 20px; font-size: 30px; font-weight: 700; color: var(--navy); letter-spacing: -.025em; }
+
+  /* ---------- stat cards ---------- */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+  .stat {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 20px; display: flex; align-items: center; gap: 15px; box-shadow: var(--shadow);
+  }
+  .stat-icon { width: 46px; height: 46px; border-radius: 12px; display: grid; place-items: center; flex-shrink: 0; }
+  .stat-num { font-size: 26px; font-weight: 700; color: var(--navy); line-height: 1.1; letter-spacing: -.02em; }
+  .stat-lbl { font-size: 13px; color: var(--muted); margin-top: 2px; }
+
+  /* ---------- layout below stats ---------- */
+  .cols { display: grid; grid-template-columns: 1fr 360px; gap: 16px; align-items: start; }
+  @media (max-width: 1180px) { .cols { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2,1fr); } }
+
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+  .panel-head { padding: 18px 22px 14px; }
+  .panel-head h2 { margin: 0; font-size: 17px; font-weight: 700; color: var(--navy); letter-spacing: -.015em; }
+  .panel-head p { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); }
+
+  /* ---------- agent table ---------- */
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left; font-size: 11px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--faint); padding: 12px 22px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    background: #FCFDFF;
+  }
+  tbody td { padding: 15px 22px; border-bottom: 1px solid var(--line); font-size: 13.5px; vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr { cursor: pointer; transition: background .12s; }
+  tbody tr:hover { background: #FBFCFE; }
+  tbody tr.sel { background: #F4F8FF; }
+  tbody tr:focus-visible { outline: 2px solid var(--run-fg); outline-offset: -2px; }
+  .agent-name { font-weight: 650; color: var(--navy); }
+  .agent-sub { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 3px; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 7px;
+    font-size: 12px; font-weight: 600; background: var(--idle-bg); color: var(--idle-fg); white-space: nowrap;
+  }
+  .pill .dot { width: 7px; height: 7px; background: currentColor; }
+  .pill.busy, .pill.working, .pill.running { background: var(--run-bg); color: var(--run-fg); }
+  .pill.idle    { background: var(--idle-bg); color: var(--idle-fg); }
+  .pill.done    { background: var(--ok-bg);   color: var(--ok-fg); }
+  .pill.blocked { background: var(--stop-bg); color: var(--stop-fg); }
+  .pill.stopped { background: var(--idle-bg); color: var(--faint); }
+  .pill.surface { background: #F1F5FC; color: #4A6489; font-weight: 500; }
+  .pill.mode    { background: #F3EEFD; color: #6D4AAE; font-weight: 500; }
+
+  .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    font-size: 12.5px; font-weight: 500; font-family: var(--sans); cursor: pointer; text-decoration: none;
+    transition: border-color .12s, background .12s;
+  }
+  .btn:hover { border-color: #CBD8EA; background: #FBFCFE; }
+  .btn:focus-visible { outline: 2px solid var(--run-fg); outline-offset: 1px; }
+
+  /* ---------- live logs ---------- */
+  #logrows { max-height: 460px; overflow-y: auto; padding: 4px 0 8px; }
+  .logrow { display: flex; gap: 13px; padding: 9px 22px; border-bottom: 1px solid #F2F5FA; align-items: flex-start; }
+  .logrow:last-child { border-bottom: 0; }
+  .logrow .dot { margin-top: 6px; }
+  .logrow .body { font-family: var(--mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; flex: 1; }
+  .logrow.call .body   { color: var(--run-fg); }
+  .logrow.call .dot    { background: var(--run-dot); }
+  .logrow.result .body { color: var(--faint); }
+  .logrow.result .dot  { background: var(--idle-dot); }
+  .logrow.text .body   { color: #16233D; }
+  .logrow.text .dot    { background: var(--ok-dot); }
+
+  /* ---------- side panel rows ---------- */
+  .srow { display: flex; align-items: center; gap: 11px; padding: 13px 22px; border-top: 1px solid var(--line); font-size: 13.5px; }
+  .srow .k { color: var(--muted); }
+  .srow .v { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--navy); font-weight: 600;
+             max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srow a.v { color: var(--run-fg); text-decoration: none; }
+  .srow a.v:hover { text-decoration: underline; }
+
+  .empty { padding: 34px 22px; text-align: center; color: var(--faint); font-size: 13.5px; }
+  .empty.err { color: var(--stop-fg); }
+  svg { display: block; }
 </style>
 </head>
 <body>
-<div id="tasks"><table>
-  <thead><tr><th>Task</th><th>Mode</th><th>Dev</th><th>Agent</th></tr></thead>
-  <tbody id="taskRows"></tbody>
-</table></div>
-<div id="log">select a task</div>
+
+<nav id="rail" aria-label="Sections">
+  <div class="logo">A</div>
+  <button class="rail-btn on" title="Agents" aria-current="page">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 01-1 1H4a1 1 0 01-1-1V9.5z"/></svg>
+  </button>
+  <button class="rail-btn" title="Copies">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+  </button>
+  <button class="rail-btn" title="Activity">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16l5-6 4 4 4-7 5 5"/></svg>
+  </button>
+  <button class="rail-btn" title="Terminal">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l5 5-5 5M12 17h8"/></svg>
+  </button>
+  <div class="rail-spacer"></div>
+</nav>
+
+<div id="main">
+  <header id="topbar">
+    <div class="brand">
+      <h1>Agent Control Center</h1>
+      <p id="repo-label">Parallel worktree copies</p>
+    </div>
+    <div class="topbar-spacer"></div>
+    <span class="chip"><span class="dot" id="live-dot"></span><span id="live-count">—</span></span>
+    <div class="avatar">AQ</div>
+  </header>
+
+  <main id="content">
+    <h2 class="page-title">Runtime health &amp; logs</h2>
+
+    <section class="stats" id="stats"></section>
+
+    <div class="cols">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Sessions</h2>
+          <p>Everything running in this repo. Pick one to follow its work.</p>
+        </div>
+        <div id="table-wrap"></div>
+      </section>
+
+      <aside style="display:flex; flex-direction:column; gap:16px;">
+        <section class="panel">
+          <div class="panel-head"><h2>Session details</h2></div>
+          <div id="details"><div class="empty">No session selected</div></div>
+        </section>
+      </aside>
+    </div>
+
+    <section class="panel" style="margin-top:16px;">
+      <div class="panel-head">
+        <h2>Live logs</h2>
+        <p id="log-sub">Select a session above.</p>
+      </div>
+      <div id="logrows"></div>
+    </section>
+  </main>
+</div>
+
 <script>
 let selected = null;
+let byName = {};
 
+const ICONS = {
+  globe: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>',
+  check: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.3l2.4 2.4 4.6-4.9"/></svg>',
+  cycle: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 01-13.7 5.7M4 12a8 8 0 0113.7-5.7"/><path d="M17.5 3.5v3h-3M6.5 20.5v-3h3"/></svg>',
+  warn:  '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17l8.5-15z"/><path d="M12 10v4M12 16.8v.1"/></svg>'
+};
+
+function fmtAge(ms) {
+  if (!ms) return "—";
+  const m = Math.floor((Date.now() - ms) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  return h < 24 ? h + "h" : Math.floor(h / 24) + "d";
+}
 function checkResponse(res, data) {
   if (res.ok && !data.error) return null;
-  return data.error || `HTTP ${res.status}`;
+  return data.error || ("HTTP " + res.status);
+}
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;   // textContent everywhere: names never parse as HTML
+  return n;
+}
+function pill(cls, label) {
+  const p = el("span", "pill " + cls);
+  if (["busy","working","running","idle","done","blocked","stopped"].includes(cls)) p.append(el("span", "dot"));
+  p.append(document.createTextNode(label));
+  return p;
+}
+function stateOf(t) { return (t.agent_state || t.agent_status || "").toLowerCase(); }
+
+function statCard(icon, bg, fg, num, label) {
+  const s = el("div", "stat");
+  const box = el("div", "stat-icon");
+  box.style.background = bg; box.style.color = fg; box.innerHTML = icon;  // fixed icon set, not user data
+  const txt = el("div");
+  txt.append(el("div", "stat-num", String(num)), el("div", "stat-lbl", label));
+  s.append(box, txt);
+  return s;
+}
+
+function renderStats(data) {
+  const st = data.map(stateOf);
+  const active = st.filter(s => s === "busy" || s === "working").length;
+  const resting = st.filter(s => s === "idle" || s === "done").length;
+  const stuck = st.filter(s => s === "blocked").length;
+  document.getElementById("stats").replaceChildren(
+    statCard(ICONS.globe, "#EAF1FD", "#2E7DE0", data.length, "sessions"),
+    statCard(ICONS.cycle, "#E8F1FE", "#1D6FD8", active, "working now"),
+    statCard(ICONS.check, "#E7F7EE", "#197A46", resting, "idle or done"),
+    statCard(ICONS.warn, "#FEF3E2", "#B4690E", stuck, "blocked")
+  );
+  const n = active;
+  document.getElementById("live-count").textContent = n + (n === 1 ? " agent live" : " agents live");
+  document.getElementById("live-dot").style.background = n ? "var(--run-dot)" : "var(--idle-dot)";
+}
+
+function renderTable(data) {
+  const wrap = document.getElementById("table-wrap");
+  if (!data.length) { wrap.replaceChildren(el("div", "empty", "Nothing is running in this repo yet.")); return; }
+
+  const table = el("table");
+  const thead = el("thead"), htr = el("tr");
+  ["Agent", "Surface", "Status", "Age", ""].forEach((h, i) => {
+    const th = el("th", null, h);
+    if (i === 4) th.style.textAlign = "right";
+    htr.append(th);
+  });
+  thead.append(htr);
+
+  const tbody = el("tbody");
+  for (const t of data) {
+    const st = stateOf(t);
+    const tr = el("tr", t.task === selected ? "sel" : null);
+    tr.tabIndex = 0;
+
+    const c1 = el("td");
+    c1.append(el("div", "agent-name", t.task || "—"));
+    c1.append(el("div", "agent-sub", t.branch || t.path || ""));
+
+    const c2 = el("td");
+    if (t.mode) c2.append(pill("mode", t.mode));
+    else if (t.kind) c2.append(pill("surface", t.kind));
+
+    const c3 = el("td");
+    c3.append(pill(st || "idle", st || "unknown"));
+    if (t.dev_status) { const d = pill(t.dev_status, "stack " + t.dev_status); d.style.marginLeft = "6px"; c3.append(d); }
+
+    const c4 = el("td", null, fmtAge(t.started_at));
+    c4.style.color = "var(--muted)"; c4.style.fontFamily = "var(--mono)"; c4.style.fontSize = "12px";
+
+    const c5 = el("td");
+    const acts = el("div", "actions");
+    const logs = el("button", "btn", "Logs");
+    logs.onclick = (e) => { e.stopPropagation(); pick(t.task); };
+    acts.append(logs);
+    if (t.ports && t.ports.frontend) {
+      const open = el("a", "btn", "Open");
+      open.href = "http://localhost:" + t.ports.frontend;
+      open.target = "_blank"; open.rel = "noopener";
+      open.onclick = (e) => e.stopPropagation();
+      acts.append(open);
+    }
+    c5.append(acts);
+
+    tr.append(c1, c2, c3, c4, c5);
+    tr.onclick = () => pick(t.task);
+    tr.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(t.task); } };
+    tbody.append(tr);
+  }
+  table.append(thead, tbody);
+  wrap.replaceChildren(table);
+}
+
+function renderDetails() {
+  const box = document.getElementById("details");
+  const t = byName[selected];
+  if (!t) { box.replaceChildren(el("div", "empty", "No session selected")); return; }
+
+  const rows = [];
+  const add = (k, v, href) => {
+    if (!v) return;
+    const r = el("div", "srow");
+    r.append(el("span", "k", k));
+    if (href) { const a = el("a", "v", v); a.href = href; a.target = "_blank"; a.rel = "noopener"; r.append(a); }
+    else r.append(el("span", "v", v));
+    rows.push(r);
+  };
+  add("Status", stateOf(t) || "unknown");
+  add("Kind", t.kind);
+  add("Branch", t.branch);
+  if (t.ports && t.ports.frontend) add("Frontend", "localhost:" + t.ports.frontend, "http://localhost:" + t.ports.frontend);
+  if (t.ports && t.ports.gateway) add("Gateway", "localhost:" + t.ports.gateway, "http://localhost:" + t.ports.gateway);
+  add("Attach", t.short_id ? "claude attach " + t.short_id : null);
+  add("Started", fmtAge(t.started_at) + " ago");
+  add("Path", t.path);
+  box.replaceChildren(...rows);
+}
+
+function pick(name) {
+  selected = name;
+  document.getElementById("log-sub").textContent = name;
+  renderDetails();
+  document.querySelectorAll("tbody tr").forEach(tr => {
+    tr.classList.toggle("sel", tr.querySelector(".agent-name").textContent === name);
+  });
+  pollLog();
 }
 
 async function pollTasks() {
-  const rows = document.getElementById("taskRows");
   let data, err;
   try {
     const res = await fetch("/api/tasks");
     data = await res.json();
     err = checkResponse(res, data);
-  } catch (e) {
-    err = e.message || "request failed";
-  }
+  } catch (e) { err = e.message || "request failed"; }
+
   if (err) {
-    rows.innerHTML = `<tr><td colspan="4">error: ${err}</td></tr>`;
+    document.getElementById("table-wrap").replaceChildren(el("div", "empty err", "Can't reach the server — " + err));
     return;
   }
-  const tasks = data;
-  rows.innerHTML = "";
-  for (const t of tasks) {
-    const tr = document.createElement("tr");
-    if (t.task === selected) tr.className = "selected";
-    const agent = t.agent_state || t.agent_status || '-';
-    tr.innerHTML = `<td>${t.task}</td><td>${t.mode}</td>` +
-      `<td class="status-${t.dev_status}">${t.dev_status}</td>` +
-      `<td class="status-${t.agent_state || t.agent_status || 'none'}">${agent}</td>`;
-    tr.onclick = () => { selected = t.task; pollLog(); };
-    rows.appendChild(tr);
-  }
+  byName = {};
+  data.forEach(t => { byName[t.task] = t; });
+  renderStats(data);
+  renderTable(data);
+  if (selected) renderDetails();
 }
 
 async function pollLog() {
-  if (!selected) return;
-  const log = document.getElementById("log");
+  const box = document.getElementById("logrows");
+  if (!selected) { box.replaceChildren(el("div", "empty", "Select a session above.")); return; }
+
   let data, err;
   try {
-    const res = await fetch(`/api/tasks/${encodeURIComponent(selected)}/log`);
+    const res = await fetch("/api/tasks/" + encodeURIComponent(selected) + "/log");
     data = await res.json();
     err = checkResponse(res, data);
-  } catch (e) {
-    err = e.message || "request failed";
-  }
-  if (err) {
-    log.textContent = `error: ${err}`;
-    return;
-  }
+  } catch (e) { err = e.message || "request failed"; }
+
+  if (err) { box.replaceChildren(el("div", "empty err", "Can't read the log — " + err)); return; }
   if (data.status === "not-available") {
-    log.textContent = "no session dispatched yet";
+    box.replaceChildren(el("div", "empty", "No session has been dispatched into this copy yet."));
     return;
   }
-  const wasAtBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 20;
-  log.textContent = data.lines.join("\n");
-  if (wasAtBottom) log.scrollTop = log.scrollHeight;
+
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  const frag = document.createDocumentFragment();
+  for (const line of data.lines) {
+    const kind = line.startsWith("→") ? "call" : line.startsWith("←") ? "result" : "text";
+    const row = el("div", "logrow " + kind);
+    row.append(el("span", "dot"), el("span", "body", line));
+    frag.append(row);
+  }
+  box.replaceChildren(frag);
+  if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
 pollTasks();
+pollLog();
 setInterval(pollTasks, 2000);
 setInterval(pollLog, 2000);
 </script>

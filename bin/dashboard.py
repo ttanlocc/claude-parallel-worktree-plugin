@@ -63,17 +63,118 @@ import http.server
 import os
 import subprocess
 import sys
+import threading
+import time
 from urllib.parse import urlparse
 
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
 
+# The repo whose copies we report on. Set once in main(); `parallel-task.sh` finds
+# its registry via `git rev-parse --show-toplevel`, so this must be inside the
+# target repo — NOT the plugin's own directory, which is typically installed under
+# ~/.claude/plugins/ and isn't a git repo at all.
+REPO_DIR = os.getcwd()
+
+
+# Both sources shell out to CLIs costing ~0.5s each. The page polls two endpoints every
+# 2s and both call get_tasks(), so uncached the calls overlap, pile up, and the server
+# stops answering (measured: 15s per request). One snapshot per TTL is plenty — nothing
+# here changes faster than the poll interval.
+_CACHE: dict[str, tuple[float, object]] = {}
+_CACHE_TTL = 1.5
+_CACHE_LOCK = threading.Lock()
+
+
+def _cached(key: str, fn):
+    hit = _CACHE.get(key)
+    if hit and time.monotonic() - hit[0] < _CACHE_TTL:
+        return hit[1]
+    with _CACHE_LOCK:  # one refresh at a time; latecomers take the fresh value
+        hit = _CACHE.get(key)
+        if hit and time.monotonic() - hit[0] < _CACHE_TTL:
+            return hit[1]
+        value = fn()
+        _CACHE[key] = (time.monotonic(), value)
+        return value
+
+
+def get_registry() -> list[dict]:
+    """Copies provisioned by `parallel-task.sh start` — branch, ports, dev-stack state."""
+
+    def run():
+        result = subprocess.run(
+            [PARALLEL_TASK_SH, "list", "--json"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=REPO_DIR,
+            timeout=20,
+        )
+        return json.loads(result.stdout)
+
+    return _cached("registry", run)
+
+
+def get_sessions() -> list[dict]:
+    """Every live Claude session, whether or not parallel-task.sh created it."""
+
+    def run():
+        result = subprocess.run(
+            ["claude", "agents", "--json", "--all"], capture_output=True, text=True, check=True, timeout=20
+        )
+        return json.loads(result.stdout)
+
+    return _cached("sessions", run)
+
 
 def get_tasks() -> list[dict]:
-    result = subprocess.run(
-        [PARALLEL_TASK_SH, "list", "--json"], capture_output=True, text=True, check=True, cwd=PLUGIN_BIN
-    )
-    return json.loads(result.stdout)
+    """Sessions running in this repo, enriched with registry data where it exists.
+
+    Session-first, not registry-first: a session doing work is visible immediately —
+    during provisioning, and for worktrees created by any other means. The registry
+    only adds branch/ports/dev-stack once a copy has been fully provisioned.
+    """
+    try:
+        registry = get_registry()
+    except Exception:
+        registry = []  # a broken/absent registry must not hide live sessions
+    by_session = {r["session_id"]: r for r in registry if r.get("session_id")}
+
+    repo = os.path.realpath(REPO_DIR)
+    rows, seen = [], set()
+    for s in get_sessions():
+        cwd = s.get("cwd") or ""
+        if not os.path.realpath(cwd).startswith(repo):
+            continue  # other repos aren't this dashboard's business
+        sid = s.get("sessionId")
+        reg = by_session.get(sid, {})
+        seen.add(sid)
+        rows.append(
+            {
+                "task": reg.get("task") or s.get("name") or (cwd.rsplit("/", 1)[-1] or "-"),
+                "path": reg.get("path") or cwd,
+                "session_id": sid,
+                "short_id": reg.get("short_id") or s.get("id"),
+                "agent_status": s.get("status"),
+                "agent_state": s.get("state"),
+                "kind": s.get("kind"),
+                "started_at": s.get("startedAt"),
+                "branch": reg.get("branch"),
+                "mode": reg.get("mode"),
+                "ports": reg.get("ports"),
+                "dev_status": reg.get("dev_status"),
+                "managed": bool(reg),
+            }
+        )
+
+    # Registered copies whose session already exited still matter (stack may be up).
+    for r in registry:
+        if r.get("session_id") not in seen:
+            rows.append({**r, "kind": None, "started_at": None, "managed": True})
+
+    rows.sort(key=lambda r: (not r["managed"], r["task"] or ""))
+    return rows
 
 
 def _slugify_cwd(path: str) -> str:
@@ -145,9 +246,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 4400
+    global REPO_DIR
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    port = int(args[0]) if args and args[0].isdigit() else 4400
+    repo_args = [a for a in args if not a.isdigit()]
+    REPO_DIR = os.path.abspath(repo_args[0]) if repo_args else os.getcwd()
+
+    # Fail loudly at startup rather than serving 500s: a wrong repo dir is the
+    # difference between "no copies running" and "you're looking at the wrong repo".
+    try:
+        tasks = get_tasks()
+    except Exception as e:
+        print(f"error: cannot read parallel-task registry in {REPO_DIR}\n  {e}", file=sys.stderr)
+        print("hint: run from your repo root, or pass it: dashboard.py [port] <repo-dir>", file=sys.stderr)
+        raise SystemExit(1)
+
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"dashboard: http://127.0.0.1:{port}")
+    print(f"dashboard: http://127.0.0.1:{port}  (repo: {REPO_DIR}, {len(tasks)} copies)")
     server.serve_forever()
 
 
