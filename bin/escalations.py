@@ -144,3 +144,31 @@ def classify(record: dict) -> tuple[str, str]:
         return "tier2", f"{kind} is a mechanical call"
 
     return "tier3", f"unknown kind {kind!r} — defaulting to a human"
+
+
+def current_state(path: str) -> list[dict]:
+    """Fold the append-only log into the latest state of each record, in first-seen order."""
+    latest: dict[str, dict] = {}
+    order: list[str] = []
+    for rec in read_all(path):
+        rid = rec.get("id")
+        if not rid:
+            continue
+        if rid not in latest:
+            order.append(rid)
+        latest[rid] = rec
+    return [latest[rid] for rid in order]
+
+
+def record_answer(path: str, record_id: str, answer: str, decided_by: str) -> dict | None:
+    """Answer a record by appending its updated copy. Returns the update, or None if unknown id."""
+    for rec in current_state(path):
+        if rec.get("id") == record_id:
+            updated = dict(rec)
+            updated["answer"] = answer
+            updated["decided_by"] = decided_by
+            updated["status"] = "answered"
+            updated["answered_at"] = time.time()
+            append(path, updated)
+            return updated
+    return None

@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 
-from escalations import append, classify, new_record, read_all
+from escalations import append, classify, current_state, new_record, read_all, record_answer
 
 
 def _tmp():
@@ -275,6 +275,65 @@ def test_explicitly_null_evidence_is_not_disclosure():
         tier, reason = classify(new_record("s", "diff_review", "merge?", evidence=ev))
         assert tier == "tier3", f"{null_key}=None must not read as disclosed"
         assert null_key in reason
+
+
+def test_record_answer_appends_and_marks_answered():
+    path = _tmp()
+    try:
+        r = new_record("s1", "red_tests", "retry?")
+        append(path, r)
+        updated = record_answer(path, r["id"], "retry once", "manager")
+        assert updated is not None
+        assert updated["status"] == "answered"
+        assert updated["answer"] == "retry once"
+        assert updated["decided_by"] == "manager"
+        assert updated["answered_at"] is not None
+        # append-only: the original line is still there, the update is a second line
+        assert len(read_all(path)) == 2
+    finally:
+        os.unlink(path)
+
+
+def test_record_answer_unknown_id_returns_none():
+    path = _tmp()
+    try:
+        append(path, new_record("s", "k", "q"))
+        assert record_answer(path, "nope", "x", "manager") is None
+        assert len(read_all(path)) == 1
+    finally:
+        os.unlink(path)
+
+
+def test_current_state_folds_to_latest_per_id():
+    path = _tmp()
+    try:
+        a = new_record("s1", "red_tests", "q1")
+        b = new_record("s2", "diff_review", "q2")
+        append(path, a)
+        append(path, b)
+        record_answer(path, a["id"], "go", "human")
+        state = current_state(path)
+        assert len(state) == 2
+        by_id = {r["id"]: r for r in state}
+        assert by_id[a["id"]]["status"] == "answered"
+        assert by_id[a["id"]]["answer"] == "go"
+        assert by_id[b["id"]]["status"] == "open"
+    finally:
+        os.unlink(path)
+
+
+def test_current_state_preserves_first_seen_order():
+    path = _tmp()
+    try:
+        ids = []
+        for i in range(3):
+            r = new_record(f"s{i}", "red_tests", f"q{i}")
+            ids.append(r["id"])
+            append(path, r)
+        record_answer(path, ids[0], "done", "manager")
+        assert [r["id"] for r in current_state(path)] == ids
+    finally:
+        os.unlink(path)
 
 
 if __name__ == "__main__":
