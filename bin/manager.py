@@ -77,7 +77,8 @@ def validate_decision(decision, record: dict) -> str | None:
     if not isinstance(decision, dict):
         return "decision is not a JSON object"
     for field in ("answer", "reason", "confidence"):
-        if not decision.get(field):
+        value = decision.get(field)
+        if not isinstance(value, str) or not value.strip():
             return f"missing {field}"
     if decision["confidence"] not in ("high", "low"):
         return f"confidence must be high or low, got {decision['confidence']!r}"
@@ -127,7 +128,15 @@ def decide(record: dict, ask_model) -> dict:
     Anything the manager cannot settle cleanly degrades to needs_human — the failure mode of this
     function is "ask the person", never "guess".
     """
-    tier, reason = classify(record)
+    try:
+        tier, reason = classify(record)
+    except Exception as e:  # a malformed record must not abort the queue pass
+        return {
+            "outcome": "needs_human",
+            "answer": None,
+            "reason": f"could not classify this escalation: {e}",
+            "decided_by": None,
+        }
     if tier == "tier3":
         return {"outcome": "needs_human", "answer": None, "reason": reason, "decided_by": None}
 

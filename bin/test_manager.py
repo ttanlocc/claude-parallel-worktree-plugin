@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """assert-based checks for manager prompt building, decision parsing, and argv. Run: python3 bin/test_manager.py"""
 
+import json
+
 from escalations import new_record
 from manager import (
     MANAGER_MODEL,
@@ -231,6 +233,30 @@ def test_parser_crash_falls_back_to_human():
     out = decide(r, pathological)
     assert out["outcome"] == "needs_human"
     assert out["decided_by"] is None
+    assert "could not read" in out["reason"]
+
+
+def test_malformed_record_falls_back_to_human():
+    calls = []
+    spy = lambda rec: calls.append(rec) or '{"answer":"a","reason":"b","confidence":"high"}'
+
+    for bad in (
+        {"kind": "diff_review", "question": "q", "options": [], "evidence": "green"},
+        {"kind": "diff_review", "question": "q", "options": [], "evidence": {"changed_files": 42}},
+    ):
+        out = decide(bad, spy)
+        assert out["outcome"] == "needs_human", f"{bad} must degrade, not raise"
+        assert "classify" in out["reason"]
+    assert calls == [], "a record that cannot even be classified must not reach the model"
+
+
+def test_non_string_answer_is_rejected():
+    r = new_record("s", "red_tests", "retry?")
+    for bad in ({"do": "rm -rf"}, 123, ["a", "b"], True, "   "):
+        raw = json.dumps({"answer": bad, "reason": "r", "confidence": "high"})
+        out = decide(r, lambda rec, _raw=raw: _raw)
+        assert out["outcome"] == "needs_human", f"answer={bad!r} must not be delivered"
+        assert out["decided_by"] is None
 
 
 if __name__ == "__main__":
