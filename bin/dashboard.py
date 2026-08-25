@@ -71,6 +71,7 @@ from escalations import QUEUE_PATH, current_state, record_answer
 
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
+MAX_BODY_BYTES = 64 * 1024
 
 
 def get_escalations() -> dict:
@@ -265,13 +266,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             rid = parsed.path[len("/api/escalations/") : -len("/answer")]
             try:
                 length = int(self.headers.get("Content-Length") or 0)
+                if length > MAX_BODY_BYTES:
+                    self._json({"error": "request body too large"}, status=413)
+                    return
                 body = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("body must be a JSON object")
                 answer = (body.get("answer") or "").strip()
             except (ValueError, json.JSONDecodeError) as e:
                 self._json({"error": f"bad request body: {e}"}, status=400)
                 return
             if not answer:
                 self._json({"error": "answer is required"}, status=400)
+                return
+            try:
+                state = {r["id"]: r for r in current_state(QUEUE_PATH) if r.get("id")}
+            except OSError as e:
+                self._json({"error": str(e)}, status=500)
+                return
+            existing = state.get(rid)
+            if existing is None:
+                self._json({"error": f"no escalation {rid}"}, status=404)
+                return
+            # Decline rather than append a conflicting state: someone may already have acted
+            # on the existing answer, and this endpoint cannot undo that.
+            if existing.get("status") != "needs_human":
+                self._json(
+                    {"error": f"escalation {rid} is already {existing.get('status')}", "record": existing},
+                    status=409,
+                )
                 return
             try:
                 updated = record_answer(QUEUE_PATH, rid, answer, "human")
