@@ -8,6 +8,8 @@ without spawning a model.
 import json
 import subprocess
 
+from escalations import classify
+
 MANAGER_MODEL = "claude-fable-5"
 
 _INSTRUCTIONS = """You are the manager for a team of autonomous coding sessions.
@@ -117,3 +119,55 @@ def deliver_answer(session_id: str, message: str, timeout: int = 180) -> str:
         timeout=timeout,
     )
     return result.stdout
+
+
+def decide(record: dict, ask_model) -> dict:
+    """Route one record. `ask_model(record) -> str` is injected so this stays testable.
+
+    Anything the manager cannot settle cleanly degrades to needs_human — the failure mode of this
+    function is "ask the person", never "guess".
+    """
+    tier, reason = classify(record)
+    if tier == "tier3":
+        return {"outcome": "needs_human", "answer": None, "reason": reason, "decided_by": None}
+
+    try:
+        raw = ask_model(record)
+    except Exception as e:  # a dead model must not wedge the queue
+        return {"outcome": "needs_human", "answer": None, "reason": f"manager call failed: {e}", "decided_by": None}
+
+    try:
+        decision = parse_decision(raw)
+    except Exception as e:  # a pathological reply must not abort the queue pass
+        return {
+            "outcome": "needs_human",
+            "answer": None,
+            "reason": f"could not read the manager's reply: {e}",
+            "decided_by": None,
+        }
+    if decision is None:
+        return {
+            "outcome": "needs_human",
+            "answer": None,
+            "reason": "could not parse a decision from the manager's reply",
+            "decided_by": None,
+        }
+
+    invalid = validate_decision(decision, record)
+    if invalid:
+        return {
+            "outcome": "needs_human",
+            "answer": None,
+            "reason": f"manager returned an unusable decision: {invalid}",
+            "decided_by": None,
+        }
+
+    if decision["confidence"] != "high":
+        return {
+            "outcome": "needs_human",
+            "answer": None,
+            "reason": f"manager declined with low confidence: {decision['reason']}",
+            "decided_by": None,
+        }
+
+    return {"outcome": "answered", "answer": decision["answer"], "reason": decision["reason"], "decided_by": "manager"}

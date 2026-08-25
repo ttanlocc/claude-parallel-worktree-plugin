@@ -128,6 +128,111 @@ def test_parse_decision_handles_nested_inside_prose_and_fences():
     assert got["evidence"]["tests"] == "green"
 
 
+from manager import decide
+
+
+def _ok(payload):
+    return lambda record: payload
+
+
+def test_tier3_record_never_calls_the_model():
+    called = []
+
+    def spy(record):
+        called.append(record)
+        return '{"answer": "x", "reason": "y", "confidence": "high"}'
+
+    r = new_record("s", "push_or_pr", "push to main?")
+    out = decide(r, spy)
+    assert out["outcome"] == "needs_human"
+    assert called == [], "tier3 must not spend a model call"
+    assert "human" in out["reason"].lower() or "push_or_pr" in out["reason"]
+
+
+def test_tier2_high_confidence_is_answered():
+    r = new_record("s", "red_tests", "retry?")
+    out = decide(r, _ok('{"answer": "retry once", "reason": "looks flaky", "confidence": "high"}'))
+    assert out["outcome"] == "answered"
+    assert out["answer"] == "retry once"
+    assert out["decided_by"] == "manager"
+
+
+def test_tier2_low_confidence_falls_back_to_human():
+    r = new_record("s", "red_tests", "retry?")
+    out = decide(r, _ok('{"answer": "maybe", "reason": "unclear", "confidence": "low"}'))
+    assert out["outcome"] == "needs_human"
+    assert "confidence" in out["reason"].lower()
+
+
+def test_tier2_unparseable_reply_falls_back_to_human():
+    r = new_record("s", "red_tests", "retry?")
+    out = decide(r, _ok("I'm not sure what you mean."))
+    assert out["outcome"] == "needs_human"
+    assert "pars" in out["reason"].lower()
+
+
+def test_tier2_invalid_decision_falls_back_to_human():
+    r = new_record("s", "pick_implementation", "which?", options=["A", "B"])
+    out = decide(r, _ok('{"answer": "C", "reason": "r", "confidence": "high"}'))
+    assert out["outcome"] == "needs_human"
+    assert "option" in out["reason"].lower()
+
+
+def test_model_failure_falls_back_to_human():
+    def boom(record):
+        raise RuntimeError("model unavailable")
+
+    r = new_record("s", "red_tests", "retry?")
+    out = decide(r, boom)
+    assert out["outcome"] == "needs_human"
+    assert "model unavailable" in out["reason"]
+
+
+def test_clean_diff_gets_approved_by_manager():
+    r = new_record(
+        "s",
+        "diff_review",
+        "merge?",
+        evidence={
+            "tests": "green",
+            "deps_added": [],
+            "changed_files": ["bin/dashboard.py"],
+            "migration": False,
+        },
+    )
+    out = decide(r, _ok('{"answer": "approve", "reason": "clean", "confidence": "high"}'))
+    assert out["outcome"] == "answered"
+    assert out["answer"] == "approve"
+
+
+def test_diff_touching_auth_reaches_human_without_model_call():
+    called = []
+    r = new_record(
+        "s",
+        "diff_review",
+        "merge?",
+        evidence={
+            "tests": "green",
+            "deps_added": [],
+            "migration": False,
+            "changed_files": ["services/gateway/auth/token.py"],
+        },
+    )
+    out = decide(r, lambda rec: called.append(rec) or '{"answer":"a","reason":"b","confidence":"high"}')
+    assert out["outcome"] == "needs_human"
+    assert called == []
+
+
+def test_parser_crash_falls_back_to_human():
+    def pathological(record):
+        return '{"a":' * 20000 + "1" + "}" * 20000
+
+    r = new_record("s", "red_tests", "retry?")
+    out = decide(r, pathological)
+    assert out["outcome"] == "needs_human"
+    assert out["decided_by"] is None
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
