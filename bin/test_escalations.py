@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 
-from escalations import append, new_record, read_all
+from escalations import append, classify, new_record, read_all
 
 
 def _tmp():
@@ -76,9 +76,6 @@ def test_read_all_skips_malformed_lines():
         assert got[0]["question"] == "good"
     finally:
         os.unlink(path)
-
-
-from escalations import classify
 
 
 def test_tier2_mechanical_kinds():
@@ -185,6 +182,90 @@ def test_unknown_kind_defaults_to_tier3():
     tier, reason = classify(new_record("s", "something_new", "q"))
     assert tier == "tier3"
     assert "unknown" in reason.lower()
+
+
+def test_diff_must_disclose_every_gated_field():
+    # Only tests disclosed — the other three are simply absent.
+    r = new_record("s", "diff_review", "merge?", evidence={"tests": "green"})
+    tier, reason = classify(r)
+    assert tier == "tier3", "an undisclosed field must not read as compliance"
+    assert "disclose" in reason
+
+    for missing in ("deps_added", "migration", "changed_files"):
+        ev = {"tests": "green", "deps_added": [], "migration": False, "changed_files": ["bin/x.py"]}
+        del ev[missing]
+        tier, reason = classify(new_record("s", "diff_review", "merge?", evidence=ev))
+        assert tier == "tier3", f"missing {missing} must force tier3"
+        assert missing in reason
+
+
+def test_changed_files_as_string_still_scanned():
+    r = new_record(
+        "s",
+        "diff_review",
+        "merge?",
+        evidence={
+            "tests": "green",
+            "deps_added": [],
+            "migration": False,
+            "changed_files": "services/gateway/auth/token.py",
+        },
+    )
+    tier, reason = classify(r)
+    assert tier == "tier3"
+    assert "sensitive" in reason
+
+
+def test_tier3_evidence_beats_any_tier2_kind():
+    for ev, why in (
+        ({"deps_added": ["requests"]}, "dependency"),
+        ({"migration": True}, "migration"),
+        ({"changed_files": ["services/auth/token.py"]}, "sensitive path"),
+    ):
+        for kind in ("red_tests", "looping", "pick_implementation", "scope_question"):
+            tier, reason = classify(new_record("s", kind, "q", evidence=ev))
+            assert tier == "tier3", f"{kind} + {why} must be tier3, got {reason}"
+
+
+def test_secret_and_migration_shapes_are_sensitive():
+    for path in (
+        "deploy/private_key.pem",
+        "infra/id_rsa",
+        "etc/passwd",
+        "app/.netrc",
+        "app/.npmrc",
+        "keystore/prod.jks",
+        "db/schema.sql",
+        "alembic/versions/0042_add.py",
+    ):
+        r = new_record(
+            "s",
+            "diff_review",
+            "merge?",
+            evidence={
+                "tests": "green",
+                "deps_added": [],
+                "migration": False,
+                "changed_files": ["bin/ok.py", path],
+            },
+        )
+        tier, reason = classify(r)
+        assert tier == "tier3", f"{path} should be sensitive ({reason})"
+
+
+def test_cost_anomaly_names_itself():
+    tier, reason = classify(new_record("s", "cost_anomaly", "spend spiked"))
+    assert tier == "tier3"
+    assert "cost_anomaly" in reason
+    assert "unknown" not in reason.lower()
+
+
+def test_deps_added_as_string_reads_cleanly():
+    r = new_record("s", "diff_review", "merge?", evidence={"deps_added": "requests"})
+    tier, reason = classify(r)
+    assert tier == "tier3"
+    assert "requests" in reason
+    assert "r, e, q" not in reason
 
 
 if __name__ == "__main__":

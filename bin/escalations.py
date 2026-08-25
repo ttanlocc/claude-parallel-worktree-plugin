@@ -54,7 +54,24 @@ def read_all(path: str) -> list[dict]:
 
 
 # Path fragments that make a diff a human's call regardless of how clean it looks.
-SENSITIVE_PATH_MARKERS = ("auth", "secret", ".env", "credential", "migration", "token", "password")
+SENSITIVE_PATH_MARKERS = (
+    "auth",
+    "secret",
+    ".env",
+    "credential",
+    "migration",
+    "token",
+    "password",
+    "passwd",
+    ".pem",
+    "id_rsa",
+    ".key",
+    "keystore",
+    ".netrc",
+    ".npmrc",
+    "schema.sql",
+    "alembic/",
+)
 
 _TIER2_KINDS = {"red_tests", "looping", "pick_implementation", "scope_question"}
 _TIER3_KINDS = {
@@ -63,43 +80,61 @@ _TIER3_KINDS = {
     "credentials",
     "spec_ambiguity",
     "no_convergence",
+    "cost_anomaly",
     "worktree_collision",
 }
 
 
+def _as_text(value) -> str:
+    """Render a field for a reason string whether it arrived as a str or a list."""
+    if isinstance(value, str):
+        return value
+    return ", ".join(str(v) for v in value)
+
+
 def _sensitive(changed_files) -> str | None:
+    # A bare string is one path, not a sequence of characters — iterating it per-character
+    # would match no marker and silently pass every secret file as clean.
+    if isinstance(changed_files, str):
+        changed_files = [changed_files]
     for path in changed_files or []:
-        low = path.lower()
+        low = str(path).lower()
         for marker in SENSITIVE_PATH_MARKERS:
             if marker in low:
-                return path
+                return str(path)
     return None
 
 
 def classify(record: dict) -> tuple[str, str]:
     """Route one record: ("tier2", reason) the manager may decide, or ("tier3", reason) for a human.
 
-    Tier 3 wins ties — anything that smells irreversible or security-shaped goes to the human even
-    when the rest of the record looks mechanical.
+    Tier 3 wins ties — these signals hold whatever the kind is, so a mechanical-looking record
+    carrying an irreversible, dependency, migration, or secret-shaped change still goes to a human.
     """
     ev = record.get("evidence") or {}
     kind = record.get("kind")
 
     if ev.get("irreversible"):
         return "tier3", "evidence marks this irreversible"
+    if ev.get("deps_added"):
+        return "tier3", f"adds dependency: {_as_text(ev['deps_added'])}"
+    if ev.get("migration"):
+        return "tier3", "changes a migration or schema"
+    hit = _sensitive(ev.get("changed_files"))
+    if hit:
+        return "tier3", f"touches a sensitive path: {hit}"
+
     if kind in _TIER3_KINDS:
         return "tier3", f"{kind} always needs a human"
 
     if kind == "diff_review":
         if ev.get("tests") != "green":
             return "tier3", f"tests are {ev.get('tests') or 'unknown'}, not green"
-        if ev.get("deps_added"):
-            return "tier3", f"adds dependency: {', '.join(ev['deps_added'])}"
-        if ev.get("migration"):
-            return "tier3", "changes a migration or schema"
-        hit = _sensitive(ev.get("changed_files"))
-        if hit:
-            return "tier3", f"touches a sensitive path: {hit}"
+        # Silence is not consent. The record's author benefits from approval, so an undisclosed
+        # field is treated as undisclosed rather than as clean.
+        for key in ("deps_added", "migration", "changed_files"):
+            if key not in ev:
+                return "tier3", f"evidence does not disclose {key}"
         return "tier2", "tests green, no new deps, no migration, no sensitive path"
 
     if kind in _TIER2_KINDS:
