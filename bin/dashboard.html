@@ -469,6 +469,12 @@ async function answerEscalation(id, answer) {
   }
 }
 
+function asList(v) {
+  if (Array.isArray(v)) return v;
+  if (v == null) return [];
+  return [v];
+}
+
 function renderEscalation(r) {
   const box = el("div", "esc");
   box.append(el("div", "esc-q", r.question || "(no question)"));
@@ -480,10 +486,10 @@ function renderEscalation(r) {
   if (r.session_id) chips.append(pill("surface", r.session_id));
   if (ev.branch) chips.append(pill("surface", ev.branch));
   if (ev.diff_stat) chips.append(pill("surface", ev.diff_stat));
-  (ev.deps_added || []).forEach(d => chips.append(pill("blocked", "new dep: " + d)));
+  asList(ev.deps_added).forEach(d => chips.append(pill("blocked", "new dep: " + d)));
   if (chips.childNodes.length) box.append(chips);
 
-  const files = ev.changed_files || [];
+  const files = asList(ev.changed_files);
   if (files.length) {
     const list = el("div", "esc-files");
     files.slice(0, 12).forEach(f => {
@@ -543,7 +549,16 @@ async function pollEscalations() {
   const list = document.getElementById("decisions");
   const pending = data.needs_human || [];
   panel.style.display = pending.length ? "" : "none";
-  if (pending.length) list.replaceChildren(...pending.map(renderEscalation));
+  if (pending.length) {
+    const cards = pending.map(r => {
+      try {
+        return renderEscalation(r);
+      } catch (e) {
+        return el("div", "esc", `Could not render escalation ${r.id || "?"}: ${e.message || e}`);
+      }
+    });
+    list.replaceChildren(...cards);
+  }
   renderAudit(data.recent_decisions || []);
 }
 
