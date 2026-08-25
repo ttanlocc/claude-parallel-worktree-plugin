@@ -286,6 +286,91 @@ def test_decide_degrades_on_an_unanticipated_error():
     assert "options lookup exploded" in out["reason"]
 
 
+import os as _os
+import tempfile as _tempfile
+
+from escalations import append as _append
+from escalations import current_state as _current_state
+from manager_daemon import process_open
+
+
+def _queue():
+    fd, path = _tempfile.mkstemp(suffix=".jsonl")
+    _os.close(fd)
+    return path
+
+
+def test_process_open_answers_tier2_and_delivers():
+    path = _queue()
+    delivered = []
+    try:
+        r = new_record("sess-9", "red_tests", "retry?")
+        _append(path, r)
+        acted = process_open(
+            path,
+            ask_model=lambda rec: '{"answer": "retry once", "reason": "flaky", "confidence": "high"}',
+            deliver=lambda sid, msg: delivered.append((sid, msg)),
+        )
+        assert len(acted) == 1
+        assert acted[0]["outcome"] == "answered"
+        state = {x["id"]: x for x in _current_state(path)}
+        assert state[r["id"]]["status"] == "answered"
+        assert state[r["id"]]["decided_by"] == "manager"
+        assert delivered == [("sess-9", "retry once")]
+    finally:
+        _os.unlink(path)
+
+
+def test_process_open_leaves_tier3_for_the_human():
+    path = _queue()
+    delivered = []
+    try:
+        r = new_record("sess-9", "push_or_pr", "push?")
+        _append(path, r)
+        acted = process_open(path, ask_model=lambda rec: "", deliver=lambda s, m: delivered.append(1))
+        assert len(acted) == 1
+        assert acted[0]["outcome"] == "needs_human"
+        state = {x["id"]: x for x in _current_state(path)}
+        assert state[r["id"]]["status"] == "needs_human"
+        assert delivered == [], "nothing is delivered until a human answers"
+    finally:
+        _os.unlink(path)
+
+
+def test_process_open_skips_already_handled_records():
+    path = _queue()
+    try:
+        r = new_record("sess-9", "red_tests", "retry?")
+        _append(path, r)
+        process_open(path, lambda rec: '{"answer": "a", "reason": "b", "confidence": "high"}', lambda s, m: None)
+        again = process_open(
+            path, lambda rec: '{"answer": "a", "reason": "b", "confidence": "high"}', lambda s, m: None
+        )
+        assert again == [], "an answered record must not be reprocessed"
+    finally:
+        _os.unlink(path)
+
+
+def test_process_open_delivers_human_answers_once():
+    path = _queue()
+    delivered = []
+    try:
+        r = new_record("sess-9", "push_or_pr", "push?")
+        _append(path, r)
+        process_open(path, lambda rec: "", lambda s, m: delivered.append((s, m)))
+        # a human answers through the dashboard
+        from escalations import record_answer as _record_answer
+
+        _record_answer(path, r["id"], "yes, push it", "human")
+        process_open(path, lambda rec: "", lambda s, m: delivered.append((s, m)))
+        assert delivered == [("sess-9", "yes, push it")]
+        # and not again on the next pass
+        process_open(path, lambda rec: "", lambda s, m: delivered.append((s, m)))
+        assert len(delivered) == 1
+    finally:
+        _os.unlink(path)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
