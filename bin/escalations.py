@@ -131,9 +131,12 @@ def classify(record: dict) -> tuple[str, str]:
         if ev.get("tests") != "green":
             return "tier3", f"tests are {ev.get('tests') or 'unknown'}, not green"
         # Silence is not consent. The record's author benefits from approval, so an undisclosed
-        # field is treated as undisclosed rather than as clean.
+        # field is treated as undisclosed rather than as clean. `key in ev` is not enough:
+        # an explicit null is a routine shape for model-authored JSON, and the party filling
+        # in evidence is the party asking for approval — so an undisclosed value must read as
+        # undisclosed, never as clean.
         for key in ("deps_added", "migration", "changed_files"):
-            if key not in ev:
+            if ev.get(key) is None:
                 return "tier3", f"evidence does not disclose {key}"
         return "tier2", "tests green, no new deps, no migration, no sensitive path"
 

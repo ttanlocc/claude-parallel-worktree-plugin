@@ -268,6 +268,15 @@ def test_deps_added_as_string_reads_cleanly():
     assert "r, e, q" not in reason
 
 
+def test_explicitly_null_evidence_is_not_disclosure():
+    for null_key in ("deps_added", "migration", "changed_files"):
+        ev = {"tests": "green", "deps_added": [], "migration": False, "changed_files": ["bin/x.py"]}
+        ev[null_key] = None
+        tier, reason = classify(new_record("s", "diff_review", "merge?", evidence=ev))
+        assert tier == "tier3", f"{null_key}=None must not read as disclosed"
+        assert null_key in reason
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
