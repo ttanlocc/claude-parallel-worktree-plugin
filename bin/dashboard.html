@@ -149,6 +149,28 @@
   .empty { padding: 34px 22px; text-align: center; color: var(--faint); font-size: 13.5px; }
   .empty.err { color: var(--stop-fg); }
   svg { display: block; }
+
+  .esc { padding: 18px 22px; border-top: 1px solid var(--line); }
+  .esc:first-child { border-top: 0; }
+  .esc-q { font-size: 14.5px; font-weight: 650; color: var(--navy); }
+  .esc-why { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+  .esc-ev { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .esc-files { margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .esc-file { display: flex; align-items: center; gap: 10px; padding: 9px 13px; border-top: 1px solid var(--line);
+              font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
+  .esc-file:first-child { border-top: 0; }
+  .esc-file .add { color: var(--ok-fg); margin-left: auto; }
+  .esc-file .del { color: var(--stop-fg); }
+  .esc-actions { display: flex; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
+  .btn.primary { background: var(--navy); border-color: var(--navy); color: #fff; font-weight: 600; }
+  .btn.primary:hover { background: #12305c; border-color: #12305c; }
+  .audit-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 22px; border-top: 1px solid var(--line); }
+  .audit-row:first-child { border-top: 0; }
+  .audit-body { flex: 1; min-width: 0; }
+  .audit-q { font-size: 13px; color: var(--ink); }
+  .audit-a { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+  .audit-a b { color: var(--ok-fg); font-weight: 650; }
+  .audit-age { font-family: var(--mono); font-size: 11px; color: var(--faint); flex-shrink: 0; }
 </style>
 </head>
 <body>
@@ -184,6 +206,14 @@
   <main id="content">
     <h2 class="page-title">Runtime health &amp; logs</h2>
 
+    <section class="panel" id="decisions-panel" style="margin-bottom:20px; display:none;">
+      <div class="panel-head">
+        <h2>Decision required</h2>
+        <p>The manager stopped here because this one is yours to make.</p>
+      </div>
+      <div id="decisions"></div>
+    </section>
+
     <section class="stats" id="stats"></section>
 
     <div class="cols">
@@ -209,6 +239,14 @@
         <p id="log-sub">Select a session above.</p>
       </div>
       <div id="logrows"></div>
+    </section>
+
+    <section class="panel" style="margin-top:16px;">
+      <div class="panel-head">
+        <h2>Decided for you</h2>
+        <p>What the manager settled without interrupting you.</p>
+      </div>
+      <div id="audit"></div>
     </section>
   </main>
 </div>
@@ -415,6 +453,102 @@ async function pollLog() {
   box.replaceChildren(frag);
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
+
+async function answerEscalation(id, answer) {
+  try {
+    const res = await fetch(`/api/escalations/${encodeURIComponent(id)}/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    pollEscalations();
+  } catch (e) {
+    alert("Could not send that answer: " + (e.message || e));
+  }
+}
+
+function renderEscalation(r) {
+  const box = el("div", "esc");
+  box.append(el("div", "esc-q", r.question || "(no question)"));
+  if (r.reason) box.append(el("div", "esc-why", r.reason));
+
+  const ev = r.evidence || {};
+  const chips = el("div", "esc-ev");
+  if (ev.tests) chips.append(pill(ev.tests === "green" ? "done" : "blocked", "tests " + ev.tests));
+  if (r.session_id) chips.append(pill("surface", r.session_id));
+  if (ev.branch) chips.append(pill("surface", ev.branch));
+  if (ev.diff_stat) chips.append(pill("surface", ev.diff_stat));
+  (ev.deps_added || []).forEach(d => chips.append(pill("blocked", "new dep: " + d)));
+  if (chips.childNodes.length) box.append(chips);
+
+  const files = ev.changed_files || [];
+  if (files.length) {
+    const list = el("div", "esc-files");
+    files.slice(0, 12).forEach(f => {
+      const row = el("div", "esc-file");
+      row.append(el("span", null, typeof f === "string" ? f : f.path || String(f)));
+      if (f && f.additions != null) row.append(el("span", "add", "+" + f.additions));
+      if (f && f.deletions != null) row.append(el("span", "del", "−" + f.deletions));
+      list.append(row);
+    });
+    if (files.length > 12) list.append(el("div", "esc-file", `… ${files.length - 12} more`));
+    box.append(list);
+  }
+
+  const actions = el("div", "esc-actions");
+  const options = (r.options && r.options.length) ? r.options : ["Approve", "Reject"];
+  options.forEach((opt, i) => {
+    const b = el("button", "btn" + (i === 0 ? " primary" : ""), opt);
+    b.onclick = () => answerEscalation(r.id, opt);
+    actions.append(b);
+  });
+  box.append(actions);
+  return box;
+}
+
+function renderAudit(rows) {
+  const box = document.getElementById("audit");
+  if (!rows.length) {
+    box.replaceChildren(el("div", "empty", "The manager hasn't had to decide anything yet."));
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  rows.forEach(r => {
+    const row = el("div", "audit-row");
+    row.append(el("span", "dot"));
+    const body = el("div", "audit-body");
+    body.append(el("div", "audit-q", r.question || ""));
+    const a = el("div", "audit-a");
+    a.append(el("b", null, r.answer || ""));
+    a.append(document.createTextNode(" — " + (r.reason || "")));
+    body.append(a);
+    row.append(body, el("span", "audit-age", fmtAge((r.answered_at || 0) * 1000)));
+    frag.append(row);
+  });
+  box.replaceChildren(frag);
+}
+
+async function pollEscalations() {
+  let data;
+  try {
+    const res = await fetch("/api/escalations");
+    data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+  } catch (e) {
+    return;  // the sessions view still works if this endpoint is down
+  }
+  const panel = document.getElementById("decisions-panel");
+  const list = document.getElementById("decisions");
+  const pending = data.needs_human || [];
+  panel.style.display = pending.length ? "" : "none";
+  if (pending.length) list.replaceChildren(...pending.map(renderEscalation));
+  renderAudit(data.recent_decisions || []);
+}
+
+pollEscalations();
+setInterval(pollEscalations, 2000);
 
 pollTasks();
 pollLog();
