@@ -34,6 +34,10 @@ or add as a marketplace source and install by name — see Claude Code plugin do
 - `bin/dashboard.py` / `bin/dashboard.html` — local web dashboard (see Dashboard below):
   status + live log per running copy, reading `parallel-task.sh list --json` and each task's
   session transcript. Stdlib-only, no build step.
+- `bin/escalations.py` / `bin/manager.py` / `bin/manager_daemon.py` — the manager tier: workers
+  append what they cannot decide to a queue, a short-lived Fable manager settles the mechanical
+  ones and answers the worker directly, and only irreversible or genuinely ambiguous calls reach
+  you in the dashboard. Every automatic decision is logged where you can audit it.
 
 All four are added to `PATH` while the plugin is active — the skill invokes them by bare
 name (`parallel-task.sh`, `dev-stack.sh`, `dev-native.sh`, `dashboard.py`).

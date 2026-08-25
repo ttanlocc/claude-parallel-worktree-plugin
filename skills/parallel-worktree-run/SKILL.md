@@ -131,6 +131,37 @@ for its live status, or `claude attach <short-id>` to check in directly. When it
 its summary to the user and ask whether to keep that copy running (for review / follow-up) or tear it
 down with `rm`.
 
+## Step 6 — escalate instead of stalling
+
+When a dispatched session hits something it cannot decide alone, it appends one record to the
+escalation queue rather than stopping and waiting for you:
+
+```bash
+python3 - <<'PY'
+import sys; sys.path.insert(0, "<plugin bin dir>")
+from escalations import QUEUE_PATH, append, new_record
+append(QUEUE_PATH, new_record(
+    session_id="<this session's id>",
+    kind="diff_review",              # or red_tests / looping / pick_implementation / scope_question
+    question="Merge the adapter change?",
+    options=["Approve", "Reject"],
+    evidence={"tests": "green", "branch": "feature/x", "deps_added": [],
+              "migration": False, "changed_files": ["bin/dashboard.py"]},
+))
+PY
+```
+
+`manager_daemon.py` picks it up within seconds. Mechanical calls are settled by the manager and
+delivered straight back into the worker; anything irreversible, security-shaped, or genuinely
+ambiguous waits for you in the dashboard's "Decision required" panel. Every manager decision is
+listed under "Decided for you" so nothing is decided on your behalf invisibly.
+
+Start the daemon alongside the dashboard:
+
+```bash
+manager_daemon.py       # watches ~/.claude/hermes/escalations.jsonl
+```
+
 ## Troubleshooting
 
 - **`start` fails partway (e.g. port collision on `up -d`)**: `cmd_start` now rolls back the
