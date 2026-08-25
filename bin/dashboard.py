@@ -67,8 +67,20 @@ import threading
 import time
 from urllib.parse import urlparse
 
+from escalations import QUEUE_PATH, current_state, record_answer
+
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
+
+
+def get_escalations() -> dict:
+    """What the human still has to answer, and what the manager already decided for them."""
+    state = current_state(QUEUE_PATH)
+    needs_human = [r for r in state if r.get("status") == "needs_human"]
+    decisions = [r for r in state if r.get("decided_by") == "manager"]
+    decisions.sort(key=lambda r: r.get("answered_at") or 0, reverse=True)
+    return {"needs_human": needs_human, "recent_decisions": decisions[:20]}
+
 
 # The repo whose copies we report on. Set once in main(); `parallel-task.sh` finds
 # its registry via `git rev-parse --show-toplevel`, so this must be inside the
@@ -224,6 +236,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e)}, status=500)
             return
+        if parsed.path == "/api/escalations":
+            try:
+                self._json(get_escalations())
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+            return
         if parsed.path == "/":
             html_path = os.path.join(PLUGIN_BIN, "dashboard.html")
             if not os.path.exists(html_path):
@@ -237,6 +255,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/escalations/") and parsed.path.endswith("/answer"):
+            rid = parsed.path[len("/api/escalations/") : -len("/answer")]
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                answer = (body.get("answer") or "").strip()
+            except (ValueError, json.JSONDecodeError) as e:
+                self._json({"error": f"bad request body: {e}"}, status=400)
+                return
+            if not answer:
+                self._json({"error": "answer is required"}, status=400)
+                return
+            try:
+                updated = record_answer(QUEUE_PATH, rid, answer, "human")
+            except OSError as e:
+                self._json({"error": str(e)}, status=500)
+                return
+            if updated is None:
+                self._json({"error": f"no escalation {rid}"}, status=404)
+                return
+            self._json({"ok": True, "record": updated})
             return
         self.send_response(404)
         self.end_headers()
