@@ -122,7 +122,7 @@ def deliver_answer(session_id: str, message: str, timeout: int = 180) -> str:
     return result.stdout
 
 
-def decide(record: dict, ask_model) -> dict:
+def _route(record: dict, ask_model) -> dict:
     """Route one record. `ask_model(record) -> str` is injected so this stays testable.
 
     Anything the manager cannot settle cleanly degrades to needs_human — the failure mode of this
@@ -180,3 +180,21 @@ def decide(record: dict, ask_model) -> dict:
         }
 
     return {"outcome": "answered", "answer": decision["answer"], "reason": decision["reason"], "decided_by": "manager"}
+
+
+def decide(record: dict, ask_model) -> dict:
+    """Route one record, degrading to needs_human on anything at all.
+
+    The specific guards inside _route give a human a useful reason. This outer catch exists for
+    what nobody anticipated: records are authored by other models, and an unguarded raise here
+    would abort the caller's whole queue pass, silently stranding every record behind it.
+    """
+    try:
+        return _route(record, ask_model)
+    except Exception as e:
+        return {
+            "outcome": "needs_human",
+            "answer": None,
+            "reason": f"could not route this escalation: {e}",
+            "decided_by": None,
+        }

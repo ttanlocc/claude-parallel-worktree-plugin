@@ -259,6 +259,28 @@ def test_non_string_answer_is_rejected():
         assert out["decided_by"] is None
 
 
+def test_malformed_options_falls_back_to_human():
+    # A worker emitting a non-list `options` must not crash the router.
+    for bad_options in (42, 3.14, True):
+        r = new_record("s", "pick_implementation", "which?")
+        r["options"] = bad_options
+        out = decide(r, lambda rec: '{"answer": "A", "reason": "r", "confidence": "high"}')
+        assert out["outcome"] == "needs_human", f"options={bad_options!r} must degrade, not raise"
+        assert out["decided_by"] is None
+
+
+def test_decide_degrades_on_an_unanticipated_error():
+    # Whatever breaks inside routing, the caller gets a decision object, never an exception.
+    class Exploding(dict):
+        def get(self, *a, **k):
+            raise RuntimeError("boom")
+
+    out = decide(Exploding(), lambda rec: "")
+    assert out["outcome"] == "needs_human"
+    assert out["decided_by"] is None
+    assert "boom" in out["reason"]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
