@@ -339,14 +339,15 @@ def test_process_open_leaves_tier3_for_the_human():
 
 def test_process_open_skips_already_handled_records():
     path = _queue()
+    delivered = []
     try:
         r = new_record("sess-9", "red_tests", "retry?")
         _append(path, r)
-        process_open(path, lambda rec: '{"answer": "a", "reason": "b", "confidence": "high"}', lambda s, m: None)
-        again = process_open(
-            path, lambda rec: '{"answer": "a", "reason": "b", "confidence": "high"}', lambda s, m: None
-        )
+        answer = '{"answer": "a", "reason": "b", "confidence": "high"}'
+        process_open(path, lambda rec: answer, lambda s, m: delivered.append((s, m)))
+        again = process_open(path, lambda rec: answer, lambda s, m: delivered.append((s, m)))
         assert again == [], "an answered record must not be reprocessed"
+        assert delivered == [("sess-9", "a")], "must not be silently re-delivered on the next pass"
     finally:
         _os.unlink(path)
 
@@ -367,6 +368,64 @@ def test_process_open_delivers_human_answers_once():
         # and not again on the next pass
         process_open(path, lambda rec: "", lambda s, m: delivered.append((s, m)))
         assert len(delivered) == 1
+    finally:
+        _os.unlink(path)
+
+
+def test_a_failed_delivery_is_retried_not_marked_delivered():
+    path = _queue()
+    try:
+        r = new_record("sess-dead", "red_tests", "retry?")
+        _append(path, r)
+        attempts = []
+
+        def flaky(sid, msg):
+            attempts.append((sid, msg))
+            if len(attempts) == 1:
+                raise RuntimeError("session is gone")
+
+        answer = '{"answer": "retry once", "reason": "flaky", "confidence": "high"}'
+        process_open(path, lambda rec: answer, flaky)
+        state = {x["id"]: x for x in _current_state(path)}
+        assert not state[r["id"]].get("delivered"), "a failed delivery must not be marked delivered"
+
+        process_open(path, lambda rec: answer, flaky)
+        assert len(attempts) == 2, "the answer must be retried, not dropped"
+        state = {x["id"]: x for x in _current_state(path)}
+        assert state[r["id"]].get("delivered") is True
+    finally:
+        _os.unlink(path)
+
+
+def test_an_undeliverable_answer_reaches_a_human():
+    path = _queue()
+    try:
+        r = new_record("sess-dead", "red_tests", "retry?")
+        _append(path, r)
+        answer = '{"answer": "retry once", "reason": "flaky", "confidence": "high"}'
+
+        def always_fails(sid, msg):
+            raise RuntimeError("session is gone")
+
+        for _ in range(4):
+            process_open(path, lambda rec: answer, always_fails)
+        state = {x["id"]: x for x in _current_state(path)}
+        assert state[r["id"]]["status"] == "needs_human", "an undeliverable answer must surface"
+        assert "could not deliver" in state[r["id"]]["reason"]
+    finally:
+        _os.unlink(path)
+
+
+def test_a_manager_answer_is_delivered_exactly_once_ever():
+    path = _queue()
+    try:
+        r = new_record("sess-1", "red_tests", "retry?")
+        _append(path, r)
+        delivered = []
+        answer = '{"answer": "retry once", "reason": "flaky", "confidence": "high"}'
+        for _ in range(5):
+            process_open(path, lambda rec: answer, lambda s, m: delivered.append((s, m)))
+        assert delivered == [("sess-1", "retry once")], f"expected exactly one delivery, got {delivered}"
     finally:
         _os.unlink(path)
 
