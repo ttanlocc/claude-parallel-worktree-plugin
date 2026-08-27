@@ -8,10 +8,12 @@ import tempfile
 
 import dashboard
 from dashboard import (
+    _build_dispatch_prompt,
     _fetch_ado_description,
     _find_ado_links,
     _shape_ado_ticket,
     _strip_html,
+    _ticket_task_slug,
     get_ado_backlog,
     render_task_log,
     render_transcript_line,
@@ -279,6 +281,40 @@ def test_fetch_ado_description_degrades_on_timeout():
         assert result == ""
     finally:
         subprocess.run = original_run
+
+
+def test_ticket_task_slug_kebab_cases_and_truncates():
+    assert _ticket_task_slug("Fix the Setpoint Guard!") == "fix-the-setpoint-guard"
+    long_title = "A very long ticket title that goes on and on past forty characters easily"
+    slug = _ticket_task_slug(long_title)
+    assert len(slug) <= 40
+    assert slug == slug.lower()
+    assert " " not in slug
+
+
+def test_ticket_task_slug_handles_non_ascii():
+    assert _ticket_task_slug("Cùng 1 input, câu trả lời không đổi") != ""
+
+
+def test_build_dispatch_prompt_includes_all_ticket_content_and_instructions():
+    tickets = [
+        {"id": "8172", "title": "Fix setpoint guard", "description": "Root cause is X."},
+        {"id": "8165", "title": "Related follow-up", "description": "Second half of the fix."},
+    ]
+    prompt = _build_dispatch_prompt(tickets, "Focus on the backend only, skip the UI part.")
+    assert "AB#8172" in prompt
+    assert "Fix setpoint guard" in prompt
+    assert "Root cause is X." in prompt
+    assert "AB#8165" in prompt
+    assert "Second half of the fix." in prompt
+    assert "Focus on the backend only, skip the UI part." in prompt
+    assert "verify" in prompt.lower()  # the Hermes verify-before-done reminder is present
+
+
+def test_build_dispatch_prompt_omits_instructions_section_when_blank():
+    tickets = [{"id": "1", "title": "T", "description": "D"}]
+    prompt = _build_dispatch_prompt(tickets, "")
+    assert "Extra instructions" not in prompt
 
 
 if __name__ == "__main__":

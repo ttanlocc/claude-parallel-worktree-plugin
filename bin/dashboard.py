@@ -315,6 +315,32 @@ def _shape_ado_ticket(raw: dict) -> dict:
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
+_SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _ticket_task_slug(title: str) -> str:
+    ascii_title = title.encode("ascii", "ignore").decode("ascii")
+    slug = _SLUG_STRIP_RE.sub("-", ascii_title.lower()).strip("-")
+    return slug[:40].strip("-") or "ticket"
+
+
+def _build_dispatch_prompt(tickets: list[dict], instructions: str) -> str:
+    sections = []
+    for t in tickets:
+        sections.append(f"AB#{t['id']}: {t['title']}\n{t['description']}")
+    body = "\n\n".join(sections)
+    parts = [
+        "You've been assigned the following ticket(s):",
+        body,
+    ]
+    if instructions.strip():
+        parts.append(f"Extra instructions from the manager:\n{instructions.strip()}")
+    parts.append(
+        "Follow this repo's CLAUDE.md conventions. Before reporting done: run the relevant "
+        "tests and confirm they're green, and verify the actual behavior — don't mark this "
+        "complete on a self-report alone."
+    )
+    return "\n\n".join(parts)
 
 
 def _strip_html(raw: str) -> str:
