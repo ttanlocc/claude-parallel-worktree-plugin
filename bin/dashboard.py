@@ -335,7 +335,7 @@ def _fetch_ado_description(ticket_id: str) -> str:
             return ""
         fields = json.loads(result.stdout).get("fields") or {}
         return _strip_html(fields.get("System.Description") or "")
-    except (OSError, json.JSONDecodeError):
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return ""
 
 

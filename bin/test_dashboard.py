@@ -8,6 +8,7 @@ import tempfile
 
 import dashboard
 from dashboard import (
+    _fetch_ado_description,
     _find_ado_links,
     _shape_ado_ticket,
     _strip_html,
@@ -264,6 +265,20 @@ def test_strip_html_collapses_whitespace():
 
 def test_strip_html_handles_empty_string():
     assert _strip_html("") == ""
+
+
+def test_fetch_ado_description_degrades_on_timeout():
+    original_run = subprocess.run
+
+    def mock_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired("az", 15)
+
+    subprocess.run = mock_run
+    try:
+        result = _fetch_ado_description("8148")
+        assert result == ""
+    finally:
+        subprocess.run = original_run
 
 
 if __name__ == "__main__":
