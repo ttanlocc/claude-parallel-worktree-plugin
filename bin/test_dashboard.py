@@ -7,7 +7,14 @@ import subprocess
 import tempfile
 
 import dashboard
-from dashboard import _find_ado_links, _shape_ado_ticket, get_ado_backlog, render_task_log, render_transcript_line
+from dashboard import (
+    _find_ado_links,
+    _shape_ado_ticket,
+    _strip_html,
+    get_ado_backlog,
+    render_task_log,
+    render_transcript_line,
+)
 
 
 def test_skips_non_conversation_lines():
@@ -244,6 +251,19 @@ def test_get_ado_backlog_degrades_on_timeout():
         assert result == []
     finally:
         subprocess.run = original_run
+
+
+def test_strip_html_removes_tags_and_unescapes_entities():
+    raw = "<h2><b>Title</b></h2><div>Body&nbsp;text with <i>emphasis</i>.</div>"
+    assert _strip_html(raw) == "Title Body text with emphasis ."
+
+
+def test_strip_html_collapses_whitespace():
+    assert _strip_html("<p>a</p>\n\n<p>   b   </p>") == "a b"
+
+
+def test_strip_html_handles_empty_string():
+    assert _strip_html("") == ""
 
 
 if __name__ == "__main__":

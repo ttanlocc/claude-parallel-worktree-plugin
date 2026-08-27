@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Live status/log dashboard for parallel-task.sh copies."""
 
+import html
 import json
 import re
 
@@ -311,6 +312,31 @@ def _shape_ado_ticket(raw: dict) -> dict:
         "state": fields.get("System.State") or "",
         "url": _ADO_DEFAULT_BASE + ticket_id,
     }
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(raw: str) -> str:
+    text = _TAG_RE.sub(" ", raw)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _fetch_ado_description(ticket_id: str) -> str:
+    try:
+        result = subprocess.run(
+            ["az", "boards", "work-item", "show", "--id", ticket_id, "--org", _ADO_ORG, "-o", "json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return ""
+        fields = json.loads(result.stdout).get("fields") or {}
+        return _strip_html(fields.get("System.Description") or "")
+    except (OSError, json.JSONDecodeError):
+        return ""
 
 
 def get_ado_backlog() -> list[dict]:
