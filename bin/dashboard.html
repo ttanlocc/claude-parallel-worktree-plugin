@@ -84,6 +84,15 @@
   .cols { display: grid; grid-template-columns: 1fr 360px; gap: 16px; align-items: start; }
   @media (max-width: 1180px) { .cols { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2,1fr); } }
 
+  #operator-section { margin-top: 4px; }
+  #operator-section summary {
+    cursor: pointer; padding: 10px 4px; font-size: 13.5px; font-weight: 600; color: var(--muted);
+    list-style: none;
+  }
+  #operator-section summary::-webkit-details-marker { display: none; }
+  #operator-section summary::before { content: "▸ "; }
+  #operator-section[open] summary::before { content: "▾ "; }
+
   .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
   .panel-head { padding: 18px 22px 14px; }
   .panel-head h2 { margin: 0; font-size: 17px; font-weight: 700; color: var(--navy); letter-spacing: -.015em; }
@@ -130,6 +139,14 @@
   .ticket-action { font-size: 13px; font-weight: 600; color: var(--run-fg); text-decoration: none; flex-shrink: 0; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
   .ticket-action:hover { text-decoration: underline; }
   .ticket-action.muted { color: var(--faint); font-weight: 500; text-decoration: none; }
+
+  .dispatch-form { padding: 14px 22px; border-top: 1px solid var(--line); background: #FBFCFE; display: flex; flex-direction: column; gap: 10px; }
+  .dispatch-hint { font-size: 12.5px; color: var(--muted); }
+  .dispatch-bundle { display: flex; flex-direction: column; gap: 6px; }
+  .dispatch-bundle-item { font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .dispatch-instructions { width: 100%; min-height: 64px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-family: var(--sans); font-size: 13px; resize: vertical; }
+  .dispatch-actions { display: flex; gap: 9px; }
+  .dispatch-status { font-size: 12.5px; color: var(--stop-fg); }
 
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
   .btn {
@@ -258,6 +275,9 @@
       <div id="decisions"></div>
     </section>
 
+    <details id="operator-section">
+      <summary>Chi tiết vận hành</summary>
+
     <section class="stats" id="stats"></section>
 
     <div class="cols">
@@ -302,6 +322,8 @@
       </div>
       <div id="audit"></div>
     </section>
+
+    </details>
   </main>
 </div>
 
@@ -393,6 +415,10 @@ function computeTickets(adoTickets, tasks, esc) {
 }
 
 function renderTickets(rows) {
+  // ponytail: a 2s/5s poll tick would otherwise wipe an in-progress dispatch form (and
+  // whatever the user typed) out from under them; skip this re-render while one is open and
+  // let the next tick after it closes pick up any changes.
+  if (document.querySelector("#tickets .dispatch-form")) return;
   const box = document.getElementById("tickets");
   if (!rows.length) {
     box.replaceChildren(el("div", "empty", "No tickets assigned — nothing to show yet."));
@@ -428,6 +454,62 @@ function renderTickets(rows) {
   });
   box.replaceChildren(frag);
 }
+
+function openDispatchForm(rowEl, ticket) {
+  if (rowEl.nextSibling && rowEl.nextSibling.classList && rowEl.nextSibling.classList.contains("dispatch-form")) {
+    rowEl.nextSibling.remove();
+    return; // toggle closed if already open
+  }
+  const bundleCandidates = computeTickets(lastAdoTickets, lastData, lastEscalations)
+    .filter(r => r.status === "not-started" && r.id !== ticket.id);
+
+  const form = el("div", "dispatch-form");
+  const checks = el("div", "dispatch-bundle");
+  const checkboxByIds = {};
+  bundleCandidates.forEach(c => {
+    const label = el("label", "dispatch-bundle-item");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = c.id;
+    checkboxByIds[c.id] = cb;
+    label.append(cb, document.createTextNode(" " + c.label + " — " + c.title));
+    checks.append(label);
+  });
+  if (bundleCandidates.length) form.append(el("div", "dispatch-hint", "Bundle with related not-started tickets:"), checks);
+
+  const textarea = document.createElement("textarea");
+  textarea.className = "dispatch-instructions";
+  textarea.placeholder = "Extra instructions (optional)";
+  form.append(textarea);
+
+  const status = el("div", "dispatch-status");
+  const actions = el("div", "dispatch-actions");
+  const confirmBtn = el("button", "btn primary", "Xác nhận & giao");
+  const cancelBtn = el("button", "btn", "Hủy");
+  cancelBtn.onclick = () => form.remove();
+  confirmBtn.onclick = async () => {
+    const ticketIds = [ticket.id, ...Object.keys(checkboxByIds).filter(id => checkboxByIds[id].checked)];
+    confirmBtn.disabled = true; confirmBtn.textContent = "Đang tạo…";
+    status.textContent = "";
+    try {
+      const res = await fetch("/api/tickets/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticket_ids: ticketIds, instructions: textarea.value }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      form.remove();
+      pollTasks();
+    } catch (e) {
+      status.textContent = "Lỗi: " + (e.message || e);
+      confirmBtn.disabled = false; confirmBtn.textContent = "Xác nhận & giao";
+    }
+  };
+  actions.append(confirmBtn, cancelBtn);
+  form.append(actions, status);
+  rowEl.after(form);
+}
+
 function stateOf(t) { return (t.agent_state || t.agent_status || "").toLowerCase(); }
 
 function statCard(icon, bg, fg, num, label) {
@@ -454,6 +536,8 @@ function renderStats(data) {
   const n = active;
   document.getElementById("live-count").textContent = n + (n === 1 ? " agent live" : " agents live");
   document.getElementById("live-dot").style.background = n ? "var(--run-dot)" : "var(--idle-dot)";
+  const summary = document.querySelector("#operator-section summary");
+  if (summary) summary.textContent = `Chi tiết vận hành (${data.length})`;
 }
 
 function renderTable(data) {
