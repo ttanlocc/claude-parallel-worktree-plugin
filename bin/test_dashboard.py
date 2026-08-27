@@ -187,7 +187,7 @@ def test_enrich_merges_registry_ado_ids_with_pr_scraped_refs():
         "pr_number": 42,
         "pr_url": "https://github.com/x/y/pull/42",
         "pr_state": "OPEN",
-        "ado_refs": [{"id": "8165", "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/8165"}],
+        "ado_refs": [{"id": "8165", "url": "https://different-org.dev.azure.com/other/project/_workitems/edit/8165"}],
     }
     try:
         result = dashboard._enrich_branch_and_links("some/path", "feature/x", known_ado_ids=["8172", "8165"])
@@ -197,6 +197,11 @@ def test_enrich_merges_registry_ado_ids_with_pr_scraped_refs():
     ids = sorted(r["id"] for r in result["ado_refs"])
     assert ids == ["8165", "8172"]
     assert result["pr_number"] == 42
+    # Verify registry-first precedence: 8165 should use registry-constructed URL, not PR-scraped one
+    assert (
+        next(r for r in result["ado_refs"] if r["id"] == "8165")["url"]
+        == "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/8165"
+    )
 
 
 if __name__ == "__main__":
