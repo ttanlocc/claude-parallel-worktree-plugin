@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 
-from dashboard import render_task_log, render_transcript_line
+from dashboard import _find_ado_link, render_task_log, render_transcript_line
 
 
 def test_skips_non_conversation_lines():
@@ -17,33 +17,48 @@ def test_skips_non_conversation_lines():
 
 def test_renders_plain_string_user_content():
     obj = {"type": "user", "message": {"role": "user", "content": "hello"}}
-    assert render_transcript_line(obj) == ["hello"]
+    assert render_transcript_line(obj) == [{"kind": "text", "role": "user", "tool": None, "text": "hello"}]
 
 
 def test_renders_assistant_text():
     obj = {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "DONE"}]}}
-    assert render_transcript_line(obj) == ["DONE"]
+    assert render_transcript_line(obj) == [{"kind": "text", "role": "assistant", "tool": None, "text": "DONE"}]
 
 
-def test_renders_tool_use():
+def test_renders_tool_use_prefers_command_arg():
     obj = {
         "type": "assistant",
         "message": {
             "role": "assistant",
-            "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "echo hi"}}],
+            "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "echo hi"}}],
+        },
+    }
+    assert render_transcript_line(obj) == [
+        {"kind": "call", "role": "assistant", "tool": "Bash", "text": "echo hi", "call_id": "t1"}
+    ]
+
+
+def test_renders_tool_use_falls_back_to_json_input():
+    obj = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "t2", "name": "Grep", "input": {"pattern": "x"}}],
         },
     }
     lines = render_transcript_line(obj)
-    assert len(lines) == 1
-    assert lines[0].startswith("→ Bash(")
+    assert lines[0]["tool"] == "Grep"
+    assert lines[0]["text"] == '{"pattern": "x"}'
 
 
 def test_renders_tool_result_string_content():
     obj = {
         "type": "user",
-        "message": {"role": "user", "content": [{"type": "tool_result", "content": "hi"}]},
+        "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "hi"}]},
     }
-    assert render_transcript_line(obj) == ["← hi"]
+    assert render_transcript_line(obj) == [
+        {"kind": "result", "role": "user", "tool": None, "text": "hi", "result_for": "t1"}
+    ]
 
 
 def test_renders_tool_result_block_content():
@@ -54,7 +69,9 @@ def test_renders_tool_result_block_content():
             "content": [{"type": "tool_result", "content": [{"type": "text", "text": "block result"}]}],
         },
     }
-    assert render_transcript_line(obj) == ["← block result"]
+    assert render_transcript_line(obj) == [
+        {"kind": "result", "role": "user", "tool": None, "text": "block result", "result_for": None}
+    ]
 
 
 def test_render_task_log_reads_file_and_applies_limit():
@@ -68,7 +85,7 @@ def test_render_task_log_reads_file_and_applies_limit():
         path = f.name
     try:
         result = render_task_log(path, limit=3)
-        assert result == ["line2", "line3", "line4"]
+        assert [r["text"] for r in result] == ["line2", "line3", "line4"]
     finally:
         os.unlink(path)
 
@@ -82,9 +99,79 @@ def test_render_task_log_skips_malformed_lines():
         f.write("\n")
         path = f.name
     try:
-        assert render_task_log(path) == ["ok"]
+        assert [r["text"] for r in render_task_log(path)] == ["ok"]
     finally:
         os.unlink(path)
+
+
+def test_redacts_credential_looking_call_and_its_result():
+    records = [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t9",
+                        "name": "Bash",
+                        "input": {"command": "grep -oP '(?<=personal access token = ).*' creds.txt"},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t9", "content": "ghp_supersecrettoken"}],
+            },
+        },
+    ]
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+        path = f.name
+    try:
+        result = render_task_log(path)
+        assert result[0]["text"] == "[redacted — this call touches a credential]"
+        assert result[1]["text"] == "[redacted — this call touches a credential]"
+        assert "call_id" not in result[0] and "result_for" not in result[1]
+    finally:
+        os.unlink(path)
+
+
+def test_truncates_long_lines():
+    records = [
+        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "x" * 500}]}}
+    ]
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+        path = f.name
+    try:
+        result = render_task_log(path)
+        assert len(result[0]["text"]) == 401  # 400 chars + ellipsis
+        assert result[0]["text"].endswith("…")
+    finally:
+        os.unlink(path)
+
+
+def test_find_ado_link_prefers_full_url_over_bare_ref():
+    text = "See (AB#1) but really [AB#7160](https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160)"
+    url, ticket_id = _find_ado_link(text)
+    assert url == "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160"
+    assert ticket_id == "7160"
+
+
+def test_find_ado_link_falls_back_to_bare_ref():
+    url, ticket_id = _find_ado_link("fix: resolve artifact-layout (AB#7160)")
+    assert url == "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160"
+    assert ticket_id == "7160"
+
+
+def test_find_ado_link_none_when_absent():
+    assert _find_ado_link("just a normal PR title") == (None, None)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,9 @@
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif;
     --shadow: 0 1px 3px rgba(16,24,40,.04), 0 1px 2px rgba(16,24,40,.03);
+
+    --term-bg: #0B1220;   --term-bar: #131B2E;   --term-border: #1E2A44;
+    --term-text: #C9D6E8; --term-call: #6FB2FF;  --term-result: #7C8AA6; --term-accent: #34D399;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -114,6 +117,19 @@
   .pill.stopped { background: var(--idle-bg); color: var(--faint); }
   .pill.surface { background: #F1F5FC; color: #4A6489; font-weight: 500; }
   .pill.mode    { background: #F3EEFD; color: #6D4AAE; font-weight: 500; }
+  .pill.decision { background: var(--warn-bg); color: var(--warn-fg); }
+  .pill.progress { background: var(--run-bg);  color: var(--run-fg); }
+
+  /* ---------- tickets: the one glanceable summary — status + next action, nothing else ---------- */
+  .ticket-row { display: flex; align-items: center; gap: 14px; padding: 14px 22px; border-top: 1px solid var(--line); }
+  .ticket-row:first-child { border-top: 0; }
+  .ticket-left { display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0; }
+  .ticket-id { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--run-fg); text-decoration: none; flex-shrink: 0; }
+  .ticket-id:hover { text-decoration: underline; }
+  .ticket-title { font-size: 13.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ticket-action { font-size: 13px; font-weight: 600; color: var(--run-fg); text-decoration: none; flex-shrink: 0; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+  .ticket-action:hover { text-decoration: underline; }
+  .ticket-action.muted { color: var(--faint); font-weight: 500; text-decoration: none; }
 
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
   .btn {
@@ -125,18 +141,38 @@
   .btn:hover { border-color: #CBD8EA; background: #FBFCFE; }
   .btn:focus-visible { outline: 2px solid var(--run-fg); outline-offset: 1px; }
 
-  /* ---------- live logs ---------- */
-  #logrows { max-height: 460px; overflow-y: auto; padding: 4px 0 8px; }
-  .logrow { display: flex; gap: 13px; padding: 9px 22px; border-bottom: 1px solid #F2F5FA; align-items: flex-start; }
+  /* ---------- live logs: dark terminal, deliberately distinct from the light app chrome ---------- */
+  .term-bar {
+    display: flex; align-items: center; gap: 10px; padding: 11px 22px;
+    background: var(--term-bar); border-top: 1px solid var(--term-border); border-bottom: 1px solid var(--term-border);
+    font-family: var(--mono); font-size: 12.5px; color: var(--term-accent); white-space: nowrap;
+  }
+  .term-bar span:last-child { overflow: hidden; text-overflow: ellipsis; }
+  .term-bar .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--term-accent); flex-shrink: 0; animation: term-pulse 1.6s ease-in-out infinite; }
+  @keyframes term-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .term-bar .pulse { animation: none; } }
+
+  #logrows { max-height: 460px; overflow-y: auto; padding: 4px 0 8px; background: var(--term-bg); }
+  #logrows .empty { color: var(--term-result); }
+  #logrows .empty.err { color: #F87171; }
+  .logrow { display: flex; gap: 13px; padding: 9px 22px; border-bottom: 1px solid var(--term-border); align-items: flex-start; }
   .logrow:last-child { border-bottom: 0; }
-  .logrow .dot { margin-top: 6px; }
-  .logrow .body { font-family: var(--mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; flex: 1; }
-  .logrow.call .body   { color: var(--run-fg); }
-  .logrow.call .dot    { background: var(--run-dot); }
-  .logrow.result .body { color: var(--faint); }
-  .logrow.result .dot  { background: var(--idle-dot); }
-  .logrow.text .body   { color: #16233D; }
-  .logrow.text .dot    { background: var(--ok-dot); }
+  .logrow .dot { margin-top: 6px; flex-shrink: 0; }
+  .logrow .body { font-family: var(--mono); font-size: 12px; line-height: 1.6; display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+  .logrow .code { white-space: pre-wrap; word-break: break-word; }
+  .logrow .prose { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.6; }
+  .logrow .tool-tag, .logrow .role-tag {
+    align-self: flex-start; font-size: 10.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
+    padding: 1px 7px; border-radius: 5px;
+  }
+  .logrow.call .tool-tag  { background: rgba(111,178,255,.14); color: var(--term-call); }
+  .logrow.call .code      { color: var(--term-call); }
+  .logrow.call .dot       { background: var(--term-call); }
+  .logrow.result .code    { color: var(--term-result); }
+  .logrow.result .dot     { background: var(--term-result); }
+  .logrow.text .role-tag  { background: rgba(52,211,153,.14); color: var(--term-accent); }
+  .logrow.text .prose     { color: var(--term-text); }
+  .logrow.text .dot       { background: var(--term-accent); }
 
   /* ---------- side panel rows ---------- */
   .srow { display: flex; align-items: center; gap: 11px; padding: 13px 22px; border-top: 1px solid var(--line); font-size: 13.5px; }
@@ -206,6 +242,14 @@
   <main id="content">
     <h2 class="page-title">Runtime health &amp; logs</h2>
 
+    <section class="panel" style="margin-bottom:20px;">
+      <div class="panel-head">
+        <h2>Tickets</h2>
+        <p>What's done, what's blocked, what needs you — nothing else.</p>
+      </div>
+      <div id="tickets"></div>
+    </section>
+
     <section class="panel" id="decisions-panel" style="margin-bottom:20px; display:none;">
       <div class="panel-head">
         <h2>Decision required</h2>
@@ -218,9 +262,15 @@
 
     <div class="cols">
       <section class="panel">
-        <div class="panel-head">
-          <h2>Sessions</h2>
-          <p>Everything running in this repo. Pick one to follow its work.</p>
+        <div class="panel-head" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+          <div>
+            <h2>Sessions</h2>
+            <p>Everything running in this repo. Pick one to follow its work.</p>
+          </div>
+          <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--muted); white-space:nowrap; cursor:pointer;">
+            <input type="checkbox" id="managed-only-toggle" checked>
+            Managed only
+          </label>
         </div>
         <div id="table-wrap"></div>
       </section>
@@ -238,6 +288,10 @@
         <h2>Live logs</h2>
         <p id="log-sub">Select a session above.</p>
       </div>
+      <div id="log-summary" class="term-bar" hidden>
+        <span class="pulse"></span>
+        <span id="log-summary-text"></span>
+      </div>
       <div id="logrows"></div>
     </section>
 
@@ -254,6 +308,9 @@
 <script>
 let selected = null;
 let byName = {};
+let lastData = [];
+let lastEscalations = { needs_human: [], recent_decisions: [] };
+let showManagedOnly = true;
 
 const ICONS = {
   globe: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>',
@@ -282,9 +339,79 @@ function el(tag, cls, text) {
 }
 function pill(cls, label) {
   const p = el("span", "pill " + cls);
-  if (["busy","working","running","idle","done","blocked","stopped"].includes(cls)) p.append(el("span", "dot"));
+  if (["busy","working","running","idle","done","blocked","stopped","decision","progress"].includes(cls)) p.append(el("span", "dot"));
   p.append(document.createTextNode(label));
   return p;
+}
+
+// One row per ticket (grouped by ADO id, falling back to PR number), not per session — a
+// session with neither isn't tied to a ticket and has nothing to show here.
+const TICKET_STATUS_LABEL = { done: "Done", decision: "Needs your decision", blocked: "Blocked", progress: "In progress" };
+
+function computeTickets(tasks, esc) {
+  const escBySession = {};
+  (esc.needs_human || []).forEach(e => { if (e.session_id) escBySession[e.session_id] = e; });
+
+  const groups = new Map();
+  for (const t of tasks) {
+    const key = t.ado_id ? "ado:" + t.ado_id : t.pr_number ? "pr:" + t.pr_number : null;
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(t);
+  }
+
+  const rows = [];
+  for (const group of groups.values()) {
+    const t = group.find(g => g.ado_url || g.pr_url) || group[0];
+    const pendingEsc = group.map(g => escBySession[g.session_id]).find(Boolean);
+    let status, action, actionHref = null;
+    if (pendingEsc) {
+      status = "decision"; action = pendingEsc.question || "Needs a decision";
+    } else if (group.some(g => stateOf(g) === "blocked")) {
+      status = "blocked"; action = "Check the blocker";
+    } else if (t.pr_state === "MERGED") {
+      status = "done"; action = "—";
+    } else if (t.pr_state === "OPEN") {
+      status = "progress"; action = "Review PR #" + t.pr_number; actionHref = t.pr_url;
+    } else {
+      status = "progress"; action = "—";
+    }
+    rows.push({ label: t.ado_id ? "AB#" + t.ado_id : "PR #" + t.pr_number, href: t.ado_url || t.pr_url, title: t.task, status, action, actionHref });
+  }
+  const rank = { decision: 0, blocked: 1, progress: 2, done: 3 };
+  rows.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9));
+  return rows;
+}
+
+function renderTickets(rows) {
+  const box = document.getElementById("tickets");
+  if (!rows.length) {
+    box.replaceChildren(el("div", "empty", "No tickets in flight — assign one to get started."));
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  rows.forEach(r => {
+    const row = el("div", "ticket-row");
+    const left = el("div", "ticket-left");
+    if (r.href) {
+      const a = el("a", "ticket-id", r.label);
+      a.href = r.href; a.target = "_blank"; a.rel = "noopener";
+      left.append(a);
+    } else {
+      left.append(el("span", "ticket-id", r.label));
+    }
+    left.append(el("span", "ticket-title", r.title || ""));
+    row.append(left, pill(r.status, TICKET_STATUS_LABEL[r.status] || r.status));
+    if (r.actionHref) {
+      const a = el("a", "ticket-action", r.action);
+      a.href = r.actionHref; a.target = "_blank"; a.rel = "noopener";
+      row.append(a);
+    } else {
+      row.append(el("span", "ticket-action" + (r.action === "—" ? " muted" : ""), r.action));
+    }
+    frag.append(row);
+  });
+  box.replaceChildren(frag);
 }
 function stateOf(t) { return (t.agent_state || t.agent_status || "").toLowerCase(); }
 
@@ -316,7 +443,13 @@ function renderStats(data) {
 
 function renderTable(data) {
   const wrap = document.getElementById("table-wrap");
-  if (!data.length) { wrap.replaceChildren(el("div", "empty", "Nothing is running in this repo yet.")); return; }
+  if (!data.length) {
+    const msg = showManagedOnly && lastData.length
+      ? `No managed copies — turn off "Managed only" to see all ${lastData.length}.`
+      : "Nothing is running in this repo yet.";
+    wrap.replaceChildren(el("div", "empty", msg));
+    return;
+  }
 
   const table = el("table");
   const thead = el("thead"), htr = el("tr");
@@ -388,6 +521,8 @@ function renderDetails() {
   add("Status", stateOf(t) || "unknown");
   add("Kind", t.kind);
   add("Branch", t.branch);
+  if (t.pr_url) add("PR", "#" + t.pr_number + (t.pr_state ? " (" + t.pr_state.toLowerCase() + ")" : ""), t.pr_url);
+  if (t.ado_url) add("ADO ticket", "AB#" + t.ado_id, t.ado_url);
   if (t.ports && t.ports.frontend) add("Frontend", "localhost:" + t.ports.frontend, "http://localhost:" + t.ports.frontend);
   if (t.ports && t.ports.gateway) add("Gateway", "localhost:" + t.ports.gateway, "http://localhost:" + t.ports.gateway);
   add("Attach", t.short_id ? "claude attach " + t.short_id : null);
@@ -418,16 +553,46 @@ async function pollTasks() {
     document.getElementById("table-wrap").replaceChildren(el("div", "empty err", "Can't reach the server — " + err));
     return;
   }
+  lastData = data;
   byName = {};
   data.forEach(t => { byName[t.task] = t; });
+  renderAll();
+}
+
+function renderAll() {
+  const data = showManagedOnly ? lastData.filter(t => t.managed) : lastData;
   renderStats(data);
   renderTable(data);
   if (selected) renderDetails();
+  renderTickets(computeTickets(lastData, lastEscalations));
+}
+
+function logRow(rec) {
+  const row = el("div", "logrow " + rec.kind);
+  row.append(el("span", "dot"));
+  const body = el("div", "body");
+  if (rec.kind === "call") {
+    body.append(el("span", "tool-tag", rec.tool || "tool"));
+    body.append(el("span", "code", rec.text));
+  } else if (rec.kind === "result") {
+    body.append(el("span", "code", rec.text));
+  } else {
+    body.append(el("span", "role-tag", rec.role === "user" ? "you" : "agent"));
+    body.append(el("span", "prose", rec.text));
+  }
+  row.append(body);
+  return row;
 }
 
 async function pollLog() {
   const box = document.getElementById("logrows");
-  if (!selected) { box.replaceChildren(el("div", "empty", "Select a session above.")); return; }
+  const summaryEl = document.getElementById("log-summary");
+  const summaryText = document.getElementById("log-summary-text");
+  if (!selected) {
+    box.replaceChildren(el("div", "empty", "Select a session above."));
+    summaryEl.hidden = true;
+    return;
+  }
 
   let data, err;
   try {
@@ -436,21 +601,28 @@ async function pollLog() {
     err = checkResponse(res, data);
   } catch (e) { err = e.message || "request failed"; }
 
-  if (err) { box.replaceChildren(el("div", "empty err", "Can't read the log — " + err)); return; }
+  if (err) {
+    box.replaceChildren(el("div", "empty err", "Can't read the log — " + err));
+    summaryEl.hidden = true;
+    return;
+  }
   if (data.status === "not-available") {
     box.replaceChildren(el("div", "empty", "No session has been dispatched into this copy yet."));
+    summaryEl.hidden = true;
     return;
   }
 
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
-  const frag = document.createDocumentFragment();
-  for (const line of data.lines) {
-    const kind = line.startsWith("→") ? "call" : line.startsWith("←") ? "result" : "text";
-    const row = el("div", "logrow " + kind);
-    row.append(el("span", "dot"), el("span", "body", line));
-    frag.append(row);
+  // "what's it doing right now": the agent's own latest words, not tool plumbing.
+  const lastSaid = [...data.lines].reverse().find(r => r.kind === "text" && r.role === "assistant");
+  if (lastSaid) {
+    summaryText.textContent = lastSaid.text.length > 160 ? lastSaid.text.slice(0, 160) + "…" : lastSaid.text;
+    summaryEl.hidden = false;
+  } else {
+    summaryEl.hidden = true;
   }
-  box.replaceChildren(frag);
+
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  box.replaceChildren(...data.lines.map(logRow));
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -564,10 +736,17 @@ async function pollEscalations() {
     list.replaceChildren(...cards);
   }
   renderAudit(data.recent_decisions || []);
+  lastEscalations = data;
+  renderTickets(computeTickets(lastData, lastEscalations));
 }
 
 pollEscalations();
 setInterval(pollEscalations, 2000);
+
+document.getElementById("managed-only-toggle").addEventListener("change", (e) => {
+  showManagedOnly = e.target.checked;
+  renderAll();
+});
 
 pollTasks();
 pollLog();

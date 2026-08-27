@@ -2,6 +2,7 @@
 """Live status/log dashboard for parallel-task.sh copies."""
 
 import json
+import re
 
 
 def _flatten_tool_result(content) -> str:
@@ -13,16 +14,23 @@ def _flatten_tool_result(content) -> str:
     return ""
 
 
-def render_transcript_line(obj: dict) -> list[str]:
-    """Return zero or more human-readable log lines for one transcript JSON record."""
+def render_transcript_line(obj: dict) -> list[dict]:
+    """Return zero or more renderable records for one transcript JSON record.
+
+    Each record is {"kind": "text"|"call"|"result", "role", "tool", "text"}. "call" records also
+    carry "call_id" and "result" records carry "result_for" (both from the tool_use/tool_result
+    id pairing) — render_task_log uses those to redact a credential-looking call's own result,
+    then strips them before returning.
+    """
     if obj.get("type") not in ("user", "assistant"):
         return []
     message = obj.get("message")
     if not isinstance(message, dict):
         return []
+    role = message.get("role") or obj.get("type")
     content = message.get("content")
     if isinstance(content, str):
-        return [content]
+        return [{"kind": "text", "role": role, "tool": None, "text": content}]
     if not isinstance(content, list):
         return []
     lines = []
@@ -33,19 +41,41 @@ def render_transcript_line(obj: dict) -> list[str]:
         if item_type == "text":
             text = item.get("text", "")
             if text:
-                lines.append(text)
+                lines.append({"kind": "text", "role": role, "tool": None, "text": text})
         elif item_type == "tool_use":
             name = item.get("name", "?")
-            args = json.dumps(item.get("input", {}))[:80]
-            lines.append(f"→ {name}({args})")
+            args = item.get("input") or {}
+            preview = args.get("command") or args.get("file_path") or json.dumps(args)
+            lines.append({"kind": "call", "role": role, "tool": name, "text": str(preview), "call_id": item.get("id")})
         elif item_type == "tool_result":
-            lines.append(f"← {_flatten_tool_result(item.get('content'))[:200]}")
+            lines.append(
+                {
+                    "kind": "result",
+                    "role": role,
+                    "tool": None,
+                    "text": _flatten_tool_result(item.get("content")),
+                    "result_for": item.get("tool_use_id"),
+                }
+            )
     return lines
 
 
-def render_task_log(transcript_path: str, limit: int = 200) -> list[str]:
-    """Read a session transcript JSONL file and return the last `limit` rendered log lines."""
-    lines: list[str] = []
+# Heuristic, not a secret scanner: catches a command that NAMES what it's after (grep for
+# "personal access token", reading a .pem, etc). It cannot catch a bare secret value with no
+# label, so it works by redacting the credential-looking CALL and, via call_id/result_for,
+# that same call's result — not by scanning result text for secret-shaped content.
+# ponytail: keyword heuristic: misses secrets with no label in the command; upgrade to a real
+# secret-scanner (e.g. detect-secrets) if this misses cases in practice.
+_SENSITIVE_RE = re.compile(r"(?i)personal access token|api[_ -]?key|password|private key|-----BEGIN|secret")
+_REDACTED = "[redacted — this call touches a credential]"
+_MAX_LINE_CHARS = 400
+
+
+def render_task_log(transcript_path: str, limit: int = 200) -> list[dict]:
+    """Read a session transcript JSONL file and return the last `limit` rendered records,
+    with credential-looking tool calls (and their matching results) redacted."""
+    records: list[dict] = []
+    sensitive_ids: set[str] = set()
     with open(transcript_path, encoding="utf-8") as f:
         for raw in f:
             raw = raw.strip()
@@ -55,8 +85,19 @@ def render_task_log(transcript_path: str, limit: int = 200) -> list[str]:
                 obj = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            lines.extend(render_transcript_line(obj))
-    return lines[-limit:]
+            for rec in render_transcript_line(obj):
+                call_id = rec.pop("call_id", None)
+                result_for = rec.pop("result_for", None)
+                if rec["kind"] == "call" and _SENSITIVE_RE.search(rec["text"]):
+                    if call_id:
+                        sensitive_ids.add(call_id)
+                    rec["text"] = _REDACTED
+                elif rec["kind"] == "result" and result_for in sensitive_ids:
+                    rec["text"] = _REDACTED
+                if len(rec["text"]) > _MAX_LINE_CHARS:
+                    rec["text"] = rec["text"][:_MAX_LINE_CHARS] + "…"
+                records.append(rec)
+    return records[-limit:]
 
 
 import http.server
@@ -107,17 +148,105 @@ _CACHE_TTL = 1.5
 _CACHE_LOCK = threading.Lock()
 
 
-def _cached(key: str, fn):
+def _cached(key: str, fn, ttl: float = _CACHE_TTL):
     hit = _CACHE.get(key)
-    if hit and time.monotonic() - hit[0] < _CACHE_TTL:
+    if hit and time.monotonic() - hit[0] < ttl:
         return hit[1]
     with _CACHE_LOCK:  # one refresh at a time; latecomers take the fresh value
         hit = _CACHE.get(key)
-        if hit and time.monotonic() - hit[0] < _CACHE_TTL:
+        if hit and time.monotonic() - hit[0] < ttl:
             return hit[1]
         value = fn()
         _CACHE[key] = (time.monotonic(), value)
         return value
+
+
+# PR/ticket lookups hit the network (gh) or a subprocess (git) — much pricier than the
+# 1.5s-TTL local calls above, and branch/PR association barely changes turn to turn.
+_ENRICH_TTL = 30.0
+
+_ADO_URL_RE = re.compile(r"https?://dev\.azure\.com/\S+/_workitems/edit/(\d+)")
+_ADO_REF_RE = re.compile(r"\bAB[#-](\d+)\b", re.IGNORECASE)
+_ADO_DEFAULT_BASE = "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/"
+
+_EMPTY_PR_TICKET = {"pr_number": None, "pr_url": None, "pr_state": None, "ado_id": None, "ado_url": None}
+
+
+def _find_ado_link(text: str):
+    """A full dev.azure.com URL in the text wins as-is (keeps whatever org/project form the
+    author used); otherwise fall back to a bare AB#NNNN ref against this repo's known project."""
+    m = _ADO_URL_RE.search(text)
+    if m:
+        return m.group(0), m.group(1)
+    m = _ADO_REF_RE.search(text)
+    if m:
+        return _ADO_DEFAULT_BASE + m.group(1), m.group(1)
+    return None, None
+
+
+def _git_branch(path: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", path, "branch", "--show-current"], capture_output=True, text=True, timeout=5
+        )
+        return result.stdout.strip() or None
+    except OSError:
+        return None
+
+
+def _lookup_pr_and_ticket(branch: str) -> dict:
+    """This repo's convention (seen in real commit/PR history): PR titles/bodies carry an
+    AB#NNNN or full ADO link — e.g. 'fix: ... (AB#7160)' or a `[AB#6541](https://dev.azure...)`
+    markdown link in the body. One `gh` call gets both; no separate ADO API access needed."""
+    if not branch:
+        return dict(_EMPTY_PR_TICKET)
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--json",
+                "number,url,title,body,state",
+                "--limit",
+                "1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=REPO_DIR,
+        )
+        prs = json.loads(result.stdout) if result.returncode == 0 else []
+    except (OSError, json.JSONDecodeError):
+        prs = []
+    if not prs:
+        return dict(_EMPTY_PR_TICKET)
+    pr = prs[0]
+    ado_url, ado_id = _find_ado_link(f"{pr.get('title', '')}\n{pr.get('body') or ''}")
+    return {
+        "pr_number": pr.get("number"),
+        "pr_url": pr.get("url"),
+        "pr_state": pr.get("state"),
+        "ado_id": ado_id,
+        "ado_url": ado_url,
+    }
+
+
+def _enrich_branch_and_links(cwd: str, known_branch: str | None) -> dict:
+    """cwd is the empty string for a shared checkout (the repo root, not a dedicated worktree):
+    its "current branch" belongs to whichever session last ran `git checkout` there, not to any
+    one session, so deriving one would misattribute a PR/ticket to every session sharing it."""
+    branch = known_branch
+    if not branch and cwd:
+        branch = _cached(f"branch:{cwd}", lambda: _git_branch(cwd), ttl=_ENRICH_TTL)
+    if not branch:
+        return {"branch": branch, **_EMPTY_PR_TICKET}
+    pr_ticket = _cached(f"prticket:{branch}", lambda: _lookup_pr_and_ticket(branch), ttl=_ENRICH_TTL)
+    return {"branch": branch, **pr_ticket}
 
 
 def get_registry() -> list[dict]:
@@ -181,18 +310,26 @@ def get_tasks() -> list[dict]:
                 "agent_state": s.get("state"),
                 "kind": s.get("kind"),
                 "started_at": s.get("startedAt"),
-                "branch": reg.get("branch"),
                 "mode": reg.get("mode"),
                 "ports": reg.get("ports"),
                 "dev_status": reg.get("dev_status"),
                 "managed": bool(reg),
+                **_enrich_branch_and_links(cwd if os.path.realpath(cwd) != repo else "", reg.get("branch")),
             }
         )
 
     # Registered copies whose session already exited still matter (stack may be up).
     for r in registry:
         if r.get("session_id") not in seen:
-            rows.append({**r, "kind": None, "started_at": None, "managed": True})
+            rows.append(
+                {
+                    **r,
+                    "kind": None,
+                    "started_at": None,
+                    "managed": True,
+                    **_enrich_branch_and_links(r.get("path", ""), r.get("branch")),
+                }
+            )
 
     rows.sort(key=lambda r: (not r["managed"], r["task"] or ""))
     return rows
