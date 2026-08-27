@@ -13,6 +13,8 @@ from dashboard import (
     _build_dispatch_prompt,
     _fetch_ado_description,
     _find_ado_links,
+    _parse_ticket_ids,
+    _run_dispatch,
     _shape_ado_ticket,
     _strip_html,
     _ticket_task_slug,
@@ -336,6 +338,64 @@ def test_build_dispatch_argv_includes_one_ticket_flag_per_id():
 def test_build_dispatch_argv_with_no_tickets():
     argv = _build_dispatch_argv("some-task", "native", [])
     assert argv == [PARALLEL_TASK_SH, "start", "some-task", "native"]
+
+
+def test_parse_ticket_ids_rejects_non_list_string():
+    # A JSON string body like {"ticket_ids": "8172"} must not silently iterate into ['8','1','7','2'].
+    try:
+        _parse_ticket_ids("8172")
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_parse_ticket_ids_rejects_non_list_number():
+    # A JSON number body like {"ticket_ids": 8172} must not raise an uncaught TypeError when iterated.
+    try:
+        _parse_ticket_ids(8172)
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_parse_ticket_ids_accepts_list_and_treats_absent_as_empty():
+    assert _parse_ticket_ids(["8172", 8165]) == ["8172", "8165"]
+    assert _parse_ticket_ids(None) == []
+    assert _parse_ticket_ids([]) == []
+
+
+def test_run_dispatch_returns_500_on_start_stage_subprocess_error_instead_of_raising():
+    original_run = subprocess.run
+
+    def mock_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired("parallel-task.sh", 180)
+
+    subprocess.run = mock_run
+    try:
+        status, resp = dashboard._run_dispatch([PARALLEL_TASK_SH, "start", "x", "native"], "x", "prompt")
+        assert status == 500
+        assert "start failed" in resp["error"]
+    finally:
+        subprocess.run = original_run
+
+
+def test_run_dispatch_returns_500_on_dispatch_stage_subprocess_error_instead_of_raising():
+    original_run = subprocess.run
+    calls = []
+
+    def mock_run(argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 1:  # start succeeds
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+        raise OSError("parallel-task.sh not found")  # dispatch fails
+
+    subprocess.run = mock_run
+    try:
+        status, resp = _run_dispatch([PARALLEL_TASK_SH, "start", "x", "native"], "x", "prompt")
+        assert status == 500
+        assert "dispatch failed" in resp["error"]
+    finally:
+        subprocess.run = original_run
 
 
 if __name__ == "__main__":

@@ -350,6 +350,42 @@ def _build_dispatch_argv(slug: str, mode: str, ticket_ids: list[str]) -> list[st
     return argv
 
 
+def _parse_ticket_ids(raw) -> list[str]:
+    """raw is body.get('ticket_ids'): absent/empty (None, [], "", 0, False) means no tickets
+    requested, same as before. Anything else must be a list — a bare string would otherwise pass
+    the caller's `if not ticket_ids` check by iterating into its own characters, and a bare number
+    would raise an uncaught TypeError when iterated. Raises ValueError, caught by do_POST's
+    existing body-parsing except block."""
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("ticket_ids must be a list")
+    return [str(i) for i in raw]
+
+
+def _run_dispatch(start_argv: list[str], slug: str, prompt: str) -> tuple[int, dict]:
+    """Runs `parallel-task.sh start` then `dispatch` for an already-validated request. Returns
+    (http_status, body) instead of letting a subprocess failure (timeout, or the script missing/
+    non-executable) cross into do_POST uncaught and drop the connection with no response."""
+    try:
+        start_result = subprocess.run(start_argv, capture_output=True, text=True, cwd=REPO_DIR, timeout=180)
+    except (subprocess.SubprocessError, OSError) as e:
+        return 500, {"error": f"start failed: {e}"}
+    if start_result.returncode != 0:
+        return 500, {"error": f"start failed: {start_result.stderr[-2000:]}"}
+
+    try:
+        dispatch_result = subprocess.run(
+            [PARALLEL_TASK_SH, "dispatch", slug, prompt], capture_output=True, text=True, cwd=REPO_DIR, timeout=60
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        return 500, {"error": f"dispatch failed: {e}"}
+    if dispatch_result.returncode != 0:
+        return 500, {"error": f"dispatch failed: {dispatch_result.stderr[-2000:]}"}
+
+    return 200, {"ok": True, "task": slug}
+
+
 def _strip_html(raw: str) -> str:
     text = _TAG_RE.sub(" ", raw)
     text = html.unescape(text)
@@ -585,7 +621,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
-                ticket_ids = [str(i) for i in (body.get("ticket_ids") or [])]
+                ticket_ids = _parse_ticket_ids(body.get("ticket_ids"))
                 instructions = str(body.get("instructions") or "")
             except (ValueError, json.JSONDecodeError) as e:
                 self._json({"error": f"bad request body: {e}"}, status=400)
@@ -604,19 +640,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             prompt = _build_dispatch_prompt(tickets, instructions)
             start_argv = _build_dispatch_argv(slug, "native", ticket_ids)
 
-            start_result = subprocess.run(start_argv, capture_output=True, text=True, cwd=REPO_DIR, timeout=180)
-            if start_result.returncode != 0:
-                self._json({"error": f"start failed: {start_result.stderr[-2000:]}"}, status=500)
-                return
-
-            dispatch_result = subprocess.run(
-                [PARALLEL_TASK_SH, "dispatch", slug, prompt], capture_output=True, text=True, cwd=REPO_DIR, timeout=60
-            )
-            if dispatch_result.returncode != 0:
-                self._json({"error": f"dispatch failed: {dispatch_result.stderr[-2000:]}"}, status=500)
-                return
-
-            self._json({"ok": True, "task": slug})
+            status, resp = _run_dispatch(start_argv, slug, prompt)
+            self._json(resp, status=status)
             return
         self.send_response(404)
         self.end_headers()
