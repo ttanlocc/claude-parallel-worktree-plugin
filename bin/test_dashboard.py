@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 
-from dashboard import _find_ado_link, render_task_log, render_transcript_line
+from dashboard import _find_ado_links, render_task_log, render_transcript_line
 
 
 def test_skips_non_conversation_lines():
@@ -157,21 +157,25 @@ def test_truncates_long_lines():
         os.unlink(path)
 
 
-def test_find_ado_link_prefers_full_url_over_bare_ref():
-    text = "See (AB#1) but really [AB#7160](https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160)"
-    url, ticket_id = _find_ado_link(text)
-    assert url == "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160"
-    assert ticket_id == "7160"
+def test_find_ado_links_returns_all_matches_deduplicated():
+    text = (
+        "See (AB#1) and again AB#1, but really [AB#7160](https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160)"
+    )
+    refs = _find_ado_links(text)
+    assert refs == [
+        {"id": "1", "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/1"},
+        {"id": "7160", "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160"},
+    ]
 
 
-def test_find_ado_link_falls_back_to_bare_ref():
-    url, ticket_id = _find_ado_link("fix: resolve artifact-layout (AB#7160)")
-    assert url == "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160"
-    assert ticket_id == "7160"
+def test_find_ado_links_full_url_wins_over_bare_ref_for_same_id():
+    text = "(AB#7160) ... [AB#7160](https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160)"
+    refs = _find_ado_links(text)
+    assert refs == [{"id": "7160", "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/7160"}]
 
 
-def test_find_ado_link_none_when_absent():
-    assert _find_ado_link("just a normal PR title") == (None, None)
+def test_find_ado_links_empty_when_absent():
+    assert _find_ado_links("just a normal PR title") == []
 
 
 if __name__ == "__main__":

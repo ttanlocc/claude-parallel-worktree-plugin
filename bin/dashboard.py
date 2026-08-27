@@ -169,19 +169,31 @@ _ADO_URL_RE = re.compile(r"https?://dev\.azure\.com/\S+/_workitems/edit/(\d+)")
 _ADO_REF_RE = re.compile(r"\bAB[#-](\d+)\b", re.IGNORECASE)
 _ADO_DEFAULT_BASE = "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/"
 
-_EMPTY_PR_TICKET = {"pr_number": None, "pr_url": None, "pr_state": None, "ado_id": None, "ado_url": None}
+_EMPTY_PR_TICKET = {"pr_number": None, "pr_url": None, "pr_state": None, "ado_refs": []}
 
 
-def _find_ado_link(text: str):
-    """A full dev.azure.com URL in the text wins as-is (keeps whatever org/project form the
-    author used); otherwise fall back to a bare AB#NNNN ref against this repo's known project."""
-    m = _ADO_URL_RE.search(text)
-    if m:
-        return m.group(0), m.group(1)
-    m = _ADO_REF_RE.search(text)
-    if m:
-        return _ADO_DEFAULT_BASE + m.group(1), m.group(1)
-    return None, None
+def _find_ado_links(text: str) -> list[dict]:
+    """Every ADO reference in the text, deduplicated by id, first-seen order. A full
+    dev.azure.com URL wins over a bare AB#NNNN ref for the same id (keeps whatever org/project
+    form the author actually used instead of assuming this repo's default one)."""
+    by_id: dict[str, str] = {}
+    order: list[str] = []
+    # Collect all matches with their positions
+    matches = []
+    for m in _ADO_URL_RE.finditer(text):
+        matches.append((m.start(), "url", m.group(1), m.group(0)))
+    for m in _ADO_REF_RE.finditer(text):
+        matches.append((m.start(), "ref", m.group(1), _ADO_DEFAULT_BASE + m.group(1)))
+    # Sort by position in text, process in order
+    matches.sort(key=lambda x: x[0])
+    for pos, match_type, ticket_id, url in matches:
+        if ticket_id not in by_id:
+            order.append(ticket_id)
+            by_id[ticket_id] = url
+        elif match_type == "url":
+            # URL wins over bare ref for the same ID
+            by_id[ticket_id] = url
+    return [{"id": i, "url": by_id[i]} for i in order]
 
 
 def _git_branch(path: str) -> str | None:
@@ -226,13 +238,12 @@ def _lookup_pr_and_ticket(branch: str) -> dict:
     if not prs:
         return dict(_EMPTY_PR_TICKET)
     pr = prs[0]
-    ado_url, ado_id = _find_ado_link(f"{pr.get('title', '')}\n{pr.get('body') or ''}")
+    ado_refs = _find_ado_links(f"{pr.get('title', '')}\n{pr.get('body') or ''}")
     return {
         "pr_number": pr.get("number"),
         "pr_url": pr.get("url"),
         "pr_state": pr.get("state"),
-        "ado_id": ado_id,
-        "ado_url": ado_url,
+        "ado_refs": ado_refs,
     }
 
 
