@@ -636,7 +636,7 @@ function renderDetails() {
   add("Kind", t.kind);
   add("Branch", t.branch);
   if (t.pr_url) add("PR", "#" + t.pr_number + (t.pr_state ? " (" + t.pr_state.toLowerCase() + ")" : ""), t.pr_url);
-  if (t.ado_url) add("ADO ticket", "AB#" + t.ado_id, t.ado_url);
+  (t.ado_refs || []).forEach(r => add("ADO ticket", "AB#" + r.id, r.url));
   if (t.ports && t.ports.frontend) add("Frontend", "localhost:" + t.ports.frontend, "http://localhost:" + t.ports.frontend);
   if (t.ports && t.ports.gateway) add("Gateway", "localhost:" + t.ports.gateway, "http://localhost:" + t.ports.gateway);
   add("Attach", t.short_id ? "claude attach " + t.short_id : null);
