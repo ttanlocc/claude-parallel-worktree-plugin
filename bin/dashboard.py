@@ -115,6 +115,11 @@ PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
 MAX_BODY_BYTES = 64 * 1024
 
+# Every subprocess-wrapping function below degrades silently on failure. TimeoutExpired
+# subclasses SubprocessError, not OSError, so it must be listed via SubprocessError (its actual
+# parent) rather than assumed to ride along with OSError.
+_SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
+
 
 def get_escalations() -> dict:
     """What the human still has to answer, and what the manager already decided for them."""
@@ -203,7 +208,7 @@ def _git_branch(path: str) -> str | None:
             ["git", "-C", path, "branch", "--show-current"], capture_output=True, text=True, timeout=5
         )
         return result.stdout.strip() or None
-    except OSError:
+    except _SUBPROC_ERRORS:
         return None
 
 
@@ -234,7 +239,7 @@ def _lookup_pr_and_ticket(branch: str) -> dict:
             cwd=REPO_DIR,
         )
         prs = json.loads(result.stdout) if result.returncode == 0 else []
-    except (OSError, json.JSONDecodeError):
+    except _SUBPROC_ERRORS:
         prs = []
     if not prs:
         return dict(_EMPTY_PR_TICKET)
@@ -404,7 +409,7 @@ def _fetch_ado_description(ticket_id: str) -> str:
             return ""
         fields = json.loads(result.stdout).get("fields") or {}
         return _strip_html(fields.get("System.Description") or "")
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+    except _SUBPROC_ERRORS:
         return ""
 
 
@@ -427,7 +432,7 @@ def get_ado_backlog() -> list[dict]:
 
     try:
         return _cached("ado_backlog", run, ttl=60.0)
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+    except _SUBPROC_ERRORS:
         return []
 
 
@@ -517,14 +522,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/api/tasks":
             try:
                 self._json(get_tasks())
-            except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as e:
+            except (*_SUBPROC_ERRORS, subprocess.CalledProcessError) as e:
                 self._json({"error": str(e)}, status=500)
             return
         if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/log"):
             name = parsed.path[len("/api/tasks/") : -len("/log")]
             try:
                 tasks = {t["task"]: t for t in get_tasks()}
-            except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as e:
+            except (*_SUBPROC_ERRORS, subprocess.CalledProcessError) as e:
                 self._json({"error": str(e)}, status=500)
                 return
             task = tasks.get(name)
@@ -567,6 +572,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        # Browsers omit Origin entirely for a same-origin request (which is how the dashboard's
+        # own fetch("/api/...") calls look) but always send it on a cross-origin one — so this
+        # blocks another open tab from firing a drive-by POST (worktree provisioning, a real
+        # dispatched session) at this server without needing CORS preflight to save it.
+        origin = self.headers.get("Origin")
+        if origin and origin != f"http://127.0.0.1:{self.server.server_address[1]}":
+            self._json({"error": "cross-origin POST refused"}, status=403)
+            return
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/escalations/") and parsed.path.endswith("/answer"):
             rid = parsed.path[len("/api/escalations/") : -len("/answer")]

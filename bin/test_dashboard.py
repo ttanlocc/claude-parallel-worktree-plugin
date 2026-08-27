@@ -219,6 +219,34 @@ def test_enrich_merges_registry_ado_ids_with_pr_scraped_refs():
     )
 
 
+def test_git_branch_degrades_on_timeout():
+    original_run = subprocess.run
+
+    def mock_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired("git", 5)
+
+    subprocess.run = mock_run
+    try:
+        result = dashboard._git_branch("/some/path")
+        assert result is None
+    finally:
+        subprocess.run = original_run
+
+
+def test_lookup_pr_and_ticket_degrades_on_timeout():
+    original_run = subprocess.run
+
+    def mock_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired("gh", 10)
+
+    subprocess.run = mock_run
+    try:
+        result = dashboard._lookup_pr_and_ticket("feature/x")
+        assert result == {"pr_number": None, "pr_url": None, "pr_state": None, "ado_refs": []}
+    finally:
+        subprocess.run = original_run
+
+
 def test_shape_ado_ticket_extracts_known_fields():
     raw = {
         "id": 8148,

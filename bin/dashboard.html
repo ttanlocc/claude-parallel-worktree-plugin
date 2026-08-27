@@ -334,6 +334,8 @@ let lastData = [];
 let lastEscalations = { needs_human: [], recent_decisions: [] };
 let lastAdoTickets = [];
 let showManagedOnly = true;
+let tasksFailed = false; // true while /api/tasks is failing — session state is unknown, so
+                         // ticket rows would be guessing; renderTickets shows a banner instead.
 
 const ICONS = {
   globe: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>',
@@ -415,11 +417,20 @@ function computeTickets(adoTickets, tasks, esc) {
 }
 
 function renderTickets(rows) {
+  const box = document.getElementById("tickets");
+  if (tasksFailed) {
+    // Session state is unknown right now — every ticket would otherwise fall back to
+    // "not-started" with a live dispatch button, risking a duplicate dispatch onto a ticket
+    // that already has a session running. Show the warning and nothing else.
+    box.replaceChildren(el("div", "empty err",
+      "Can't confirm what's running — session status is unavailable, so ticket state may be " +
+      "stale. Dispatching is disabled until this clears."));
+    return;
+  }
   // ponytail: a 2s/5s poll tick would otherwise wipe an in-progress dispatch form (and
   // whatever the user typed) out from under them; skip this re-render while one is open and
   // let the next tick after it closes pick up any changes.
   if (document.querySelector("#tickets .dispatch-form")) return;
-  const box = document.getElementById("tickets");
   if (!rows.length) {
     box.replaceChildren(el("div", "empty", "No tickets assigned — nothing to show yet."));
     return;
@@ -650,8 +661,11 @@ async function pollTasks() {
 
   if (err) {
     document.getElementById("table-wrap").replaceChildren(el("div", "empty err", "Can't reach the server — " + err));
+    tasksFailed = true;
+    renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
     return;
   }
+  tasksFailed = false;
   lastData = data;
   byName = {};
   data.forEach(t => { byName[t.task] = t; });
