@@ -343,6 +343,13 @@ def _build_dispatch_prompt(tickets: list[dict], instructions: str) -> str:
     return "\n\n".join(parts)
 
 
+def _build_dispatch_argv(slug: str, mode: str, ticket_ids: list[str]) -> list[str]:
+    argv = [PARALLEL_TASK_SH, "start", slug, mode]
+    for tid in ticket_ids:
+        argv += ["--ticket", tid]
+    return argv
+
+
 def _strip_html(raw: str) -> str:
     text = _TAG_RE.sub(" ", raw)
     text = html.unescape(text)
@@ -568,6 +575,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"error": f"no escalation {rid}"}, status=404)
                 return
             self._json({"ok": True, "record": updated})
+            return
+        if parsed.path == "/api/tickets/dispatch":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > MAX_BODY_BYTES:
+                    self._json({"error": "request body too large"}, status=413)
+                    return
+                body = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("body must be a JSON object")
+                ticket_ids = [str(i) for i in (body.get("ticket_ids") or [])]
+                instructions = str(body.get("instructions") or "")
+            except (ValueError, json.JSONDecodeError) as e:
+                self._json({"error": f"bad request body: {e}"}, status=400)
+                return
+            if not ticket_ids:
+                self._json({"error": "ticket_ids is required and must be non-empty"}, status=400)
+                return
+
+            backlog_by_id = {t["id"]: t for t in get_ado_backlog()}
+            tickets = []
+            for tid in ticket_ids:
+                title = backlog_by_id.get(tid, {}).get("title", f"ticket {tid}")
+                tickets.append({"id": tid, "title": title, "description": _fetch_ado_description(tid)})
+
+            slug = _ticket_task_slug(tickets[0]["title"])
+            prompt = _build_dispatch_prompt(tickets, instructions)
+            start_argv = _build_dispatch_argv(slug, "native", ticket_ids)
+
+            start_result = subprocess.run(start_argv, capture_output=True, text=True, cwd=REPO_DIR, timeout=180)
+            if start_result.returncode != 0:
+                self._json({"error": f"start failed: {start_result.stderr[-2000:]}"}, status=500)
+                return
+
+            dispatch_result = subprocess.run(
+                [PARALLEL_TASK_SH, "dispatch", slug, prompt], capture_output=True, text=True, cwd=REPO_DIR, timeout=60
+            )
+            if dispatch_result.returncode != 0:
+                self._json({"error": f"dispatch failed: {dispatch_result.stderr[-2000:]}"}, status=500)
+                return
+
+            self._json({"ok": True, "task": slug})
             return
         self.send_response(404)
         self.end_headers()

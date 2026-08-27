@@ -8,6 +8,8 @@ import tempfile
 
 import dashboard
 from dashboard import (
+    PARALLEL_TASK_SH,
+    _build_dispatch_argv,
     _build_dispatch_prompt,
     _fetch_ado_description,
     _find_ado_links,
@@ -315,6 +317,25 @@ def test_build_dispatch_prompt_omits_instructions_section_when_blank():
     tickets = [{"id": "1", "title": "T", "description": "D"}]
     prompt = _build_dispatch_prompt(tickets, "")
     assert "Extra instructions" not in prompt
+
+
+def test_build_dispatch_argv_includes_one_ticket_flag_per_id():
+    argv = _build_dispatch_argv("fix-setpoint-guard", "native", ["8172", "8165"])
+    assert argv == [
+        PARALLEL_TASK_SH,
+        "start",
+        "fix-setpoint-guard",
+        "native",
+        "--ticket",
+        "8172",
+        "--ticket",
+        "8165",
+    ]
+
+
+def test_build_dispatch_argv_with_no_tickets():
+    argv = _build_dispatch_argv("some-task", "native", [])
+    assert argv == [PARALLEL_TASK_SH, "start", "some-task", "native"]
 
 
 if __name__ == "__main__":
