@@ -293,6 +293,49 @@ def get_sessions() -> list[dict]:
     return _cached("sessions", run)
 
 
+_ADO_ORG = "https://dev.azure.com/agentiqai"
+_ADO_PROJECT = "AgentIQ"
+_ADO_BACKLOG_WIQL = (
+    "SELECT [System.Id], [System.Title], [System.State] FROM WorkItems "
+    f"WHERE [System.TeamProject] = '{_ADO_PROJECT}' AND [System.AssignedTo] = @Me "
+    "AND [System.State] NOT IN ('Closed', 'Removed')"
+)
+
+
+def _shape_ado_ticket(raw: dict) -> dict:
+    fields = raw.get("fields") or {}
+    ticket_id = str(raw.get("id") or fields.get("System.Id") or "")
+    return {
+        "id": ticket_id,
+        "title": fields.get("System.Title") or "",
+        "state": fields.get("System.State") or "",
+        "url": _ADO_DEFAULT_BASE + ticket_id,
+    }
+
+
+def get_ado_backlog() -> list[dict]:
+    """Tickets assigned to you, not closed — the manager's read-only view into ADO. Any
+    failure (az not authenticated, network down) degrades to an empty backlog, same as every
+    other subprocess-backed source in this file — a dashboard that can't reach ADO still shows
+    live sessions."""
+
+    def run():
+        result = subprocess.run(
+            ["az", "boards", "query", "--org", _ADO_ORG, "--wiql", _ADO_BACKLOG_WIQL, "-o", "json"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            return []
+        return [_shape_ado_ticket(r) for r in json.loads(result.stdout)]
+
+    try:
+        return _cached("ado_backlog", run, ttl=60.0)
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
 def get_tasks() -> list[dict]:
     """Sessions running in this repo, enriched with registry data where it exists.
 
@@ -402,6 +445,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/api/escalations":
             try:
                 self._json(get_escalations())
+            except Exception as e:
+                self._json({"error": str(e)}, status=500)
+            return
+        if parsed.path == "/api/ado-tickets":
+            try:
+                self._json(get_ado_backlog())
             except Exception as e:
                 self._json({"error": str(e)}, status=500)
             return

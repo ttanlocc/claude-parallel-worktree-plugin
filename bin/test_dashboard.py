@@ -6,7 +6,7 @@ import os
 import tempfile
 
 import dashboard
-from dashboard import _find_ado_links, render_task_log, render_transcript_line
+from dashboard import _find_ado_links, _shape_ado_ticket, render_task_log, render_transcript_line
 
 
 def test_skips_non_conversation_lines():
@@ -202,6 +202,32 @@ def test_enrich_merges_registry_ado_ids_with_pr_scraped_refs():
         next(r for r in result["ado_refs"] if r["id"] == "8165")["url"]
         == "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/8165"
     )
+
+
+def test_shape_ado_ticket_extracts_known_fields():
+    raw = {
+        "id": 8148,
+        "fields": {
+            "System.Id": 8148,
+            "System.State": "New",
+            "System.Title": "Confirm agent run/trace tracked fields",
+        },
+    }
+    assert _shape_ado_ticket(raw) == {
+        "id": "8148",
+        "title": "Confirm agent run/trace tracked fields",
+        "state": "New",
+        "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/8148",
+    }
+
+
+def test_shape_ado_ticket_handles_missing_fields():
+    assert _shape_ado_ticket({"id": 1, "fields": {}}) == {
+        "id": "1",
+        "title": "",
+        "state": "",
+        "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/1",
+    }
 
 
 if __name__ == "__main__":
