@@ -32,4 +32,11 @@ else
   echo "PASS missing mode returns non-zero"
 fi
 
+if parse_start_args my-task native --ticket 2>/dev/null; then
+  echo "FAIL: trailing --ticket with no value should return non-zero"
+  fail=1
+else
+  echo "PASS: trailing --ticket with no value returns non-zero"
+fi
+
 [[ $fail -eq 0 ]] && echo "all passed" || { echo "FAILURES ABOVE"; exit 1; }
