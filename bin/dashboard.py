@@ -247,17 +247,21 @@ def _lookup_pr_and_ticket(branch: str) -> dict:
     }
 
 
-def _enrich_branch_and_links(cwd: str, known_branch: str | None) -> dict:
+def _enrich_branch_and_links(cwd: str, known_branch: str | None, known_ado_ids: list[str] | None = None) -> dict:
     """cwd is the empty string for a shared checkout (the repo root, not a dedicated worktree):
     its "current branch" belongs to whichever session last ran `git checkout` there, not to any
     one session, so deriving one would misattribute a PR/ticket to every session sharing it."""
     branch = known_branch
     if not branch and cwd:
         branch = _cached(f"branch:{cwd}", lambda: _git_branch(cwd), ttl=_ENRICH_TTL)
+    registry_refs = [{"id": i, "url": _ADO_DEFAULT_BASE + i} for i in (known_ado_ids or [])]
     if not branch:
-        return {"branch": branch, **_EMPTY_PR_TICKET}
+        merged = list(registry_refs)
+        return {"branch": branch, **_EMPTY_PR_TICKET, "ado_refs": merged}
     pr_ticket = _cached(f"prticket:{branch}", lambda: _lookup_pr_and_ticket(branch), ttl=_ENRICH_TTL)
-    return {"branch": branch, **pr_ticket}
+    seen = {r["id"] for r in registry_refs}
+    merged = list(registry_refs) + [r for r in pr_ticket["ado_refs"] if r["id"] not in seen]
+    return {"branch": branch, **pr_ticket, "ado_refs": merged}
 
 
 def get_registry() -> list[dict]:
@@ -325,7 +329,9 @@ def get_tasks() -> list[dict]:
                 "ports": reg.get("ports"),
                 "dev_status": reg.get("dev_status"),
                 "managed": bool(reg),
-                **_enrich_branch_and_links(cwd if os.path.realpath(cwd) != repo else "", reg.get("branch")),
+                **_enrich_branch_and_links(
+                    cwd if os.path.realpath(cwd) != repo else "", reg.get("branch"), reg.get("ado_ids")
+                ),
             }
         )
 
@@ -338,7 +344,7 @@ def get_tasks() -> list[dict]:
                     "kind": None,
                     "started_at": None,
                     "managed": True,
-                    **_enrich_branch_and_links(r.get("path", ""), r.get("branch")),
+                    **_enrich_branch_and_links(r.get("path", ""), r.get("branch"), r.get("ado_ids")),
                 }
             )
 

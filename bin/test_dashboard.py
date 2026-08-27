@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 
+import dashboard
 from dashboard import _find_ado_links, render_task_log, render_transcript_line
 
 
@@ -176,6 +177,26 @@ def test_find_ado_links_full_url_wins_over_bare_ref_for_same_id():
 
 def test_find_ado_links_empty_when_absent():
     assert _find_ado_links("just a normal PR title") == []
+
+
+def test_enrich_merges_registry_ado_ids_with_pr_scraped_refs():
+    original_lookup = dashboard._lookup_pr_and_ticket
+    original_branch = dashboard._git_branch
+    dashboard._git_branch = lambda cwd: "irrelevant"
+    dashboard._lookup_pr_and_ticket = lambda branch: {
+        "pr_number": 42,
+        "pr_url": "https://github.com/x/y/pull/42",
+        "pr_state": "OPEN",
+        "ado_refs": [{"id": "8165", "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/8165"}],
+    }
+    try:
+        result = dashboard._enrich_branch_and_links("some/path", "feature/x", known_ado_ids=["8172", "8165"])
+    finally:
+        dashboard._lookup_pr_and_ticket = original_lookup
+        dashboard._git_branch = original_branch
+    ids = sorted(r["id"] for r in result["ado_refs"])
+    assert ids == ["8165", "8172"]
+    assert result["pr_number"] == 42
 
 
 if __name__ == "__main__":
