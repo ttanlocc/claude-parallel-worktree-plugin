@@ -128,6 +128,7 @@
   .pill.mode    { background: #F3EEFD; color: #6D4AAE; font-weight: 500; }
   .pill.decision { background: var(--warn-bg); color: var(--warn-fg); }
   .pill.progress { background: var(--run-bg);  color: var(--run-fg); }
+  .pill.stalled { background: var(--stop-bg); color: var(--stop-fg); }
 
   /* ---------- tickets: the one glanceable summary — status + next action, nothing else ---------- */
   .ticket-row { display: flex; align-items: center; gap: 14px; padding: 14px 22px; border-top: 1px solid var(--line); }
@@ -364,7 +365,7 @@ function el(tag, cls, text) {
 }
 function pill(cls, label) {
   const p = el("span", "pill " + cls);
-  if (["busy","working","running","idle","done","blocked","stopped","decision","progress"].includes(cls)) p.append(el("span", "dot"));
+  if (["busy","working","running","idle","done","blocked","stopped","decision","progress","stalled"].includes(cls)) p.append(el("span", "dot"));
   p.append(document.createTextNode(label));
   return p;
 }
@@ -374,6 +375,7 @@ function pill(cls, label) {
 const TICKET_STATUS_LABEL = {
   done: "Done", decision: "Needs your decision", blocked: "Blocked",
   progress: "In progress", "not-started": "Not started",
+  stalled: "Stalled",
 };
 
 function computeTickets(adoTickets, tasks, esc) {
@@ -391,6 +393,8 @@ function computeTickets(adoTickets, tasks, esc) {
       status = "decision"; action = pendingEsc.question || "Needs a decision";
     } else if (matched.some(t => stateOf(t) === "blocked")) {
       status = "blocked"; action = "Check the blocker";
+    } else if (matched.length && matched.every(t => t.kind === null) && !matched.some(t => t.pr_url)) {
+      status = "stalled"; action = "Giao lại việc";
     } else if (!matched.length) {
       status = "not-started"; action = "Giao việc";
     } else if (withPr && withPr.pr_state === "MERGED") {
@@ -411,7 +415,7 @@ function computeTickets(adoTickets, tasks, esc) {
       status, action, actionHref,
     });
   }
-  const rank = { decision: 0, blocked: 1, "not-started": 2, progress: 3, done: 4 };
+  const rank = { decision: 0, blocked: 1, stalled: 2, "not-started": 3, progress: 4, done: 5 };
   rows.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9));
   return rows;
 }
@@ -450,8 +454,8 @@ function renderTickets(rows) {
     left.append(el("span", "ticket-title", r.title || ""));
     row.append(left, pill(r.status, TICKET_STATUS_LABEL[r.status] || r.status));
 
-    if (r.status === "not-started") {
-      const btn = el("button", "btn primary", "Giao việc");
+    if (r.status === "not-started" || r.status === "stalled") {
+      const btn = el("button", "btn primary", r.status === "stalled" ? "Giao lại việc" : "Giao việc");
       btn.onclick = () => openDispatchForm(row, r);
       row.append(btn);
     } else if (r.actionHref) {
