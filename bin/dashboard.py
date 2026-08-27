@@ -332,7 +332,7 @@ def get_ado_backlog() -> list[dict]:
 
     try:
         return _cached("ado_backlog", run, ttl=60.0)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return []
 
 

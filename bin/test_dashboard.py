@@ -3,10 +3,11 @@
 
 import json
 import os
+import subprocess
 import tempfile
 
 import dashboard
-from dashboard import _find_ado_links, _shape_ado_ticket, render_task_log, render_transcript_line
+from dashboard import _find_ado_links, _shape_ado_ticket, get_ado_backlog, render_task_log, render_transcript_line
 
 
 def test_skips_non_conversation_lines():
@@ -228,6 +229,21 @@ def test_shape_ado_ticket_handles_missing_fields():
         "state": "",
         "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/1",
     }
+
+
+def test_get_ado_backlog_degrades_on_timeout():
+    original_run = subprocess.run
+    dashboard._CACHE.pop("ado_backlog", None)  # Clear cache so test runs fresh
+
+    def mock_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired("az", 20)
+
+    subprocess.run = mock_run
+    try:
+        result = get_ado_backlog()
+        assert result == []
+    finally:
+        subprocess.run = original_run
 
 
 if __name__ == "__main__":
