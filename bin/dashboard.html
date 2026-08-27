@@ -310,6 +310,7 @@ let selected = null;
 let byName = {};
 let lastData = [];
 let lastEscalations = { needs_human: [], recent_decisions: [] };
+let lastAdoTickets = [];
 let showManagedOnly = true;
 
 const ICONS = {
@@ -344,41 +345,49 @@ function pill(cls, label) {
   return p;
 }
 
-// One row per ticket (grouped by ADO id, falling back to PR number), not per session — a
-// session with neither isn't tied to a ticket and has nothing to show here.
-const TICKET_STATUS_LABEL = { done: "Done", decision: "Needs your decision", blocked: "Blocked", progress: "In progress" };
+// One row per ticket in the manager's ADO backlog, not per session — a ticket with no
+// dispatched session yet still shows up as "Not started" so it's a click away from being one.
+const TICKET_STATUS_LABEL = {
+  done: "Done", decision: "Needs your decision", blocked: "Blocked",
+  progress: "In progress", "not-started": "Not started",
+};
 
-function computeTickets(tasks, esc) {
+function computeTickets(adoTickets, tasks, esc) {
   const escBySession = {};
   (esc.needs_human || []).forEach(e => { if (e.session_id) escBySession[e.session_id] = e; });
 
-  const groups = new Map();
-  for (const t of tasks) {
-    const key = t.ado_id ? "ado:" + t.ado_id : t.pr_number ? "pr:" + t.pr_number : null;
-    if (!key) continue;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(t);
-  }
-
   const rows = [];
-  for (const group of groups.values()) {
-    const t = group.find(g => g.ado_url || g.pr_url) || group[0];
-    const pendingEsc = group.map(g => escBySession[g.session_id]).find(Boolean);
+  for (const ticket of adoTickets) {
+    const matched = tasks.filter(t => (t.ado_refs || []).some(r => r.id === ticket.id));
+    const pendingEsc = matched.map(t => escBySession[t.session_id]).find(Boolean);
+    const withPr = matched.find(t => t.pr_url) || matched[0];
+
     let status, action, actionHref = null;
     if (pendingEsc) {
       status = "decision"; action = pendingEsc.question || "Needs a decision";
-    } else if (group.some(g => stateOf(g) === "blocked")) {
+    } else if (matched.some(t => stateOf(t) === "blocked")) {
       status = "blocked"; action = "Check the blocker";
-    } else if (t.pr_state === "MERGED") {
+    } else if (!matched.length) {
+      status = "not-started"; action = "Giao việc";
+    } else if (withPr && withPr.pr_state === "MERGED") {
       status = "done"; action = "—";
-    } else if (t.pr_state === "OPEN") {
-      status = "progress"; action = "Review PR #" + t.pr_number; actionHref = t.pr_url;
+    } else if (withPr && withPr.pr_state === "OPEN") {
+      status = "progress"; action = "Review PR #" + withPr.pr_number; actionHref = withPr.pr_url;
     } else {
       status = "progress"; action = "—";
     }
-    rows.push({ label: t.ado_id ? "AB#" + t.ado_id : "PR #" + t.pr_number, href: t.ado_url || t.pr_url, title: t.task, status, action, actionHref });
+
+    rows.push({
+      id: ticket.id,
+      label: "AB#" + ticket.id,
+      href: ticket.url,
+      title: ticket.title,
+      prLabel: withPr && withPr.pr_number ? "PR #" + withPr.pr_number : null,
+      prHref: withPr ? withPr.pr_url : null,
+      status, action, actionHref,
+    });
   }
-  const rank = { decision: 0, blocked: 1, progress: 2, done: 3 };
+  const rank = { decision: 0, blocked: 1, "not-started": 2, progress: 3, done: 4 };
   rows.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9));
   return rows;
 }
@@ -386,23 +395,29 @@ function computeTickets(tasks, esc) {
 function renderTickets(rows) {
   const box = document.getElementById("tickets");
   if (!rows.length) {
-    box.replaceChildren(el("div", "empty", "No tickets in flight — assign one to get started."));
+    box.replaceChildren(el("div", "empty", "No tickets assigned — nothing to show yet."));
     return;
   }
   const frag = document.createDocumentFragment();
   rows.forEach(r => {
     const row = el("div", "ticket-row");
     const left = el("div", "ticket-left");
-    if (r.href) {
-      const a = el("a", "ticket-id", r.label);
-      a.href = r.href; a.target = "_blank"; a.rel = "noopener";
-      left.append(a);
-    } else {
-      left.append(el("span", "ticket-id", r.label));
+    const idLink = el("a", "ticket-id", r.label);
+    idLink.href = r.href; idLink.target = "_blank"; idLink.rel = "noopener";
+    left.append(idLink);
+    if (r.prLabel) {
+      const prLink = el("a", "ticket-id", r.prLabel);
+      prLink.href = r.prHref; prLink.target = "_blank"; prLink.rel = "noopener";
+      left.append(prLink);
     }
     left.append(el("span", "ticket-title", r.title || ""));
     row.append(left, pill(r.status, TICKET_STATUS_LABEL[r.status] || r.status));
-    if (r.actionHref) {
+
+    if (r.status === "not-started") {
+      const btn = el("button", "btn primary", "Giao việc");
+      btn.onclick = () => openDispatchForm(row, r);
+      row.append(btn);
+    } else if (r.actionHref) {
       const a = el("a", "ticket-action", r.action);
       a.href = r.actionHref; a.target = "_blank"; a.rel = "noopener";
       row.append(a);
@@ -564,7 +579,6 @@ function renderAll() {
   renderStats(data);
   renderTable(data);
   if (selected) renderDetails();
-  renderTickets(computeTickets(lastData, lastEscalations));
 }
 
 function logRow(rec) {
@@ -737,7 +751,17 @@ async function pollEscalations() {
   }
   renderAudit(data.recent_decisions || []);
   lastEscalations = data;
-  renderTickets(computeTickets(lastData, lastEscalations));
+  renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
+}
+
+async function pollAdoTickets() {
+  try {
+    const res = await fetch("/api/ado-tickets");
+    const data = await res.json();
+    if (checkResponse(res, data)) return;
+    lastAdoTickets = data;
+    renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
+  } catch (e) { /* leave the last-known backlog in place on a transient failure */ }
 }
 
 pollEscalations();
@@ -752,6 +776,9 @@ pollTasks();
 pollLog();
 setInterval(pollTasks, 2000);
 setInterval(pollLog, 2000);
+
+pollAdoTickets();
+setInterval(pollAdoTickets, 5000);
 </script>
 </body>
 </html>
