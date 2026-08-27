@@ -18,7 +18,7 @@
 # which worktree owns which number, and give one place to list/stop/remove them.
 #
 # Usage:
-#   parallel-task.sh start    <task-name> <native|docker> [base-ref]
+#   parallel-task.sh start    <task-name> <native|docker> [base-ref] [--ticket <id> ...]
 #   parallel-task.sh dispatch <task-name> <prompt>
 #   parallel-task.sh list     [--json]
 #   parallel-task.sh stop     <task-name>
@@ -33,9 +33,6 @@ usage() {
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 WORKTREES_DIR="$REPO_ROOT/.claude/worktrees"
 REGISTRY="$WORKTREES_DIR/.parallel-registry.json"
-
-[[ $# -ge 1 ]] || usage
-COMMAND="$1"; shift || true
 
 mkdir -p "$WORKTREES_DIR"
 [[ -f "$REGISTRY" ]] || echo '{}' > "$REGISTRY"
@@ -119,9 +116,31 @@ copy_worktreeinclude() {
 
 # --- commands -----------------------------------------------------------------
 
-cmd_start() {
-  [[ $# -ge 2 ]] || { echo "error: start needs <task-name> <native|docker> [base-ref]" >&2; usage; }
+# parse_start_args "$@" -> prints "task<TAB>mode<TAB>base_ref<TAB>ado_ids_json" on success.
+# Pure parsing only — no filesystem/network access — so it's testable on its own.
+parse_start_args() {
+  local -a ticket_ids=()
+  local -a positional=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ticket)
+        [[ $# -ge 2 ]] || { echo "error: --ticket requires a value" >&2; return 1; }
+        ticket_ids+=("$2"); shift 2 ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  set -- "${positional[@]}"
+  [[ $# -ge 2 ]] || { echo "error: start needs <task-name> <native|docker> [base-ref]" >&2; return 1; }
   local task="$1" mode="$2" base_ref="${3:-origin/main}"
+  local ado_ids_json
+  ado_ids_json="$(jq -cn --args '$ARGS.positional' -- "${ticket_ids[@]}")"
+  printf '%s\t%s\t%s\t%s\n' "$task" "$mode" "$base_ref" "$ado_ids_json"
+}
+
+cmd_start() {
+  local parsed task mode base_ref ado_ids_json
+  parsed="$(parse_start_args "$@")" || usage
+  IFS=$'\t' read -r task mode base_ref ado_ids_json <<< "$parsed"
 
   [[ "$task" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "error: task-name must be kebab-case (got: '$task')" >&2; exit 1; }
   [[ "$mode" == "native" || "$mode" == "docker" ]] || { echo "error: mode must be 'native' or 'docker' (got: '$mode')" >&2; exit 1; }
@@ -184,8 +203,8 @@ cmd_start() {
 
   reg_set_entry "$task" "$(jq -n \
     --arg branch "$branch" --arg path "$wt_path" --arg mode "$mode" \
-    --argjson num "$num" --argjson ports "$ports_json" \
-    '{branch:$branch, path:$path, mode:$mode, num:$num, ports:$ports}')"
+    --argjson num "$num" --argjson ports "$ports_json" --argjson ado_ids "$ado_ids_json" \
+    '{branch:$branch, path:$path, mode:$mode, num:$num, ports:$ports, ado_ids:$ado_ids}')"
   trap - ERR
 
   echo ">> $task ready: branch $branch  mode $mode  worktree $wt_path"
@@ -341,14 +360,18 @@ cmd_dispatch() {
   echo ">> $task dispatched: short id $short_id  session $session_id"
 }
 
-case "$COMMAND" in
-  start)    cmd_start "$@" ;;
-  dispatch) cmd_dispatch "$@" ;;
-  list)     cmd_list "$@" ;;
-  stop)     cmd_stop "$@" ;;
-  rm)       cmd_rm "$@" ;;
-  *)
-    echo "error: unknown command '$COMMAND'" >&2
-    usage
-    ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  [[ $# -ge 1 ]] || usage
+  COMMAND="$1"; shift || true
+  case "$COMMAND" in
+    start)    cmd_start "$@" ;;
+    dispatch) cmd_dispatch "$@" ;;
+    list)     cmd_list "$@" ;;
+    stop)     cmd_stop "$@" ;;
+    rm)       cmd_rm "$@" ;;
+    *)
+      echo "error: unknown command '$COMMAND'" >&2
+      usage
+      ;;
+  esac
+fi
