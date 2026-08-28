@@ -91,7 +91,7 @@ to `dispatch`):
 Then dispatch:
 
 ```bash
-parallel-task.sh dispatch <task-name> "<prompt>"
+parallel-task.sh dispatch <task-name> "<prompt>" [--model <model>] [--effort low|medium|high|xhigh|max]
 ```
 
 This launches an independent, addressable top-level Claude Code session in that worktree
@@ -151,10 +151,14 @@ append(QUEUE_PATH, new_record(
 PY
 ```
 
-`manager_daemon.py` picks it up within seconds. Mechanical calls are settled by the manager and
-delivered straight back into the worker; anything irreversible, security-shaped, or genuinely
-ambiguous waits for you in the dashboard's "Decision required" panel. Every manager decision is
-listed under "Decided for you" so nothing is decided on your behalf invisibly.
+`manager_daemon.py` picks it up within seconds and puts it to the persistent Engineering Manager
+session — one long-lived session for the whole team, not a fresh model per escalation, so it
+remembers what it already decided and what else is in flight. Mechanical calls are settled there
+and delivered straight back into the worker; anything irreversible, security-shaped, or genuinely
+ambiguous waits for you in the dashboard's "Needs your decision" panel. Every automatic decision
+also shows up as a tinted line in the manager's chat, so nothing is decided on your behalf
+invisibly. The manager's charter — what it decides itself vs. escalates, how it dispatches and
+sizes work — is `skills/engineering-manager/SKILL.md`.
 
 Start the daemon alongside the dashboard:
 
