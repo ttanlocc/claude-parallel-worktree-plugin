@@ -516,6 +516,38 @@ def test_manager_chat_post_spawns_when_not_busy():
     assert spawned == [("hello", "cto")]
 
 
+def test_concurrent_posts_spawn_only_one_manager_turn():
+    """The busy-check and the spawn must be atomic, or a burst pays for N Opus calls."""
+    import threading as _t
+
+    import dashboard
+
+    spawned = []
+    state = {"busy": False}
+    gate = _t.Barrier(8)
+    statuses = []
+
+    def fake_busy():
+        return state["busy"]
+
+    def fake_start(text, source):
+        state["busy"] = True  # stands in for the real session lock being taken
+        spawned.append(text)
+
+    def one():
+        gate.wait(5)
+        statuses.append(dashboard._manager_chat_post("hi", busy=fake_busy, start=fake_start)[0])
+
+    threads = [_t.Thread(target=one) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert len(spawned) == 1, spawned
+    assert statuses.count(202) == 1, statuses
+    assert statuses.count(503) == 7, statuses
+
+
 def test_read_json_body_flags_oversized_body_as_413():
     """The one status code that must survive the body-reading extraction unchanged: a route-level
     `except ValueError: status=400` would silently flatten this to 400 for every POST route."""

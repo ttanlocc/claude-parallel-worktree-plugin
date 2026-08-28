@@ -556,6 +556,13 @@ def manager_chat_payload(history=None, busy=None) -> dict:
     return {"entries": entries, "busy": in_flight}
 
 
+# Serialises the busy-check-and-spawn pair so a burst of requests cannot each spawn a paid
+# manager turn in the window before the first one acquires the session lock.
+# ponytail: process-local only — a second dashboard process, or the daemon, can still race
+# this; manager_session's own flock is what keeps that safe, at the cost of a redundant call.
+_MANAGER_SPAWN_LOCK = threading.Lock()
+
+
 def _manager_chat_post(text: str, busy=None, start=None) -> tuple[int, dict]:
     """(status, body) for a manager/chat POST.
 
@@ -564,12 +571,24 @@ def _manager_chat_post(text: str, busy=None, start=None) -> tuple[int, dict]:
     ask() can raise happens inside it, never on the thread that's still holding this request — a
     `try/except ManagerBusy` wrapped around start_manager_turn would never see it. Checking busy()
     first gives the caller the same 503 signal from a place that can actually return it.
+
+    busy() and start() are serialised by _MANAGER_SPAWN_LOCK: without it, a burst of concurrent
+    requests can each observe busy()==False in the window before the first one's spawned thread
+    reaches manager_session's own flock, and each would spawn its own paid manager call. The lock
+    covers only this fast check-then-spawn pair, never the model call itself, so no request is held
+    across it. start() can also raise RuntimeError (thread.start() under OS thread exhaustion) —
+    caught here so this route returns 503 instead of dropping the connection, matching
+    _run_dispatch's precedent for the same failure mode.
     """
     busy = busy or manager_session.busy
     start = start or start_manager_turn
-    if busy():
-        return 503, {"error": "manager busy"}
-    start(text, "cto")
+    with _MANAGER_SPAWN_LOCK:
+        if busy():
+            return 503, {"error": "manager busy"}
+        try:
+            start(text, "cto")
+        except RuntimeError as e:
+            return 503, {"error": f"could not start manager turn: {e}"}
     return 202, {"ok": True}
 
 
