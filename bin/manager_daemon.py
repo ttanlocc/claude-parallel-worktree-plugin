@@ -120,7 +120,7 @@ def should_tick(last_tick: float, now: float, open_count: int, running_count: in
 
 def wake_pass(
     last_tick: float,
-    ask=manager_session.ask,
+    ask=manager_session.ask_result,
     agents_fn=list_agents,
     known_fn=registry_session_ids,
     open_fn=open_assignments,
@@ -128,16 +128,23 @@ def wake_pass(
     read_seen=None,
     write_seen=None,
 ) -> float:
-    """One wake pass. Returns the new last_tick. Never raises.
+    """One wake pass. Returns the new last_tick.
+
+    Can raise — write_seen and the injected callables are unguarded here. main() wraps every call
+    in try/except; the worst case of a raise is a duplicate wake on the next pass, not a crash.
 
     Each wake is marked seen only AFTER it has been delivered — the inverse ordering silently
-    drops a notification the moment the manager is busy, and it is never re-detected.
+    drops a notification the moment the manager is busy, and it is never re-detected. `ask` must be
+    ask_result's (ok, text) contract, not ask()'s bare string: ask() returns a failure NOTE on a
+    subprocess error instead of raising, so a caller that only guards with try/except reads that
+    failure as a delivered wake and never retries it.
     """
     read_seen = read_seen or _read_seen
     write_seen = write_seen or _write_seen
     agents = agents_fn()
     seen = read_seen()
-    fired, updated = finished_sessions(agents, seen, known_fn())
+    known = known_fn()
+    fired, updated = finished_sessions(agents, seen, known)
 
     fired_ids = {a.get("sessionId") for a in fired}
     for sid, status in updated.items():
@@ -148,7 +155,7 @@ def wake_pass(
     for agent in fired:
         name = agent.get("name") or agent.get("sessionId")
         try:
-            ask(
+            ok, text = ask(
                 f"Worker '{name}' (session {agent.get('sessionId')}) finished. "
                 "Check its work, update the ledger, and dispatch what comes next.",
                 "daemon:worker-finished",
@@ -156,21 +163,34 @@ def wake_pass(
         except Exception as e:
             print(f"  wake for {name} failed, will retry: {e}", file=sys.stderr)
             continue
+        if not ok:
+            print(f"  wake for {name} failed, will retry: {text}", file=sys.stderr)
+            continue
         seen[agent["sessionId"]] = agent.get("state") or agent.get("status")
         write_seen(seen)
 
     now = now_fn()
-    running = sum(1 for a in agents if a.get("status") == "busy")
+    # Registry-scoped only (a stranger's interactive session must not hold the tick open), and
+    # `state or status` (a background worker carries `state` and has no `status` key at all — see
+    # finished_sessions above, which gets this right).
+    running = sum(
+        1
+        for a in agents
+        if a.get("sessionId") in known and (a.get("state") or a.get("status")) not in (None, *DONE_STATUSES)
+    )
     if not should_tick(last_tick, now, len(open_fn()), running):
         return last_tick
     try:
-        ask(
+        ok, text = ask(
             "Tick. Walk the open assignments: chase anything past its ETA, update each note, "
             "and write a report if you have not written one in 24 hours.",
             "daemon:tick",
         )
     except Exception as e:
         print(f"  tick failed, retrying sooner: {e}", file=sys.stderr)
+        return now - TICK_SECONDS + TICK_RETRY_SECONDS
+    if not ok:
+        print(f"  tick failed, retrying sooner: {text}", file=sys.stderr)
         return now - TICK_SECONDS + TICK_RETRY_SECONDS
     return now
 

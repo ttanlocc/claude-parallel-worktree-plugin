@@ -90,6 +90,15 @@ def test_unparseable_date_never_raises_an_alarm():
     assert at_risk(a, NOW) is False
 
 
+def test_at_risk_ignores_a_malformed_plan_shape():
+    """plan is model-authored against a prose schema, not a validated contract — a scalar, a
+    dict, or a list of non-dict steps must degrade to "not at risk", never raise."""
+    for bad_plan in ("not a list", {"s1": "done"}, ["step one", "step two"]):
+        a = new_assignment("malformed")
+        a["plan"] = bad_plan
+        assert at_risk(a, NOW) is False, bad_plan
+
+
 def test_progress_none_without_a_plan():
     assert progress(new_assignment("unplanned")) is None
 
@@ -104,6 +113,13 @@ def test_progress_full():
     a = new_assignment("all")
     a["plan"] = [{"state": "done"}, {"state": "done"}]
     assert progress(a) == 1.0
+
+
+def test_progress_ignores_a_malformed_plan_shape():
+    for bad_plan in ("not a list", {"s1": "done"}, ["step one", "step two"]):
+        a = new_assignment("malformed")
+        a["plan"] = bad_plan
+        assert progress(a) is None, bad_plan
 
 
 def test_ledger_folds_to_the_latest_state():

@@ -105,6 +105,12 @@ and shown in the dashboard's decision panel the moment someone loads the page (`
 does that live, daemon or not) — but nothing pushes a notification, so it waits for a human who
 is never told to look.
 
+The same gap catches a decision you already made: answering a card (`POST
+/api/escalations/<id>/answer`) only records the answer, it does not deliver it — delivery is the
+daemon's job too. The card leaves the decision panel looking resolved while the worker stays
+blocked. Nothing is lost, though — the daemon delivers every answered-but-undelivered record as
+soon as it next starts.
+
 The chat, right column of the dashboard, talks to `bin/manager_session.py`: one long-lived Claude
 Code session, not a fresh model call per message. State an outcome ("ship the ledger fix by
 Friday, P1") and the manager plans it, sizes each step, and dispatches workers itself via

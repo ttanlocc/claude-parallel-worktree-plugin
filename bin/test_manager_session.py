@@ -115,6 +115,22 @@ def test_a_failing_call_is_recorded_not_swallowed():
     assert "failed" in entries[-1]["text"].lower()
 
 
+def test_a_failure_note_reports_status_not_the_whole_charter_and_argv():
+    """CalledProcessError/TimeoutExpired stringify by embedding the whole argv, and the argv
+    carries the charter prepended to the prompt — an f"{e}" here used to dump the entire system
+    prompt into the chat panel as the manager's reply (observed: two 6,397-character entries)."""
+    _isolate()
+
+    def blows_up(argv, **kwargs):
+        raise subprocess.CalledProcessError(1, argv, output="", stderr="no conversation found\n")
+
+    reply = ms.ask("do the thing", "cto", run=blows_up)
+    charter_first_line = ms.load_charter().splitlines()[0]
+    assert charter_first_line not in reply
+    assert "--model" not in reply
+    assert len(reply) < 500, "a failure note must not dump the whole command"
+
+
 def test_a_failing_call_releases_the_lock():
     _isolate()
     ms.ask("x", "cto", run=_Recorder(raises=OSError("boom")))

@@ -61,20 +61,33 @@ def _date_passed(value, now: float) -> bool:
 
 
 def at_risk(rec: dict, now: float) -> bool:
-    """Open, and either its deadline or an unfinished step's ETA has passed."""
+    """Open, and either its deadline or an unfinished step's ETA has passed.
+
+    `plan` is model-authored against a prose schema, not a validated contract — a plan that is not
+    a list, or a step that is not a dict, is ignored rather than raising.
+    """
     if rec.get("status") in ("done", "cancelled"):
         return False
     if _date_passed(rec.get("deadline"), now):
         return True
-    return any(_date_passed(step.get("eta"), now) for step in (rec.get("plan") or []) if step.get("state") != "done")
+    plan = rec.get("plan")
+    if not isinstance(plan, list):
+        return False
+    return any(
+        _date_passed(step.get("eta"), now) for step in plan if isinstance(step, dict) and step.get("state") != "done"
+    )
 
 
 def progress(rec: dict):
     """Fraction of plan steps done, or None when there is no plan yet.
 
     None rather than zero, so the UI can draw nothing instead of an empty bar implying no work.
+    Same tolerance as at_risk: a plan that is not a list, or a step that is not a dict, is ignored.
     """
-    steps = rec.get("plan") or []
+    plan = rec.get("plan")
+    if not isinstance(plan, list):
+        return None
+    steps = [s for s in plan if isinstance(s, dict)]
     if not steps:
         return None
     return sum(1 for s in steps if s.get("state") == "done") / len(steps)

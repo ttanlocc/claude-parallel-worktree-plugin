@@ -147,6 +147,23 @@ def _log_quietly(role: str, source: str, text: str) -> None:
         pass
 
 
+def _failure_note(e: Exception) -> str:
+    """A failure note the CTO can act on, with no prompt in it.
+
+    CalledProcessError and TimeoutExpired both stringify by embedding the whole argv, and argv
+    carries the charter plus the caller's text — so an f"{e}" here dumps the entire system prompt
+    into the chat panel as the manager's reply. Report the exit status and the last line of
+    stderr instead; the prompt is never the operator's problem.
+    """
+    if isinstance(e, subprocess.CalledProcessError):
+        tail = (e.stderr or "").strip().splitlines()
+        detail = tail[-1][:200] if tail else "không có stderr"
+        return f"manager call failed: claude thoát với mã {e.returncode} — {detail}"
+    if isinstance(e, subprocess.TimeoutExpired):
+        return f"manager call failed: không có phản hồi trong {e.timeout:.0f}s"
+    return f"manager call failed: {type(e).__name__}: {e}"
+
+
 def _ask_locked(text: str, source: str, run, timeout: int) -> tuple[bool, str]:
     """One turn, with the lock already held. Returns (ok, text) on every path."""
     _log_quietly("cto" if source == "cto" else "system", source, text)
@@ -170,7 +187,7 @@ def _ask_locked(text: str, source: str, run, timeout: int) -> tuple[bool, str]:
         if not isinstance(payload, dict):
             raise ValueError(f"expected a JSON object, got {type(payload).__name__}")
     except SUBPROC_ERRORS + (ValueError,) as e:
-        reply = f"manager call failed: {e}"
+        reply = _failure_note(e)
         _log_quietly("manager", source, reply)
         return False, reply
 

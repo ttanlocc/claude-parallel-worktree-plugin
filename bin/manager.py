@@ -87,8 +87,13 @@ def validate_decision(decision, record: dict) -> str | None:
 
 
 def resume_argv(session_id: str, message: str) -> list[str]:
-    """Argv that delivers a message into an existing session (verified: works, exits 0)."""
-    return ["claude", "--resume", session_id, "-p", message]
+    """Argv that delivers a message into an existing session.
+
+    -p is a boolean flag and the message is positional; without the -- separator a message
+    starting with a dash (e.g. "--help") is parsed as a flag, `claude` exits 0 printing usage,
+    and the message never reaches the session — a silent non-delivery, not a visible error.
+    """
+    return ["claude", "--resume", session_id, "-p", "--", message]
 
 
 def deliver_answer(session_id: str, message: str, timeout: int = 180) -> str:
@@ -124,7 +129,9 @@ def _route(record: dict, ask_model) -> dict:
     try:
         raw = ask_model(record)
     except Exception as e:  # a dead model must not wedge the queue
-        return {"outcome": "needs_human", "answer": None, "reason": f"manager call failed: {e}", "decided_by": None}
+        # str(e), not an f"manager call failed: {e}" wrapper — a failed ask_model already carries
+        # that prefix (manager_session._failure_note puts it there); prepending it again doubled it.
+        return {"outcome": "needs_human", "answer": None, "reason": str(e), "decided_by": None}
 
     try:
         decision = parse_decision(raw)

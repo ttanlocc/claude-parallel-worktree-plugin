@@ -92,6 +92,14 @@ def test_resume_argv_targets_the_session():
     assert argv[-1] == "the answer"
 
 
+def test_resume_argv_separates_the_message_so_a_leading_dash_is_not_read_as_a_flag():
+    """-p is a boolean flag and the message is positional; a decision option can start with a
+    dash (e.g. "--help"), and without -- it is parsed as a flag instead of delivered."""
+    argv = resume_argv("sess-abc", "--help")
+    assert argv[-3:] == ["-p", "--", "--help"]
+    assert argv.index("--") > argv.index("--resume"), "every flag must precede the separator"
+
+
 def test_parse_decision_handles_nested_objects():
     text = '{"answer": "retry", "reason": "flaky", "confidence": "high", "meta": {"attempt": 2}}'
     got = parse_decision(text)
@@ -177,6 +185,21 @@ def test_model_failure_falls_back_to_human():
     out = decide(r, boom)
     assert out["outcome"] == "needs_human"
     assert "model unavailable" in out["reason"]
+
+
+def test_model_failure_reason_is_not_double_prefixed():
+    """ask_model already raises with a "manager call failed: ..." message (that's what
+    manager_session._failure_note produces) — wrapping it in another "manager call failed: {e}"
+    here doubled the prefix and, before _failure_note existed, was how the whole charter leaked
+    into the escalation record's reason."""
+
+    def boom(record):
+        raise RuntimeError("manager call failed: claude thoát với mã 1 — no conversation found")
+
+    r = new_record("s", "red_tests", "retry?")
+    out = decide(r, boom)
+    assert out["outcome"] == "needs_human"
+    assert out["reason"].count("manager call failed") == 1, out["reason"]
 
 
 def test_clean_diff_gets_approved_by_manager():
@@ -633,7 +656,7 @@ def test_wake_pass_marks_a_successful_wake_so_it_does_not_fire_again():
 
     def ok_ask(text, source):
         calls.append(source)
-        return "on it"
+        return True, "on it"
 
     md.wake_pass(
         0,
@@ -709,10 +732,15 @@ def test_wake_pass_returns_now_after_a_successful_tick():
     import manager_daemon as md
 
     calls = []
+
+    def ok_ask(text, source):
+        calls.append(source)
+        return True, "on it"
+
     now = 5_000.0
     new_last_tick = md.wake_pass(
         0,
-        ask=lambda text, source: calls.append(source),
+        ask=ok_ask,
         agents_fn=list,
         known_fn=set,
         open_fn=lambda: [{"id": "a1"}],
@@ -722,6 +750,92 @@ def test_wake_pass_returns_now_after_a_successful_tick():
     )
     assert calls == ["daemon:tick"]
     assert new_last_tick == now
+
+
+def test_wake_pass_treats_a_failed_ask_result_as_a_failed_wake_not_a_delivered_one():
+    """manager_session.ask_result returns (False, note) on a subprocess failure instead of
+    raising — only ManagerBusy raises. A wake pass that only guards with try/except reads that
+    as success and never re-detects the notification."""
+    import manager_daemon as md
+
+    agent = {"sessionId": "w1", "name": "worker-1", "status": "idle"}
+    store, read_seen, write_seen = _seen_store({"w1": "busy"})
+
+    md.wake_pass(
+        0,
+        ask=lambda text, source: (False, "manager call failed: timed out"),
+        agents_fn=lambda: [agent],
+        known_fn=lambda: {"w1"},
+        open_fn=list,
+        now_fn=lambda: 0,
+        read_seen=read_seen,
+        write_seen=write_seen,
+    )
+    assert store.get("w1") == "busy", "a failed wake must not be marked seen"
+
+
+def test_wake_pass_treats_a_failed_ask_result_tick_as_a_failure_not_a_success():
+    import manager_daemon as md
+
+    now = 10_000.0
+    new_last_tick = md.wake_pass(
+        0,
+        ask=lambda text, source: (False, "manager call failed: timed out"),
+        agents_fn=list,
+        known_fn=set,
+        open_fn=lambda: [{"id": "a1"}],
+        now_fn=lambda: now,
+        read_seen=dict,
+        write_seen=lambda seen: None,
+    )
+    assert new_last_tick != now, "a failed tick must not be recorded as if it had succeeded"
+
+
+def test_wake_pass_does_not_tick_on_a_busy_session_outside_the_registry():
+    """0 assignments, 0 registry workers, but one of the operator's unrelated interactive
+    sessions is busy — an idle dashboard must not burn a paid tick call on nothing to manage."""
+    import manager_daemon as md
+
+    agent = {"sessionId": "stranger", "name": "unrelated-chat", "status": "busy"}
+    calls = []
+    new_last_tick = md.wake_pass(
+        0,
+        ask=lambda text, source: calls.append(source),
+        agents_fn=lambda: [agent],
+        known_fn=set,
+        open_fn=list,
+        now_fn=lambda: md.TICK_SECONDS + 1,
+        read_seen=dict,
+        write_seen=lambda seen: None,
+    )
+    assert calls == [], "must not tick on a session this plugin never dispatched"
+    assert new_last_tick == 0
+
+
+def test_wake_pass_ticks_on_a_registry_worker_running_via_state_with_an_empty_ledger():
+    """A dispatched background worker carries `state`, not `status` — and 0 ledger rows must
+    not mean 0 running, or live work never keeps the manager awake."""
+    import manager_daemon as md
+
+    agent = {"sessionId": "w1", "name": "worker-1", "state": "working"}
+    calls = []
+
+    def ok_ask(text, source):
+        calls.append(source)
+        return True, "on it"
+
+    new_last_tick = md.wake_pass(
+        0,
+        ask=ok_ask,
+        agents_fn=lambda: [agent],
+        known_fn=lambda: {"w1"},
+        open_fn=list,  # 0 assignments in the ledger
+        now_fn=lambda: md.TICK_SECONDS + 1,
+        read_seen=dict,
+        write_seen=lambda seen: None,
+    )
+    assert calls == ["daemon:tick"], "a registry worker still running must keep the tick alive"
+    assert new_last_tick == md.TICK_SECONDS + 1
 
 
 def test_registry_session_ids_empty_for_a_missing_file():
