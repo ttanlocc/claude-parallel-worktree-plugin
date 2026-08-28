@@ -12,6 +12,7 @@ import time
 import traceback
 
 import manager_session
+from assignments import open_assignments
 from escalations import QUEUE_PATH, append, classify, current_state, record_answer
 from manager import build_prompt, decide, deliver_answer
 
@@ -19,9 +20,34 @@ DELIVERY_ATTEMPTS = 3
 
 SEEN_PATH = os.path.expanduser("~/.claude/hermes/manager-seen-sessions.json")
 TICK_SECONDS = int(os.environ.get("PWT_MANAGER_TICK_SECONDS", "1800"))
-DONE_STATUSES = ("idle", "done", "finished", "stopped")
+TICK_RETRY_SECONDS = 60
+DONE_STATUSES = ("idle", "done", "stopped")
 
 SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
+
+REGISTRY_ENV = "PWT_REGISTRY"
+
+
+def registry_path() -> str:
+    """Where this plugin records the copies it provisioned."""
+    return os.environ.get(REGISTRY_ENV) or os.path.join(os.getcwd(), ".claude", "worktrees", ".parallel-registry.json")
+
+
+def registry_session_ids(path: str | None = None) -> set:
+    """Session ids this plugin actually dispatched.
+
+    Fails CLOSED: an unreadable registry yields an empty set and therefore no wakes. Waking on
+    an unknown session is worse than waking on none — every interactive session on the machine
+    goes busy->idle after each reply, and each one would cost an Opus call.
+    """
+    try:
+        with open(path or registry_path(), encoding="utf-8") as fh:
+            registry = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(registry, dict):
+        return set()
+    return {entry["session_id"] for entry in registry.values() if isinstance(entry, dict) and entry.get("session_id")}
 
 
 def list_agents(run=subprocess.run) -> list[dict]:
@@ -44,18 +70,23 @@ def list_agents(run=subprocess.run) -> list[dict]:
     return agents if isinstance(agents, list) else []
 
 
-def finished_sessions(agents: list[dict], seen: dict) -> tuple[list[dict], dict]:
+def finished_sessions(agents: list[dict], seen: dict, known: set) -> tuple[list[dict], dict]:
     """Sessions that just stopped working, and the status map to persist.
 
     A session absent from `seen` is recorded silently: on a daemon restart, work that finished days
-    ago must not be re-announced.
+    ago must not be re-announced. A session absent from `known` (this plugin's worktree registry) is
+    skipped entirely and never even recorded — every interactive session on the machine goes
+    busy->idle after each ordinary reply, and treating that as "a worker finished" would fire an
+    Opus call on someone else's unrelated chat.
     """
     fired, updated = [], dict(seen)
     for agent in agents:
         sid = agent.get("sessionId")
         if not sid:
             continue
-        status = agent.get("status")
+        if sid not in known:
+            continue
+        status = agent.get("state") or agent.get("status")
         previous = seen.get(sid)
         if previous is not None and previous != status and status in DONE_STATUSES:
             fired.append(agent)
@@ -85,6 +116,63 @@ def should_tick(last_tick: float, now: float, open_count: int, running_count: in
     if now - last_tick < TICK_SECONDS:
         return False
     return open_count > 0 or running_count > 0
+
+
+def wake_pass(
+    last_tick: float,
+    ask=manager_session.ask,
+    agents_fn=list_agents,
+    known_fn=registry_session_ids,
+    open_fn=open_assignments,
+    now_fn=time.time,
+    read_seen=None,
+    write_seen=None,
+) -> float:
+    """One wake pass. Returns the new last_tick. Never raises.
+
+    Each wake is marked seen only AFTER it has been delivered — the inverse ordering silently
+    drops a notification the moment the manager is busy, and it is never re-detected.
+    """
+    read_seen = read_seen or _read_seen
+    write_seen = write_seen or _write_seen
+    agents = agents_fn()
+    seen = read_seen()
+    fired, updated = finished_sessions(agents, seen, known_fn())
+
+    fired_ids = {a.get("sessionId") for a in fired}
+    for sid, status in updated.items():
+        if sid not in fired_ids:
+            seen[sid] = status
+    write_seen(seen)
+
+    for agent in fired:
+        name = agent.get("name") or agent.get("sessionId")
+        try:
+            ask(
+                f"Worker '{name}' (session {agent.get('sessionId')}) finished. "
+                "Check its work, update the ledger, and dispatch what comes next.",
+                "daemon:worker-finished",
+            )
+        except Exception as e:
+            print(f"  wake for {name} failed, will retry: {e}", file=sys.stderr)
+            continue
+        seen[agent["sessionId"]] = agent.get("state") or agent.get("status")
+        write_seen(seen)
+
+    now = now_fn()
+    running = sum(1 for a in agents if a.get("status") == "busy")
+    if not should_tick(last_tick, now, len(open_fn()), running):
+        return last_tick
+    try:
+        ask(
+            "Tick. Walk the open assignments: chase anything past its ETA, update each note, "
+            "and write a report if you have not written one in 24 hours.",
+            "daemon:tick",
+        )
+    except Exception as e:
+        print(f"  tick failed, retrying sooner: {e}", file=sys.stderr)
+        return now - TICK_SECONDS + TICK_RETRY_SECONDS
+    return now
 
 
 def ask_via_session(record: dict, ask=manager_session.ask_result) -> str:
@@ -169,25 +257,7 @@ def main() -> None:
             traceback.print_exc()
 
         try:
-            agents = list_agents()
-            fired, seen = finished_sessions(agents, _read_seen())
-            _write_seen(seen)
-            for agent in fired:
-                name = agent.get("name") or agent.get("sessionId")
-                manager_session.ask(
-                    f"Worker '{name}' (session {agent.get('sessionId')}) finished. "
-                    "Check its work, update the ledger, and dispatch what comes next.",
-                    "daemon:worker-finished",
-                )
-
-            running = sum(1 for a in agents if a.get("status") == "busy")
-            if should_tick(last_tick, time.time(), len(open_assignments()), running):
-                last_tick = time.time()
-                manager_session.ask(
-                    "Tick. Walk the open assignments: chase anything past its ETA, update each "
-                    "note, and write a report if you have not written one in 24 hours.",
-                    "daemon:tick",
-                )
+            last_tick = wake_pass(last_tick)
         except Exception as e:  # a bad wake pass must not kill the daemon
             print(f"  wake pass failed: {e}", file=sys.stderr)
 

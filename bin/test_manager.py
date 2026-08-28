@@ -493,11 +493,11 @@ def test_finished_sessions_fires_once_on_the_transition_to_idle():
     import manager_daemon as md
 
     agents = [{"sessionId": "a", "name": "task-a", "status": "idle"}]
-    fired, seen = md.finished_sessions(agents, {"a": "busy"})
+    fired, seen = md.finished_sessions(agents, {"a": "busy"}, known={"a"})
     assert [f["sessionId"] for f in fired] == ["a"]
     assert seen["a"] == "idle"
 
-    fired_again, _ = md.finished_sessions(agents, seen)
+    fired_again, _ = md.finished_sessions(agents, seen, known={"a"})
     assert fired_again == [], "the same status must not fire twice"
 
 
@@ -505,7 +505,7 @@ def test_finished_sessions_records_an_unseen_session_without_firing():
     """A daemon restart must not re-announce work that finished days ago."""
     import manager_daemon as md
 
-    fired, seen = md.finished_sessions([{"sessionId": "a", "name": "t", "status": "idle"}], {})
+    fired, seen = md.finished_sessions([{"sessionId": "a", "name": "t", "status": "idle"}], {}, known={"a"})
     assert fired == []
     assert seen == {"a": "idle"}
 
@@ -513,8 +513,44 @@ def test_finished_sessions_records_an_unseen_session_without_firing():
 def test_finished_sessions_ignores_a_still_busy_worker():
     import manager_daemon as md
 
-    fired, _ = md.finished_sessions([{"sessionId": "a", "name": "t", "status": "busy"}], {"a": "busy"})
+    fired, _ = md.finished_sessions([{"sessionId": "a", "name": "t", "status": "busy"}], {"a": "busy"}, known={"a"})
     assert fired == []
+
+
+def test_finished_sessions_skips_a_session_outside_the_registry():
+    """Every interactive session on the machine goes busy->idle after each ordinary reply — only
+    a session this plugin actually dispatched (present in the worktree registry) may fire a wake."""
+    import manager_daemon as md
+
+    fired, seen = md.finished_sessions(
+        [{"sessionId": "stranger", "name": "unrelated-chat", "status": "idle"}],
+        {},
+        known=set(),
+    )
+    assert fired == []
+    assert "stranger" not in seen, "an unknown session must not even be recorded"
+
+
+def test_finished_sessions_prefers_state_over_status_when_both_are_present():
+    """status only ever carries idle/busy; state carries done/blocked when it applies. state wins."""
+    import manager_daemon as md
+
+    fired, seen = md.finished_sessions(
+        [{"sessionId": "a", "name": "t", "status": "busy", "state": "done"}], {"a": "busy"}, known={"a"}
+    )
+    assert [f["sessionId"] for f in fired] == ["a"]
+    assert seen["a"] == "done"
+
+
+def test_finished_sessions_never_fires_on_blocked():
+    """A blocked worker is stuck, not finished — the tick chases it, not a wake."""
+    import manager_daemon as md
+
+    fired, seen = md.finished_sessions(
+        [{"sessionId": "a", "name": "t", "status": "busy", "state": "blocked"}], {"a": "busy"}, known={"a"}
+    )
+    assert fired == []
+    assert seen["a"] == "blocked"
 
 
 def test_list_agents_degrades_to_empty_on_a_subprocess_failure():
@@ -545,6 +581,199 @@ def test_should_tick_waits_out_the_interval():
     import manager_daemon as md
 
     assert md.should_tick(0, md.TICK_SECONDS - 1, open_count=3, running_count=1) is False
+
+
+def _seen_store(initial=None):
+    """A tiny in-memory fake for wake_pass's read_seen/write_seen, so a test can see whether a
+    wake was actually marked without touching the filesystem."""
+    store = dict(initial or {})
+
+    def read():
+        return dict(store)
+
+    def write(seen):
+        store.clear()
+        store.update(seen)
+
+    return store, read, write
+
+
+def test_wake_pass_leaves_a_failed_wake_unmarked_so_it_fires_again():
+    import manager_daemon as md
+
+    agent = {"sessionId": "w1", "name": "worker-1", "status": "idle"}
+    store, read_seen, write_seen = _seen_store({"w1": "busy"})
+    calls = []
+
+    def failing_ask(text, source):
+        calls.append(source)
+        raise RuntimeError("manager busy")
+
+    for _ in range(2):
+        md.wake_pass(
+            0,
+            ask=failing_ask,
+            agents_fn=lambda: [agent],
+            known_fn=lambda: {"w1"},
+            open_fn=list,
+            now_fn=lambda: 0,
+            read_seen=read_seen,
+            write_seen=write_seen,
+        )
+    assert calls == ["daemon:worker-finished", "daemon:worker-finished"], "must retry every pass"
+    assert store.get("w1") == "busy", "a failed wake must not be marked seen"
+
+
+def test_wake_pass_marks_a_successful_wake_so_it_does_not_fire_again():
+    import manager_daemon as md
+
+    agent = {"sessionId": "w1", "name": "worker-1", "status": "idle"}
+    store, read_seen, write_seen = _seen_store({"w1": "busy"})
+    calls = []
+
+    def ok_ask(text, source):
+        calls.append(source)
+        return "on it"
+
+    md.wake_pass(
+        0,
+        ask=ok_ask,
+        agents_fn=lambda: [agent],
+        known_fn=lambda: {"w1"},
+        open_fn=list,
+        now_fn=lambda: 0,
+        read_seen=read_seen,
+        write_seen=write_seen,
+    )
+    assert calls == ["daemon:worker-finished"]
+    assert store.get("w1") == "idle", "a delivered wake must be marked seen"
+
+    calls.clear()
+    md.wake_pass(
+        0,
+        ask=ok_ask,
+        agents_fn=lambda: [agent],
+        known_fn=lambda: {"w1"},
+        open_fn=list,
+        now_fn=lambda: 0,
+        read_seen=read_seen,
+        write_seen=write_seen,
+    )
+    assert calls == [], "a wake already marked seen must not fire again"
+
+
+def test_wake_pass_never_wakes_a_session_outside_the_registry():
+    import manager_daemon as md
+
+    agent = {"sessionId": "stranger", "name": "unrelated", "status": "idle"}
+    _store, read_seen, write_seen = _seen_store({"stranger": "busy"})
+    calls = []
+
+    md.wake_pass(
+        0,
+        ask=lambda text, source: calls.append(source),
+        agents_fn=lambda: [agent],
+        known_fn=set,
+        open_fn=list,
+        now_fn=lambda: 0,
+        read_seen=read_seen,
+        write_seen=write_seen,
+    )
+    assert calls == [], "a session outside the worktree registry must never be woken"
+
+
+def test_wake_pass_retries_a_failed_tick_sooner_than_a_full_interval():
+    import manager_daemon as md
+
+    def failing_ask(text, source):
+        raise RuntimeError("manager busy")
+
+    now = 10_000.0
+    new_last_tick = md.wake_pass(
+        0,
+        ask=failing_ask,
+        agents_fn=list,
+        known_fn=set,
+        open_fn=lambda: [{"id": "a1"}],
+        now_fn=lambda: now,
+        read_seen=dict,
+        write_seen=lambda seen: None,
+    )
+    # must not wait out a full interval before retrying...
+    assert md.should_tick(new_last_tick, now + md.TICK_RETRY_SECONDS, open_count=1, running_count=0) is True
+    # ...but also must not hammer it immediately
+    assert md.should_tick(new_last_tick, now + md.TICK_RETRY_SECONDS - 1, open_count=1, running_count=0) is False
+
+
+def test_wake_pass_returns_now_after_a_successful_tick():
+    import manager_daemon as md
+
+    calls = []
+    now = 5_000.0
+    new_last_tick = md.wake_pass(
+        0,
+        ask=lambda text, source: calls.append(source),
+        agents_fn=list,
+        known_fn=set,
+        open_fn=lambda: [{"id": "a1"}],
+        now_fn=lambda: now,
+        read_seen=dict,
+        write_seen=lambda seen: None,
+    )
+    assert calls == ["daemon:tick"]
+    assert new_last_tick == now
+
+
+def test_registry_session_ids_empty_for_a_missing_file():
+    import manager_daemon as md
+
+    assert md.registry_session_ids("/nonexistent/path/does-not-exist.json") == set()
+
+
+def test_registry_session_ids_empty_for_a_corrupt_file():
+    import manager_daemon as md
+
+    fd, path = _tempfile.mkstemp(suffix=".json")
+    _os.close(fd)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        assert md.registry_session_ids(path) == set()
+    finally:
+        _os.unlink(path)
+
+
+def test_registry_session_ids_empty_for_a_non_dict_payload():
+    import manager_daemon as md
+
+    fd, path = _tempfile.mkstemp(suffix=".json")
+    _os.close(fd)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(["not", "a", "dict"], fh)
+        assert md.registry_session_ids(path) == set()
+    finally:
+        _os.unlink(path)
+
+
+def test_registry_session_ids_returns_exactly_the_ids_present():
+    import manager_daemon as md
+
+    fd, path = _tempfile.mkstemp(suffix=".json")
+    _os.close(fd)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "task-a": {"session_id": "sess-1", "branch": "feature/a"},
+                    "task-b": {"session_id": "sess-2", "branch": "feature/b"},
+                    "task-c": {"branch": "feature/c-not-yet-dispatched"},
+                },
+                fh,
+            )
+        assert md.registry_session_ids(path) == {"sess-1", "sess-2"}
+    finally:
+        _os.unlink(path)
 
 
 if __name__ == "__main__":
