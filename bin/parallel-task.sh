@@ -159,6 +159,10 @@ parse_dispatch_args() {
     esac
   done
   [[ ${#positional[@]} -ge 1 ]] || { echo "error: dispatch needs <task-name> <prompt>" >&2; return 1; }
+  if [[ ${#positional[@]} -gt 1 ]]; then
+    echo "error: the prompt must be ONE quoted argument, got ${#positional[@]} — an unquoted prompt lets its own words be eaten as flags" >&2
+    return 1
+  fi
   DISPATCH_PROMPT="${positional[*]}"
 }
 

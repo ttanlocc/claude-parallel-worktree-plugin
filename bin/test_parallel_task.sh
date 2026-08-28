@@ -56,8 +56,8 @@ assert_eq "dispatch: effort only" "|low" "$DISPATCH_MODEL|$DISPATCH_EFFORT"
 parse_dispatch_args "$(printf 'line one\nline two')" --effort high
 assert_eq "dispatch: multi-line prompt survives" "$(printf 'line one\nline two')" "$DISPATCH_PROMPT"
 
-parse_dispatch_args "flags before the prompt" --effort max
-assert_eq "dispatch: flag order does not matter" "max|flags before the prompt" \
+parse_dispatch_args --effort max "flag came first"
+assert_eq "dispatch: flag order does not matter" "max|flag came first" \
   "$DISPATCH_EFFORT|$DISPATCH_PROMPT"
 
 if parse_dispatch_args "do it" --effort turbo 2>/dev/null; then
@@ -82,6 +82,16 @@ if parse_dispatch_args --model opus 2>/dev/null; then
   echo "FAIL: dispatch with no prompt should return non-zero"; fail=1
 else
   echo "PASS: dispatch with no prompt returns non-zero"
+fi
+
+parse_dispatch_args "exactly one quoted prompt with --model inside it"
+assert_eq "dispatch: a quoted prompt containing a flag word stays intact" \
+  "|exactly one quoted prompt with --model inside it" "$DISPATCH_MODEL|$DISPATCH_PROMPT"
+
+if parse_dispatch_args unquoted prompt words 2>/dev/null; then
+  echo "FAIL: a multi-word unquoted prompt should return non-zero"; fail=1
+else
+  echo "PASS: a multi-word unquoted prompt returns non-zero"
 fi
 
 [[ $fail -eq 0 ]] && echo "all passed" || { echo "FAILURES ABOVE"; exit 1; }
