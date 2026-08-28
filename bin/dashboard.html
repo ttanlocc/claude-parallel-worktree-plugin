@@ -80,9 +80,21 @@
   .stat-num { font-size: 26px; font-weight: 700; color: var(--navy); line-height: 1.1; letter-spacing: -.02em; }
   .stat-lbl { font-size: 13px; color: var(--muted); margin-top: 2px; }
 
-  /* ---------- layout below stats ---------- */
+  /* ---------- CTO counters (top of the manager view) ---------- */
+  .counters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+  .counter { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; box-shadow: var(--shadow); }
+  .counter-n { font-size: 26px; font-weight: 700; color: var(--navy); line-height: 1.1; letter-spacing: -.02em; }
+  .counter-label { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+  /* ---------- manager view: decisions/assignments/ADO left, chat right ---------- */
+  .manager-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 16px; align-items: start; }
+  .manager-col-main { display: flex; flex-direction: column; gap: 16px; }
+  .manager-col-side { position: sticky; top: 16px; max-height: calc(100dvh - 32px); display: flex; flex-direction: column; }
+  @media (max-width: 1100px) { .manager-grid { grid-template-columns: minmax(0, 1fr); } .manager-col-side { position: static; max-height: none; } }
+
+  /* ---------- layout below stats (operator section) ---------- */
   .cols { display: grid; grid-template-columns: 1fr 360px; gap: 16px; align-items: start; }
-  @media (max-width: 1180px) { .cols { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2,1fr); } }
+  @media (max-width: 1180px) { .cols { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2,1fr); } .counters { grid-template-columns: repeat(2,1fr); } }
 
   #operator-section { margin-top: 4px; }
   #operator-section summary {
@@ -204,27 +216,44 @@
   .empty.err { color: var(--stop-fg); }
   svg { display: block; }
 
-  .esc { padding: 18px 22px; border-top: 1px solid var(--line); }
-  .esc:first-child { border-top: 0; }
-  .esc-q { font-size: 14.5px; font-weight: 650; color: var(--navy); }
-  .esc-why { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
-  .esc-ev { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-  .esc-files { margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-  .esc-file { display: flex; align-items: center; gap: 10px; padding: 9px 13px; border-top: 1px solid var(--line);
-              font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
-  .esc-file:first-child { border-top: 0; }
-  .esc-file .add { color: var(--ok-fg); margin-left: auto; }
-  .esc-file .del { color: var(--stop-fg); }
-  .esc-actions { display: flex; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
   .btn.primary { background: var(--navy); border-color: var(--navy); color: #fff; font-weight: 600; }
   .btn.primary:hover { background: #12305c; border-color: #12305c; }
-  .audit-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 22px; border-top: 1px solid var(--line); }
-  .audit-row:first-child { border-top: 0; }
-  .audit-body { flex: 1; min-width: 0; }
-  .audit-q { font-size: 13px; color: var(--ink); }
-  .audit-a { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
-  .audit-a b { color: var(--ok-fg); font-weight: 650; }
-  .audit-age { font-family: var(--mono); font-size: 11px; color: var(--faint); flex-shrink: 0; }
+
+  /* ---------- decisions & assignments panels: bare h2, no .panel-head wrapper ---------- */
+  .muted { color: var(--muted); }
+  #decisions h2, #assignments h2 { margin: 0; padding: 18px 22px 14px; font-size: 17px; font-weight: 700; color: var(--navy); letter-spacing: -.015em; }
+  #decisions > p, #assignments > p { margin: 0; padding: 0 22px 22px; font-size: 13.5px; }
+
+  .decision { padding: 18px 22px; border-top: 1px solid var(--line); }
+  #decisions h2 + .decision { border-top: 0; }
+  .decision-q { font-size: 14.5px; font-weight: 650; color: var(--navy); }
+  .decision-why { font-size: 12.5px; margin-top: 4px; }
+  .decision-actions { display: flex; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
+
+  .assign { padding: 18px 22px; border-top: 1px solid var(--line); }
+  #assignments h2 + .assign { border-top: 0; }
+  .assign-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .assign-title { font-size: 14.5px; font-weight: 650; color: var(--navy); flex: 1; min-width: 120px; }
+  .assign > .muted { font-size: 12.5px; margin-top: 6px; }
+  .assign-note { font-size: 12.5px; margin-top: 10px; font-style: italic; }
+  .bar { height: 6px; border-radius: 4px; background: var(--idle-bg); margin-top: 12px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--run-dot); border-radius: 4px; }
+  .step { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+          padding: 7px 0 7px 14px; margin-top: 4px; font-size: 12.5px; border-left: 2px solid var(--line); }
+  .step-name { color: var(--ink); }
+  .step-done .step-name { color: var(--faint); text-decoration: line-through; }
+  .step-doing { border-left-color: var(--run-dot); }
+  .step-doing .step-name { color: var(--run-fg); font-weight: 600; }
+
+  .pill.p-P0 { background: var(--stop-bg); color: var(--stop-fg); }
+  .pill.p-P1 { background: var(--warn-bg); color: var(--warn-fg); }
+  .pill.p-P2 { background: var(--idle-bg); color: var(--idle-fg); }
+  .pill.s-assigned { background: var(--idle-bg); color: var(--idle-fg); }
+  .pill.s-in_progress { background: var(--run-bg); color: var(--run-fg); }
+  .pill.s-blocked { background: var(--stop-bg); color: var(--stop-fg); }
+  .pill.s-done { background: var(--ok-bg); color: var(--ok-fg); }
+  .pill.s-cancelled { background: var(--idle-bg); color: var(--faint); }
+  .pill.at-risk { background: var(--stop-bg); color: var(--stop-fg); }
 </style>
 </head>
 <body>
@@ -258,23 +287,23 @@
   </header>
 
   <main id="content">
-    <h2 class="page-title">Runtime health &amp; logs</h2>
+    <h2 class="page-title">Engineering Manager</h2>
 
-    <section class="panel" style="margin-bottom:20px;">
-      <div class="panel-head">
-        <h2>Tickets</h2>
-        <p>What's done, what's blocked, what needs you — nothing else.</p>
+    <div id="counters" class="counters"></div>
+    <div id="manager-grid" class="manager-grid">
+      <div class="manager-col-main">
+        <section id="decisions" class="panel"></section>
+        <section id="assignments" class="panel"></section>
+        <section id="ado" class="panel">
+          <div class="panel-head">
+            <h2>ADO backlog</h2>
+            <p>Reference only — assign an outcome, not a ticket</p>
+          </div>
+          <div id="tickets"></div>
+        </section>
       </div>
-      <div id="tickets"></div>
-    </section>
-
-    <section class="panel" id="decisions-panel" style="margin-bottom:20px; display:none;">
-      <div class="panel-head">
-        <h2>Decision required</h2>
-        <p>The manager stopped here because this one is yours to make.</p>
-      </div>
-      <div id="decisions"></div>
-    </section>
+      <aside id="manager-chat" class="panel manager-col-side"></aside>
+    </div>
 
     <details id="operator-section">
       <summary>Chi tiết vận hành</summary>
@@ -316,14 +345,6 @@
       <div id="logrows"></div>
     </section>
 
-    <section class="panel" style="margin-top:16px;">
-      <div class="panel-head">
-        <h2>Decided for you</h2>
-        <p>What the manager settled without interrupting you.</p>
-      </div>
-      <div id="audit"></div>
-    </section>
-
     </details>
   </main>
 </div>
@@ -334,6 +355,7 @@ let byName = {};
 let lastData = [];
 let lastEscalations = { needs_human: [], recent_decisions: [] };
 let lastAdoTickets = [];
+let lastAssignments = [];
 let showManagedOnly = true;
 let tasksFailed = false; // true while /api/tasks is failing — session state is unknown, so
                          // ticket rows would be guessing; renderTickets shows a banner instead.
@@ -502,19 +524,28 @@ function openDispatchForm(rowEl, ticket) {
   const cancelBtn = el("button", "btn", "Hủy");
   cancelBtn.onclick = () => form.remove();
   confirmBtn.onclick = async () => {
-    const ticketIds = [ticket.id, ...Object.keys(checkboxByIds).filter(id => checkboxByIds[id].checked)];
+    const bundledIds = Object.keys(checkboxByIds).filter(id => checkboxByIds[id].checked);
+    const bundled = [ticket, ...bundleCandidates.filter(c => bundledIds.includes(c.id))];
+    const instructions = textarea.value.trim();
+    const title = ticket.title + (instructions ? ` — ${instructions}` : "");
     confirmBtn.disabled = true; confirmBtn.textContent = "Đang tạo…";
     status.textContent = "";
     try {
-      const res = await fetch("/api/tickets/dispatch", {
+      const res = await fetch("/api/assignments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticket_ids: ticketIds, instructions: textarea.value }),
+        body: JSON.stringify({
+          title,
+          priority: "P1",
+          deadline: null,
+          ado_refs: bundled.map(t => ({ id: String(t.id), url: t.href })),
+        }),
       });
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
       form.remove();
-      pollTasks();
+      pollAssignments();
+      if (data.warning) alert(data.warning);
     } catch (e) {
       status.textContent = "Lỗi: " + (e.message || e);
       confirmBtn.disabled = false; confirmBtn.textContent = "Xác nhận & giao";
@@ -742,118 +773,143 @@ async function pollLog() {
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
-async function answerEscalation(id, answer) {
-  try {
-    const res = await fetch(`/api/escalations/${encodeURIComponent(id)}/answer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answer }),
-    });
-    const data = await res.json();
-    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-    pollEscalations();
-  } catch (e) {
-    alert("Could not send that answer: " + (e.message || e));
-  }
+function counterCard(label, n) {
+  const card = el("div", "counter");
+  card.append(el("div", "counter-n", String(n)), el("div", "counter-label", label));
+  return card;
 }
 
-function asList(v) {
-  if (Array.isArray(v)) return v;
-  if (v == null) return [];
-  return [v];
+// escalations here is the flat needs_human array — both callers pass lastEscalations.needs_human.
+function renderCounters(assignments, escalations) {
+  const open = assignments.filter(a => !["done", "cancelled"].includes(a.status));
+  const weekAgo = Date.now() / 1000 - 7 * 86400;
+  const cards = [
+    ["Đang giao", open.length],
+    ["Trễ hạn", open.filter(a => a.at_risk).length],
+    ["Chờ bạn", escalations.filter(e => e.status === "needs_human").length],
+    ["Xong tuần này", assignments.filter(a => a.status === "done" && (a.ts || 0) >= weekAgo).length],
+  ];
+  document.getElementById("counters").replaceChildren(...cards.map(([label, n]) => counterCard(label, n)));
 }
 
-function renderEscalation(r) {
-  const box = el("div", "esc");
-  box.append(el("div", "esc-q", r.question || "(no question)"));
-  if (r.reason) box.append(el("div", "esc-why", r.reason));
-
-  const ev = r.evidence || {};
-  const chips = el("div", "esc-ev");
-  if (ev.tests) chips.append(pill(ev.tests === "green" ? "done" : "blocked", "tests " + ev.tests));
-  if (r.session_id) chips.append(pill("surface", r.session_id));
-  if (ev.branch) chips.append(pill("surface", ev.branch));
-  if (ev.diff_stat) chips.append(pill("surface", ev.diff_stat));
-  asList(ev.deps_added).forEach(d => chips.append(pill("blocked", "new dep: " + d)));
-  if (chips.childNodes.length) box.append(chips);
-
-  const files = asList(ev.changed_files);
-  if (files.length) {
-    const list = el("div", "esc-files");
-    files.slice(0, 12).forEach(f => {
-      const row = el("div", "esc-file");
-      row.append(el("span", null, typeof f === "string" ? f : f.path || String(f)));
-      if (f && f.additions != null) row.append(el("span", "add", "+" + f.additions));
-      if (f && f.deletions != null) row.append(el("span", "del", "−" + f.deletions));
-      list.append(row);
-    });
-    if (files.length > 12) list.append(el("div", "esc-file", `… ${files.length - 12} more`));
-    box.append(list);
-  }
-
-  const actions = el("div", "esc-actions");
-  const options = (r.options && r.options.length) ? r.options : ["Approve", "Reject"];
-  options.forEach((opt, i) => {
-    const b = el("button", "btn" + (i === 0 ? " primary" : ""), opt);
-    b.onclick = () => answerEscalation(r.id, opt);
-    actions.append(b);
+function decisionCard(rec) {
+  const card = el("div", "decision");
+  card.append(el("div", "decision-q", rec.question || ""));
+  card.append(el("div", "decision-why muted", rec.reason || ""));
+  const actions = el("div", "decision-actions");
+  (rec.options || []).forEach(opt => {
+    const btn = el("button", "btn", opt);
+    btn.onclick = () => answerEscalation(rec.id, opt);
+    actions.append(btn);
   });
-  box.append(actions);
-  return box;
+  card.append(actions);
+  return card;
 }
 
-function renderAudit(rows) {
-  const box = document.getElementById("audit");
-  if (!rows.length) {
-    box.replaceChildren(el("div", "empty", "The manager hasn't had to decide anything yet."));
+// The record already carries options, validate_decision already requires the answer to be one
+// of them, and POST /api/escalations/<id>/answer already exists — one button per option.
+function renderDecisions(escalations) {
+  const pending = escalations.filter(e => e.status === "needs_human");
+  const panel = document.getElementById("decisions");
+  const head = el("h2", null, "Cần bạn quyết");
+  if (!pending.length) {
+    panel.replaceChildren(head, el("p", "muted", "Không có gì chờ bạn."));
     return;
   }
-  const frag = document.createDocumentFragment();
-  rows.forEach(r => {
-    const row = el("div", "audit-row");
-    row.append(el("span", "dot"));
-    const body = el("div", "audit-body");
-    body.append(el("div", "audit-q", r.question || ""));
-    const a = el("div", "audit-a");
-    a.append(el("b", null, r.answer || ""));
-    a.append(document.createTextNode(" — " + (r.reason || "")));
-    body.append(a);
-    row.append(body, el("span", "audit-age", fmtAge((r.answered_at || 0) * 1000)));
-    frag.append(row);
+  panel.replaceChildren(head, ...pending.map(decisionCard));
+}
+
+async function answerEscalation(id, answer) {
+  const res = await fetch(`/api/escalations/${encodeURIComponent(id)}/answer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answer, decided_by: "cto" }),
   });
-  box.replaceChildren(frag);
+  if (!res.ok) { alert(`Không gửi được: ${res.status}`); return; }
+  pollEscalations();
+}
+
+function assignCard(a) {
+  const card = el("div", "assign");
+  const top = el("div", "assign-top");
+  top.append(el("span", "pill p-" + a.priority, a.priority));
+  top.append(el("span", "assign-title", a.title));
+  top.append(el("span", "pill s-" + a.status, a.status));
+  if (a.at_risk) top.append(el("span", "pill at-risk", "trễ hạn"));
+  card.append(top);
+
+  // progress is null when there's no plan yet — draw no bar rather than a zero-width one,
+  // which would read as "started and got nowhere".
+  if (a.progress !== null && a.progress !== undefined) {
+    const bar = el("div", "bar");
+    const fill = el("div", "bar-fill");
+    fill.style.width = Math.round(a.progress * 100) + "%";
+    bar.append(fill);
+    card.append(bar);
+    const steps = a.plan || [];
+    const doneCount = steps.filter(s => s.state === "done").length;
+    card.append(el("div", "muted", `${doneCount}/${steps.length} bước`));
+  }
+
+  (a.plan || []).forEach(s => {
+    const row = el("div", "step step-" + s.state);
+    row.append(el("span", "step-name", s.step || ""));
+    row.append(el("span", "muted", [s.owner, s.eta].filter(Boolean).join(" · ")));
+    card.append(row);
+  });
+
+  if (a.note) card.append(el("div", "assign-note muted", a.note));
+  return card;
+}
+
+function renderAssignments(rows) {
+  const open = rows.filter(a => !["done", "cancelled"].includes(a.status));
+  const panel = document.getElementById("assignments");
+  const head = el("h2", null, "Việc đang giao");
+  if (!open.length) {
+    panel.replaceChildren(head, el("p", "muted", "Chưa có việc nào được giao."));
+    return;
+  }
+  panel.replaceChildren(head, ...open.map(assignCard));
 }
 
 async function pollEscalations() {
-  let data;
+  let data, err;
   try {
     const res = await fetch("/api/escalations");
     data = await res.json();
-    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-  } catch (e) {
-    const panel = document.getElementById("decisions-panel");
-    const list = document.getElementById("decisions");
-    panel.style.display = "";
-    list.replaceChildren(el("div", "esc", "Could not load escalations: " + (e.message || e)));
+    err = checkResponse(res, data);
+  } catch (e) { err = e.message || "request failed"; }
+
+  if (err) {
+    document.getElementById("decisions").replaceChildren(
+      el("h2", null, "Cần bạn quyết"),
+      el("p", "empty err", "Không tải được: " + err));
     return;
   }
-  const panel = document.getElementById("decisions-panel");
-  const list = document.getElementById("decisions");
-  const pending = data.needs_human || [];
-  panel.style.display = pending.length ? "" : "none";
-  if (pending.length) {
-    const cards = pending.map(r => {
-      try {
-        return renderEscalation(r);
-      } catch (e) {
-        return el("div", "esc", `Could not render escalation ${r.id || "?"}: ${e.message || e}`);
-      }
-    });
-    list.replaceChildren(...cards);
-  }
-  renderAudit(data.recent_decisions || []);
   lastEscalations = data;
+  renderDecisions(data.needs_human || []);
+  renderCounters(lastAssignments, data.needs_human || []);
   renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
+}
+
+async function pollAssignments() {
+  let data, err;
+  try {
+    const res = await fetch("/api/assignments");
+    data = await res.json();
+    err = checkResponse(res, data);
+  } catch (e) { err = e.message || "request failed"; }
+
+  if (err) {
+    document.getElementById("assignments").replaceChildren(
+      el("h2", null, "Việc đang giao"),
+      el("p", "empty err", "Không tải được: " + err));
+    return;
+  }
+  lastAssignments = data;
+  renderAssignments(lastAssignments);
+  renderCounters(lastAssignments, lastEscalations.needs_human || []);
 }
 
 async function pollAdoTickets() {
@@ -868,6 +924,9 @@ async function pollAdoTickets() {
 
 pollEscalations();
 setInterval(pollEscalations, 2000);
+
+pollAssignments();
+setInterval(pollAssignments, 2000);
 
 document.getElementById("managed-only-toggle").addEventListener("change", (e) => {
   showManagedOnly = e.target.checked;
