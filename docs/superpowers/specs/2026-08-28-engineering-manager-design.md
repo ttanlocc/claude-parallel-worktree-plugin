@@ -123,9 +123,14 @@ transcript is re-read on every future call, while a flag passed once at bootstra
 a `source` other than `cto` is the manager speaking unprompted — the UI tints those differently so
 proactive work is visible rather than silent.
 
-**Model.** `claude-sonnet-5`, overridable by `PWT_MANAGER_MODEL`. The old `claude-fable-5` was sized
-for classifying one record against a rubric; this session now plans, dispatches, and writes reports.
-`manager.py`'s `MANAGER_MODEL` constant moves here and takes the new default.
+**Model.** `claude-opus-5` at `--effort max`, overridable by `PWT_MANAGER_MODEL` and
+`PWT_MANAGER_EFFORT`. The old `claude-fable-5` was sized for classifying one record against a
+rubric; this session now plans, decomposes, sizes and routes every piece of work, and writes
+reports. It is one session for the whole team, so it is the wrong place to economize — a bad
+routing decision here costs more than the manager's own tokens ever will.
+`manager.py`'s `MANAGER_MODEL` constant moves here and takes the new default. Both flags are passed
+on every call, including resumes, because `--effort` applies to the invocation rather than to the
+stored session.
 
 **Failure handling.** A timeout or non-zero exit appends an entry with `role: "manager"` and text
 naming the failure, so a lost message is visible in the chat rather than silently dropped. The lock
@@ -193,6 +198,36 @@ def progress(rec):
 `progress()` returns `None` rather than zero when unplanned, and the UI draws no bar in that case.
 The number is always "steps done over steps planned" — never an invented percentage.
 
+### `bin/parallel-task.sh` (modified) — sizing each worker
+
+The manager does not dispatch every worker on the same model. It sizes the work first and routes
+accordingly, because a mechanical single-file edit and an ambiguous concurrency change do not
+deserve the same spend.
+
+`cmd_dispatch` gains two optional pass-through flags, forwarded to `claude --bg`:
+
+```bash
+parallel-task.sh dispatch <task> "<prompt>" [--model <model>] [--effort <level>]
+```
+
+Both are validated by a pure `parse_dispatch_args` function, in the same testable shape as the
+existing `parse_start_args`: `--effort` must be one of `low`, `medium`, `high`, `xhigh`, `max`, and
+a flag given without a value is an error rather than a silently swallowed next argument. Omit both
+and behaviour is exactly as today. The chosen values are written into the registry entry so the
+dashboard can show what each worker is costing.
+
+The routing rubric itself is charter, not code — the manager applies judgement per task:
+
+| Work | Model | Effort |
+|---|---|---|
+| Complex: multi-file design, security or concurrency, genuinely ambiguous requirements | `opus` | `max` |
+| Medium: integration across a few files, pattern matching, debugging a known failure | `sonnet` | `high` |
+| Simple: single file, mechanical change, the brief already contains the code to write | `sonnet` | `medium`, or `low` for pure transcription |
+
+Code enforces only the value ranges; which tier a task belongs to is the manager's call, and the
+charter requires it to state the tier and its reason when it dispatches, so a wrong routing decision
+is visible in the chat rather than buried.
+
 ### `bin/manager_daemon.py` (modified)
 
 The existing pass over the escalation queue is unchanged in shape. Two things change and two are
@@ -228,7 +263,9 @@ cannot drift.
 
 Contents: the eight verbs and what each obliges the manager to do; the ledger's location and schema;
 how to dispatch work (`parallel-task.sh start` then `dispatch`, never editing repo files directly);
-when to file an escalation instead of deciding; and the hard boundaries carried over from the
+the model and effort routing rubric above, with the requirement to state the chosen tier and its
+reason when dispatching; when to file an escalation instead of deciding; and the hard boundaries
+carried over from the
 existing orchestrator role — never `git push`, never open a PR, never touch `main`, never edit
 repository files for ticket work, never answer a permission prompt on a human's behalf.
 
@@ -333,6 +370,8 @@ Required coverage:
   session unseen on first sight is recorded silently; a failing `claude agents` call does not abort
   the pass.
 - Tick gating — no open assignments and no running workers produces no tick.
+- `parse_dispatch_args` — both flags parsed; each alone; neither; an unknown effort level rejected;
+  a flag given without a value rejected rather than consuming the next argument.
 - Routes — `POST /api/manager/chat` returns 202 without waiting on the model; `POST /api/assignments`
   rejects a missing title and an out-of-range priority; the `Origin` guard covers both.
 
@@ -364,9 +403,11 @@ rather than retry, so the failure is visible and the human can act.
 | `bin/assignments.py` | New — ledger, `at_risk`, `progress` |
 | `bin/manager_daemon.py` | Route escalations to the session; add worker-completion and tick wakes |
 | `bin/manager.py` | Drop `manager_argv` / `run_manager` and move `MANAGER_MODEL` to `manager_session.py` with the new default; keep `resume_argv` / `deliver_answer` and all judgement logic |
+| `bin/parallel-task.sh` | `dispatch` gains validated `--model` / `--effort` pass-through, recorded in the registry |
 | `bin/dashboard.py` | Add manager and assignment routes; remove `/api/tickets/dispatch` and its helpers |
 | `bin/dashboard.html` | Two-column layout, chat panel, assignments panel, decision buttons, new counters |
 | `skills/engineering-manager/SKILL.md` | New — the charter, and the session's bootstrap text |
 | `bin/test_manager_session.py`, `bin/test_assignments.py` | New |
+| `bin/test_parallel_task.sh` | Extended with `parse_dispatch_args` cases |
 | `bin/test_dashboard.py`, `bin/test_manager.py` | Extended; tests for removed helpers deleted |
 | `README.md` | Document the manager session, the ledger, and the new dashboard |
