@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Live status/log dashboard for parallel-task.sh copies."""
 
-import html
 import json
 import re
 
@@ -338,31 +337,6 @@ def _shape_ado_ticket(raw: dict) -> dict:
     }
 
 
-_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def _strip_html(raw: str) -> str:
-    text = _TAG_RE.sub(" ", raw)
-    text = html.unescape(text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _fetch_ado_description(ticket_id: str) -> str:
-    try:
-        result = subprocess.run(
-            ["az", "boards", "work-item", "show", "--id", ticket_id, "--org", _ADO_ORG, "-o", "json"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0:
-            return ""
-        fields = json.loads(result.stdout).get("fields") or {}
-        return _strip_html(fields.get("System.Description") or "")
-    except _SUBPROC_ERRORS:
-        return ""
-
-
 def get_ado_backlog() -> list[dict]:
     """Tickets assigned to you, not closed — the manager's read-only view into ADO. Any
     failure (az not authenticated, network down) degrades to an empty backlog, same as every
@@ -533,6 +507,65 @@ def _manager_chat_post(text: str, busy=None, start=None) -> tuple[int, dict]:
     return 202, {"ok": True}
 
 
+def _parse_ado_refs(raw):
+    """Normalise the ado_refs field, raising ValueError with a caller-facing message.
+
+    A list of bare id strings is the shape the retired ticket-dispatch route used, so it is the
+    mistake a caller is most likely to make. It must produce a 400, not a dropped connection.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("ado_refs must be a list")
+    refs = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("each ado_refs entry must be an object with id and url")
+        rid = item.get("id")
+        if not isinstance(rid, str) or not rid.strip():
+            raise ValueError("each ado_refs entry needs a non-empty string id")
+        url = item.get("url")
+        refs.append({"id": rid, "url": url if isinstance(url, str) else ""})
+    return refs
+
+
+def _assignments_post(body, append_fn=None, start=None):
+    """Record one assignment and tell the manager. Returns (status, payload); never raises.
+
+    The ledger write is what must not be lost — it is the durable commitment. Failing to notify
+    the manager is reported but does not fail the request, because the daemon's tick walks open
+    assignments and will rediscover it.
+    """
+    append_fn = append_fn or (lambda rec: append(ledger.LEDGER_PATH, rec))
+    start = start or start_manager_turn
+    try:
+        refs = _parse_ado_refs(body.get("ado_refs"))
+        record = ledger.new_assignment(
+            body.get("title") or "",
+            priority=body.get("priority") or "P1",
+            deadline=body.get("deadline"),
+            ado_refs=refs,
+        )
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    try:
+        append_fn(record)
+    except OSError as e:
+        return 500, {"error": f"could not write the ledger: {e}"}
+    names = ", ".join(f"AB#{r['id']}" for r in record["ado_refs"]) or "none"
+    try:
+        start(
+            f"New assignment {record['id']}: {record['title']}\n"
+            f"Priority {record['priority']}, deadline {record['deadline'] or 'none'}, "
+            f"ADO refs: {names}.\n"
+            "It is already in the ledger. Plan it, size each step, dispatch, and confirm in one line.",
+            "cto",
+        )
+    except Exception as e:
+        return 202, {"ok": True, "record": record, "warning": f"manager not notified: {e}"}
+    return 202, {"ok": True, "record": record}
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def _json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
@@ -683,26 +716,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except ValueError as e:
                 self._body_error(e)
                 return
-            try:
-                record = ledger.new_assignment(
-                    body.get("title") or "",
-                    priority=body.get("priority") or "P1",
-                    deadline=body.get("deadline"),
-                    ado_refs=body.get("ado_refs") or [],
-                )
-            except ValueError as e:
-                self._json({"error": str(e)}, status=400)
-                return
-            append(ledger.LEDGER_PATH, record)
-            refs = ", ".join(f"AB#{r.get('id')}" for r in record["ado_refs"]) or "none"
-            start_manager_turn(
-                f"New assignment {record['id']}: {record['title']}\n"
-                f"Priority {record['priority']}, deadline {record['deadline'] or 'none'}, "
-                f"ADO refs: {refs}.\n"
-                "It is already in the ledger. Plan it, size each step, dispatch, and confirm in one line.",
-                "cto",
-            )
-            self._json({"ok": True, "record": record}, status=202)
+            status, resp = _assignments_post(body)
+            self._json(resp, status=status)
             return
         if parsed.path == "/api/manager/chat":
             try:

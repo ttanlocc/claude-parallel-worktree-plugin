@@ -8,10 +8,8 @@ import tempfile
 
 import dashboard
 from dashboard import (
-    _fetch_ado_description,
     _find_ado_links,
     _shape_ado_ticket,
-    _strip_html,
     get_ado_backlog,
     render_task_log,
     render_transcript_line,
@@ -282,33 +280,6 @@ def test_get_ado_backlog_degrades_on_timeout():
         subprocess.run = original_run
 
 
-def test_strip_html_removes_tags_and_unescapes_entities():
-    raw = "<h2><b>Title</b></h2><div>Body&nbsp;text with <i>emphasis</i>.</div>"
-    assert _strip_html(raw) == "Title Body text with emphasis ."
-
-
-def test_strip_html_collapses_whitespace():
-    assert _strip_html("<p>a</p>\n\n<p>   b   </p>") == "a b"
-
-
-def test_strip_html_handles_empty_string():
-    assert _strip_html("") == ""
-
-
-def test_fetch_ado_description_degrades_on_timeout():
-    original_run = subprocess.run
-
-    def mock_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired("az", 15)
-
-    subprocess.run = mock_run
-    try:
-        result = _fetch_ado_description("8148")
-        assert result == ""
-    finally:
-        subprocess.run = original_run
-
-
 def test_start_manager_turn_returns_before_the_model_does():
     """A model call must never be held inside an HTTP request."""
     import threading
@@ -474,6 +445,123 @@ def test_read_json_body_parses_valid_object():
     payload = json.dumps({"text": "hi"}).encode()
     fake = types.SimpleNamespace(headers={"Content-Length": str(len(payload))}, rfile=io.BytesIO(payload))
     assert dashboard.Handler._read_json_body(fake) == {"text": "hi"}
+
+
+def test_assignments_post_rejects_bare_string_ado_refs():
+    """The most likely caller mistake — the retired route used `ticket_ids: list[str]` — must
+    produce a 400, not a dropped connection after an unrecoverable ledger write."""
+    import dashboard
+
+    appended = []
+    status, resp = dashboard._assignments_post(
+        {"title": "fix it", "ado_refs": "8172"}, append_fn=appended.append, start=lambda *a: None
+    )
+    assert status == 400
+    assert "error" in resp
+    assert appended == []
+
+
+def test_assignments_post_rejects_non_list_ado_refs():
+    import dashboard
+
+    status, resp = dashboard._assignments_post(
+        {"title": "fix it", "ado_refs": 8172}, append_fn=lambda rec: None, start=lambda *a: None
+    )
+    assert status == 400
+    assert "error" in resp
+
+
+def test_assignments_post_rejects_ado_ref_missing_id():
+    import dashboard
+
+    status, resp = dashboard._assignments_post(
+        {"title": "fix it", "ado_refs": [{"url": "https://example.com"}]},
+        append_fn=lambda rec: None,
+        start=lambda *a: None,
+    )
+    assert status == 400
+    assert "error" in resp
+
+
+def test_assignments_post_rejects_ado_ref_with_non_string_id():
+    import dashboard
+
+    status, resp = dashboard._assignments_post(
+        {"title": "fix it", "ado_refs": [{"id": 8172, "url": "https://example.com"}]},
+        append_fn=lambda rec: None,
+        start=lambda *a: None,
+    )
+    assert status == 400
+    assert "error" in resp
+
+
+def test_assignments_post_normalises_ado_refs_and_defaults_missing_url():
+    import dashboard
+
+    appended = []
+    started = []
+    status, resp = dashboard._assignments_post(
+        {"title": "fix it", "ado_refs": [{"id": "8172", "url": "https://x/8172"}, {"id": "8165"}]},
+        append_fn=appended.append,
+        start=lambda text, source: started.append((text, source)),
+    )
+    assert status == 202
+    assert resp["record"]["ado_refs"] == [
+        {"id": "8172", "url": "https://x/8172"},
+        {"id": "8165", "url": ""},
+    ]
+    assert appended == [resp["record"]]
+    assert len(started) == 1
+
+
+def test_assignments_post_rejects_blank_title():
+    import dashboard
+
+    status, resp = dashboard._assignments_post({"title": "   "}, append_fn=lambda rec: None, start=lambda *a: None)
+    assert status == 400
+    assert "error" in resp
+
+
+def test_assignments_post_rejects_out_of_range_priority():
+    import dashboard
+
+    status, resp = dashboard._assignments_post(
+        {"title": "fix it", "priority": "P9"}, append_fn=lambda rec: None, start=lambda *a: None
+    )
+    assert status == 400
+    assert "error" in resp
+
+
+def test_assignments_post_returns_500_and_skips_notify_when_ledger_write_fails():
+    import dashboard
+
+    started = []
+
+    def boom(rec):
+        raise OSError("disk full")
+
+    status, resp = dashboard._assignments_post(
+        {"title": "fix it"}, append_fn=boom, start=lambda text, source: started.append(text)
+    )
+    assert status == 500
+    assert "error" in resp
+    assert started == []
+
+
+def test_assignments_post_returns_202_with_warning_when_notify_fails():
+    """The ledger write already succeeded — losing the notification must not lose the record."""
+    import dashboard
+
+    appended = []
+
+    def boom(text, source):
+        raise RuntimeError("manager busy")
+
+    status, resp = dashboard._assignments_post({"title": "fix it"}, append_fn=appended.append, start=boom)
+    assert status == 202
+    assert resp["record"]["title"] == "fix it"
+    assert "warning" in resp
+    assert appended == [resp["record"]]
 
 
 def test_get_assignments_decorates_with_at_risk_and_progress():
