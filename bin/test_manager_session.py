@@ -250,6 +250,20 @@ def test_a_missing_charter_is_reported_not_raised():
         ms.CHARTER_PATH = _CHARTER_BACKUP
 
 
+def test_ask_result_flags_a_failure_so_a_parser_cannot_mistake_it_for_a_reply():
+    _isolate()
+    ok, text = ms.ask_result("x", "cto", run=_Recorder(raises=subprocess.TimeoutExpired("claude", 600)))
+    assert ok is False
+    assert "failed" in text.lower()
+
+
+def test_ask_result_flags_a_real_reply():
+    _isolate()
+    ok, text = ms.ask_result("x", "cto", run=_Recorder(result="fine"))
+    assert ok is True
+    assert text == "fine"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

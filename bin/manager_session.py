@@ -2,9 +2,9 @@
 """The one serialized door to the persistent Engineering Manager session.
 
 Everything reaching the manager — the CTO's chat, escalations, worker-completion and tick wakes —
-goes through ask(). One session means one memory: the manager knows what it dispatched, what it
-decided, and what the CTO told it. An flock serializes callers, because two processes resuming the
-same session would race on its transcript.
+goes through ask() or ask_result(). One session means one memory: the manager knows what it
+dispatched, what it decided, and what the CTO told it. An flock serializes callers, because two
+processes resuming the same session would race on its transcript.
 """
 
 import contextlib
@@ -147,8 +147,8 @@ def _log_quietly(role: str, source: str, text: str) -> None:
         pass
 
 
-def _ask_locked(text: str, source: str, run, timeout: int) -> str:
-    """One turn, with the lock already held. Returns a string on every path."""
+def _ask_locked(text: str, source: str, run, timeout: int) -> tuple[bool, str]:
+    """One turn, with the lock already held. Returns (ok, text) on every path."""
     _log_quietly("cto" if source == "cto" else "system", source, text)
     try:
         session_id = _read_state().get("session_id")
@@ -156,7 +156,7 @@ def _ask_locked(text: str, source: str, run, timeout: int) -> str:
     except OSError as e:
         reply = f"manager call failed before dispatch: {e}"
         _log_quietly("manager", source, reply)
-        return reply
+        return False, reply
 
     try:
         proc = run(
@@ -172,7 +172,7 @@ def _ask_locked(text: str, source: str, run, timeout: int) -> str:
     except SUBPROC_ERRORS + (ValueError,) as e:
         reply = f"manager call failed: {e}"
         _log_quietly("manager", source, reply)
-        return reply
+        return False, reply
 
     reply = payload.get("result") or ""
     if not session_id:
@@ -195,19 +195,15 @@ def _ask_locked(text: str, source: str, run, timeout: int) -> str:
                     "will start a new session and lose this context",
                 )
     _log_quietly("manager", source, reply)
-    return reply
+    return True, reply
 
 
-def ask(text: str, source: str, run=subprocess.run, timeout: int = CALL_TIMEOUT) -> str:
-    """Send one turn to the manager and return its reply.
+def ask_result(text: str, source: str, run=subprocess.run, timeout: int = CALL_TIMEOUT) -> tuple[bool, str]:
+    """One turn. Returns (ok, text) — ok is False when the call failed and text is the failure note.
 
-    The charter is prepended to the FIRST user message rather than passed as a flag, because
-    --resume replays the transcript: a charter inside the transcript is re-read on every later
-    call, while a flag passed once at bootstrap is not.
-
-    Every failure except ManagerBusy becomes a logged reply string rather than an exception — a
-    caller that loses its message cannot recover it, so the chat log is the record. ManagerBusy
-    alone propagates, because the HTTP layer maps it to a 503.
+    Any caller that parses the manager's output as a contract MUST use this rather than ask():
+    a failure note is ordinary text, and a subprocess error's string embeds the whole prompt,
+    so a parser handed one can extract worker-authored content out of it as if it were a reply.
     """
     try:
         with _locked():
@@ -215,3 +211,9 @@ def ask(text: str, source: str, run=subprocess.run, timeout: int = CALL_TIMEOUT)
     except ManagerBusy:
         _log_quietly("manager", source, "manager busy — this turn was not delivered")
         raise
+
+
+def ask(text: str, source: str, run=subprocess.run, timeout: int = CALL_TIMEOUT) -> str:
+    """The manager's reply, or a note describing why there wasn't one. For display only —
+    parsers use ask_result(), which can tell those two apart."""
+    return ask_result(text, source, run, timeout)[1]

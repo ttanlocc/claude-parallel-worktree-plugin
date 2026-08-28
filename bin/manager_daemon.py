@@ -15,13 +15,16 @@ from manager import build_prompt, decide, deliver_answer
 DELIVERY_ATTEMPTS = 3
 
 
-def ask_via_session(record: dict, ask=manager_session.ask) -> str:
+def ask_via_session(record: dict, ask=manager_session.ask_result) -> str:
     """Put one escalation to the persistent manager and hand back its raw reply.
 
-    Same contract as the throwaway process it replaces — a JSON decision as text — but the manager
-    now answers with the rest of its work in context.
+    Raises on a failed call rather than returning the failure note: the note is ordinary text,
+    and letting it reach parse_decision is how a timeout gets read as an approval.
     """
-    return ask(build_prompt(record), "daemon:escalation")
+    ok, raw = ask(build_prompt(record), "daemon:escalation")
+    if not ok:
+        raise RuntimeError(raw)
+    return raw
 
 
 def _try_deliver(path: str, rec: dict, message: str, deliver) -> str:
