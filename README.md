@@ -121,8 +121,12 @@ raw decision JSON (`{"answer": ..., "reason": ..., "confidence": ...}`), not a f
 State lives in `~/.claude/hermes/`:
 - `manager-session.json` — the session id the manager resumes on every call
 - `manager-chat.jsonl` — the conversation the dashboard renders
-- `assignments.jsonl` — the ledger: one record per outcome, with the manager's plan and progress
 - `manager.lock` — serializes the CTO's chat, escalations, and daemon wakes onto the one session
+- `escalations.jsonl` — the queue a worker appends to and `manager_daemon.py` watches; the file
+  behind the daemon warning above
+- `manager-seen-sessions.json` — last-known status per worker session, so a worker-finished wake
+  fires once per transition, not on every daemon pass
+- `assignments.jsonl` — the ledger: one record per outcome, with the manager's plan and progress
 
 | Variable | Default | Controls |
 |---|---|---|

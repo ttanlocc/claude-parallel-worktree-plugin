@@ -155,7 +155,7 @@ PY
 session — one long-lived session for the whole team, not a fresh model per escalation, so it
 remembers what it already decided and what else is in flight. Mechanical calls are settled there
 and delivered straight back into the worker; anything irreversible, security-shaped, or genuinely
-ambiguous waits for you in the dashboard's "Needs your decision" panel. Every automatic decision
+ambiguous waits for you in the dashboard's decision panel. Every automatic decision
 also shows up as a tinted line in the manager's chat, so nothing is decided on your behalf
 invisibly. The manager's charter — what it decides itself vs. escalates, how it dispatches and
 sizes work — is `skills/engineering-manager/SKILL.md`.
