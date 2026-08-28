@@ -109,11 +109,19 @@ import threading
 import time
 from urllib.parse import urlparse
 
+import manager_session
 from escalations import QUEUE_PATH, classify, current_state, record_answer
 
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
 MAX_BODY_BYTES = 64 * 1024
+
+
+class _BodyTooLarge(ValueError):
+    """Raised by Handler._read_json_body() when Content-Length exceeds MAX_BODY_BYTES, so callers
+    can map it to 413 — the one status code that must survive that refactor unchanged, since every
+    other bad-body error there gets 400."""
+
 
 # Every subprocess-wrapping function below degrades silently on failure. TimeoutExpired
 # subclasses SubprocessError, not OSError, so it must be listed via SubprocessError (its actual
@@ -508,6 +516,63 @@ def transcript_path_for(task: dict) -> str | None:
     return os.path.join(home, ".claude", "projects", _slugify_cwd(wt_path), f"{session_id}.jsonl")
 
 
+def start_manager_turn(text: str, source: str, ask=None) -> threading.Thread:
+    """Run one manager turn off the request thread.
+
+    A manager call takes tens of seconds and may take ten minutes; holding an HTTP request open for
+    it would stall the browser and time out the fetch. The turn is already recorded in the chat log
+    by ask(), so the UI learns the answer by polling GET /api/manager/chat.
+
+    The target is a wrapper, not ask() itself: ask() can still raise ManagerBusy if the lock wait
+    times out (a second turn arriving while this one already holds the lock past LOCK_TIMEOUT), and
+    manager_session logs that to the chat before re-raising — so all that's left to do here is stop
+    it (or anything else ask() raises) from escaping as an unhandled-thread traceback.
+    """
+    ask = ask or manager_session.ask
+
+    def _run() -> None:
+        try:
+            ask(text, source)
+        except Exception as e:
+            print(f"manager turn failed: {e}", file=sys.stderr)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread
+
+
+def manager_chat_payload(history=None, busy=None) -> dict:
+    """Chat entries plus whether a turn is in flight. Degrades to empty, never raises."""
+    history = history or manager_session.history
+    busy = busy or manager_session.busy
+    try:
+        entries = history()
+    except (OSError, ValueError):
+        entries = []
+    try:
+        in_flight = busy()
+    except OSError:
+        in_flight = False
+    return {"entries": entries, "busy": in_flight}
+
+
+def _manager_chat_post(text: str, busy=None, start=None) -> tuple[int, dict]:
+    """(status, body) for a manager/chat POST.
+
+    The busy check happens here, on the request thread, before anything is spawned:
+    start_manager_turn returns as soon as its thread is launched, so the ManagerBusy that thread's
+    ask() can raise happens inside it, never on the thread that's still holding this request — a
+    `try/except ManagerBusy` wrapped around start_manager_turn would never see it. Checking busy()
+    first gives the caller the same 503 signal from a place that can actually return it.
+    """
+    busy = busy or manager_session.busy
+    start = start or start_manager_turn
+    if busy():
+        return 503, {"error": "manager busy"}
+    start(text, "cto")
+    return 202, {"ok": True}
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def _json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
@@ -516,6 +581,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _read_json_body(self) -> dict:
+        """Parse the POST body as a JSON object, enforcing MAX_BODY_BYTES. Raises ValueError with
+        the message to show the client — _BodyTooLarge (a ValueError subclass) for an oversized
+        body so callers can still give it its own status code, plain ValueError for anything else
+        wrong with the body."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError as e:
+            raise ValueError(f"bad request body: {e}") from e
+        if length > MAX_BODY_BYTES:
+            raise _BodyTooLarge("request body too large")
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"bad request body: {e}") from e
+        if not isinstance(body, dict):
+            raise ValueError("bad request body: body must be a JSON object")
+        return body
+
+    def _body_error(self, e: ValueError) -> None:
+        """The response for a _read_json_body() failure — 413 for an oversized body, 400 for
+        everything else _read_json_body() (or a route's own body-shape validation) raises."""
+        self._json({"error": str(e)}, status=413 if isinstance(e, _BodyTooLarge) else 400)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -554,6 +643,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e)}, status=500)
             return
+        if parsed.path == "/api/manager/chat":
+            self._json(manager_chat_payload())
+            return
         if parsed.path == "/":
             html_path = os.path.join(PLUGIN_BIN, "dashboard.html")
             if not os.path.exists(html_path):
@@ -584,17 +676,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/escalations/") and parsed.path.endswith("/answer"):
             rid = parsed.path[len("/api/escalations/") : -len("/answer")]
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > MAX_BODY_BYTES:
-                    self._json({"error": "request body too large"}, status=413)
-                    return
-                body = json.loads(self.rfile.read(length) or b"{}")
-                if not isinstance(body, dict):
-                    raise ValueError("body must be a JSON object")
-                answer = (body.get("answer") or "").strip()
-            except (ValueError, json.JSONDecodeError) as e:
-                self._json({"error": f"bad request body: {e}"}, status=400)
+                body = self._read_json_body()
+            except ValueError as e:
+                self._body_error(e)
                 return
+            answer = (body.get("answer") or "").strip()
             if not answer:
                 self._json({"error": "answer is required"}, status=400)
                 return
@@ -627,18 +713,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/tickets/dispatch":
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > MAX_BODY_BYTES:
-                    self._json({"error": "request body too large"}, status=413)
-                    return
-                body = json.loads(self.rfile.read(length) or b"{}")
-                if not isinstance(body, dict):
-                    raise ValueError("body must be a JSON object")
+                body = self._read_json_body()
+            except ValueError as e:
+                self._body_error(e)
+                return
+            try:
                 ticket_ids = _parse_ticket_ids(body.get("ticket_ids"))
-                instructions = str(body.get("instructions") or "")
-            except (ValueError, json.JSONDecodeError) as e:
+            except ValueError as e:
                 self._json({"error": f"bad request body: {e}"}, status=400)
                 return
+            instructions = str(body.get("instructions") or "")
             if not ticket_ids:
                 self._json({"error": "ticket_ids is required and must be non-empty"}, status=400)
                 return
@@ -655,6 +739,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             status, resp = _run_dispatch(start_argv, slug, prompt)
             self._json(resp, status=status)
+            return
+        if parsed.path == "/api/manager/chat":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._body_error(e)
+                return
+            text = (body.get("text") or "").strip()
+            if not text:
+                self._json({"error": "text is required"}, status=400)
+                return
+            status, resp = _manager_chat_post(text)
+            self._json(resp, status=status)
+            return
+        if parsed.path == "/api/manager/reset":
+            manager_session.reset()
+            self._json({"ok": True})
             return
         self.send_response(404)
         self.end_headers()

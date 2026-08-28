@@ -426,6 +426,139 @@ def test_run_dispatch_returns_500_on_dispatch_stage_subprocess_error_instead_of_
         subprocess.run = original_run
 
 
+def test_start_manager_turn_returns_before_the_model_does():
+    """A model call must never be held inside an HTTP request."""
+    import threading
+    import time as _time
+
+    import dashboard
+
+    released = threading.Event()
+
+    def slow_ask(text, source):
+        _time.sleep(0.3)
+        released.set()
+        return "done"
+
+    began = _time.monotonic()
+    thread = dashboard.start_manager_turn("hello", "cto", ask=slow_ask)
+    assert _time.monotonic() - began < 0.2, "start_manager_turn blocked on the model"
+    thread.join(timeout=5)
+    assert released.is_set()
+
+
+def test_start_manager_turn_swallows_exceptions_from_ask():
+    """ManagerBusy (raised when ask()'s lock-wait itself times out) or any other failure inside
+    the background thread must not escape as an unhandled-thread traceback — manager_session.ask
+    already logs the failure to the chat itself before re-raising."""
+    import contextlib
+    import io
+
+    import dashboard
+
+    def boom(text, source):
+        raise RuntimeError("boom")
+
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        thread = dashboard.start_manager_turn("hello", "cto", ask=boom)
+        thread.join(timeout=5)
+    assert "manager turn failed: boom" in stderr.getvalue()
+
+
+def test_manager_chat_payload_shape():
+    import dashboard
+
+    payload = dashboard.manager_chat_payload(
+        history=lambda limit=200: [{"ts": 1.0, "role": "cto", "source": "cto", "text": "hi"}],
+        busy=lambda: True,
+    )
+    assert payload["busy"] is True
+    assert payload["entries"][0]["role"] == "cto"
+
+
+def test_manager_chat_payload_degrades_when_history_fails():
+    import dashboard
+
+    def boom(limit=200):
+        raise OSError("no such file")
+
+    payload = dashboard.manager_chat_payload(history=boom, busy=lambda: False)
+    assert payload["entries"] == []
+    assert payload["busy"] is False
+
+
+def test_manager_chat_post_returns_503_and_spawns_nothing_when_busy():
+    """The naive `except manager_session.ManagerBusy` around start_manager_turn is dead code: the
+    background thread is already spawned and the call has already returned by the time ManagerBusy
+    could fire inside it, so nothing on the request thread can ever catch it there. Checking
+    busy() before spawning is what makes a 503 actually reachable."""
+    import dashboard
+
+    spawned = []
+    status, body = dashboard._manager_chat_post(
+        "hello", busy=lambda: True, start=lambda text, source: spawned.append((text, source))
+    )
+    assert status == 503
+    assert body == {"error": "manager busy"}
+    assert spawned == []
+
+
+def test_manager_chat_post_spawns_when_not_busy():
+    import dashboard
+
+    spawned = []
+    status, body = dashboard._manager_chat_post(
+        "hello", busy=lambda: False, start=lambda text, source: spawned.append((text, source))
+    )
+    assert status == 202
+    assert body == {"ok": True}
+    assert spawned == [("hello", "cto")]
+
+
+def test_read_json_body_flags_oversized_body_as_413():
+    """The one status code that must survive the body-reading extraction unchanged: a route-level
+    `except ValueError: status=400` would silently flatten this to 400 for every POST route."""
+    import io
+    import types
+
+    import dashboard
+
+    fake = types.SimpleNamespace(headers={"Content-Length": str(dashboard.MAX_BODY_BYTES + 1)}, rfile=io.BytesIO(b""))
+    try:
+        dashboard.Handler._read_json_body(fake)
+        raise AssertionError("expected _BodyTooLarge")
+    except dashboard._BodyTooLarge as e:
+        assert str(e) == "request body too large"
+
+
+def test_read_json_body_rejects_non_dict_json():
+    import io
+    import types
+
+    import dashboard
+
+    payload = b"[1, 2, 3]"
+    fake = types.SimpleNamespace(headers={"Content-Length": str(len(payload))}, rfile=io.BytesIO(payload))
+    try:
+        dashboard.Handler._read_json_body(fake)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert not isinstance(e, dashboard._BodyTooLarge)
+        assert str(e) == "bad request body: body must be a JSON object"
+
+
+def test_read_json_body_parses_valid_object():
+    import io
+    import types
+
+    import dashboard
+
+    payload = json.dumps({"text": "hi"}).encode()
+    fake = types.SimpleNamespace(headers={"Content-Length": str(len(payload))}, rfile=io.BytesIO(payload))
+    assert dashboard.Handler._read_json_body(fake) == {"text": "hi"}
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
