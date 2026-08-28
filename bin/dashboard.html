@@ -6,30 +6,41 @@
 <title>Agent Control Center</title>
 <style>
   :root {
-    --bg: #F7F9FC;
+    /* Greyscale instrument palette. Old names kept where they map cleanly onto the new
+       spec (--bg=ground, --card=surface, --line=rule, --muted=ink-soft) so declarations
+       change, not call sites. --signal and --warn are new: the only two hues on the page,
+       each reserved for exactly one meaning, never used as a background tint. */
+    --bg: #EFEFEC;
     --card: #FFFFFF;
-    --line: #E8EDF5;
-    --navy: #0B2447;
-    --ink: #1B2C4B;
-    --muted: #64748B;
-    --faint: #98A5BA;
+    --line: #DFDFDA;
+    --navy: #16191C;
+    --ink: #16191C;
+    --muted: #6B7075;
+    --faint: #8B9095;
 
-    --ok-bg: #E7F7EE;   --ok-fg: #197A46;   --ok-dot: #21A366;
-    --run-bg: #E8F1FE;  --run-fg: #1D6FD8;  --run-dot: #2E7DE0;
-    --warn-bg: #FEF3E2; --warn-fg: #B4690E; --warn-dot: #E2960F;
-    --stop-bg: #FDECEC; --stop-fg: #C6352E; --stop-dot: #DC4A42;
-    --idle-bg: #EFF3F9; --idle-fg: #5A6B87; --idle-dot: #98A5BA;
+    --signal: #C8102E;  /* needs the operator's decision — reserved, nowhere else */
+    --warn:   #B26B00;  /* late / at risk — reserved, nowhere else */
+
+    /* Status-family triads collapse to neutral greys by default; the handful of pills that
+       need more weight (filled/outline/signal/warn) override directly at their own selector
+       rather than through these shared names. */
+    --ok-bg: var(--line);    --ok-fg: var(--faint);   --ok-dot: var(--faint);
+    --run-bg: var(--line);   --run-fg: var(--ink);    --run-dot: var(--ink);
+    --warn-bg: var(--line);  --warn-fg: var(--muted); --warn-dot: var(--muted);
+    --stop-bg: var(--line);  --stop-fg: var(--muted); --stop-dot: var(--muted);
+    --idle-bg: var(--line);  --idle-fg: var(--muted); --idle-dot: var(--faint);
 
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif;
-    --shadow: 0 1px 3px rgba(16,24,40,.04), 0 1px 2px rgba(16,24,40,.03);
+    --shadow: 0 1px 3px rgba(22,25,28,.05), 0 1px 2px rgba(22,25,28,.04);
 
-    --term-bg: #0B1220;   --term-bar: #131B2E;   --term-border: #1E2A44;
-    --term-text: #C9D6E8; --term-call: #6FB2FF;  --term-result: #7C8AA6; --term-accent: #34D399;
+    --term-bg: #16191C;   --term-bar: #1E2226;   --term-border: #2B3034;
+    --term-text: #D9DADB; --term-call: #EDEDEC;  --term-result: #8D9296; --term-accent: #D9DADB;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body { background: var(--bg); color: var(--ink); font-family: var(--sans); display: flex; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
   /* ---------- icon rail ---------- */
   #rail {
@@ -38,13 +49,13 @@
   }
   .logo {
     width: 42px; height: 42px; border-radius: 11px; background: var(--navy); color: #fff;
-    display: grid; place-items: center; font-weight: 700; font-size: 19px; margin-bottom: 14px;
+    display: grid; place-items: center; font-family: var(--mono); font-weight: 700; font-size: 19px; margin-bottom: 14px;
   }
   .rail-btn {
     width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
     color: var(--faint); background: transparent; border: 0; cursor: default;
   }
-  .rail-btn.on { background: #EAF1FD; color: var(--run-fg); }
+  .rail-btn.on { background: var(--line); color: var(--ink); }
   .rail-spacer { flex: 1; }
 
   /* ---------- main ---------- */
@@ -53,22 +64,23 @@
     display: flex; align-items: center; gap: 14px; padding: 16px 30px;
     border-bottom: 1px solid var(--line); background: var(--card);
   }
-  .brand h1 { margin: 0; font-size: 19px; font-weight: 700; color: var(--navy); letter-spacing: -.015em; }
+  .brand h1 { margin: 0; font-family: var(--mono); font-size: 17px; font-weight: 700; color: var(--navy); letter-spacing: .01em; }
   .brand p  { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
   .topbar-spacer { flex: 1; }
   .chip {
     display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px;
     border: 1px solid var(--line); border-radius: 10px; background: var(--card);
-    font-size: 13.5px; font-weight: 500; color: var(--ink); white-space: nowrap;
+    font-family: var(--mono); font-size: 12.5px; font-weight: 600; letter-spacing: .03em;
+    color: var(--ink); white-space: nowrap;
   }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok-dot); flex-shrink: 0; }
   .avatar {
-    width: 40px; height: 40px; border-radius: 50%; background: #EAF1FD; color: var(--run-fg);
-    display: grid; place-items: center; font-size: 13px; font-weight: 650;
+    width: 40px; height: 40px; border-radius: 50%; background: var(--line); color: var(--ink);
+    display: grid; place-items: center; font-family: var(--mono); font-size: 13px; font-weight: 650;
   }
 
   #content { flex: 1; overflow-y: auto; padding: 26px 30px 34px; }
-  .page-title { margin: 0 0 20px; font-size: 30px; font-weight: 700; color: var(--navy); letter-spacing: -.025em; }
+  .page-title { margin: 0 0 20px; font-family: var(--mono); font-size: 25px; font-weight: 700; color: var(--navy); letter-spacing: .01em; }
 
   /* ---------- stat cards ---------- */
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
@@ -77,18 +89,31 @@
     padding: 20px; display: flex; align-items: center; gap: 15px; box-shadow: var(--shadow);
   }
   .stat-icon { width: 46px; height: 46px; border-radius: 12px; display: grid; place-items: center; flex-shrink: 0; }
-  .stat-num { font-size: 26px; font-weight: 700; color: var(--navy); line-height: 1.1; letter-spacing: -.02em; }
-  .stat-lbl { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .stat-num { font-family: var(--mono); font-size: 24px; font-weight: 700; color: var(--navy); line-height: 1.1; letter-spacing: 0; }
+  .stat-lbl { font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-top: 4px; }
 
-  /* ---------- CTO counters (top of the manager view) ---------- */
+  /* ---------- CTO counters — the signature of the page: quiet at zero, the only saturated
+     thing on the screen when "Chờ bạn" isn't. The transition is the one deliberate motion
+     on the page, guarded below for prefers-reduced-motion. ---------- */
   .counters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
   .counter { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; box-shadow: var(--shadow); }
-  .counter-n { font-size: 26px; font-weight: 700; color: var(--navy); line-height: 1.1; letter-spacing: -.02em; }
-  .counter-label { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .counter-n {
+    font-family: var(--mono); font-size: 26px; font-weight: 700; color: var(--ink); line-height: 1;
+    letter-spacing: -.01em; transition: color .15s ease, font-size .15s ease;
+  }
+  .counter-n.zero { font-size: 19px; font-weight: 500; color: var(--faint); }
+  .counter-n.unknown { color: var(--faint); font-weight: 500; font-style: italic; }
+  .counter-n.signal { font-size: 36px; color: var(--signal); }
+  .counter-n.warn { color: var(--warn); }
+  /* sans, not mono: the fallback monospace stack this box resolves to (DejaVu Sans Mono, when
+     none of ui-monospace/SF Mono/Menlo/Consolas exist) drops the circumflex+tone glyphs in
+     "Trễ"/"Cần" (ễ/ầ/ế) in both cases — confirmed by direct render test. Sans has full coverage. */
+  .counter-label { font-family: var(--sans); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-top: 6px; }
+  @media (prefers-reduced-motion: reduce) { .counter-n { transition: none; } }
 
   /* ---------- manager view: decisions/assignments/ADO left, chat right ---------- */
   .manager-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 16px; align-items: start; }
-  .manager-col-main { display: flex; flex-direction: column; gap: 16px; }
+  .manager-col-main { display: flex; flex-direction: column; }
   .manager-col-side { position: sticky; top: 16px; max-height: calc(100dvh - 32px); display: flex; flex-direction: column; }
   @media (max-width: 1100px) { .manager-grid { grid-template-columns: minmax(0, 1fr); } .manager-col-side { position: static; max-height: none; } }
 
@@ -98,7 +123,9 @@
 
   #operator-section { margin-top: 4px; }
   #operator-section summary {
-    cursor: pointer; padding: 10px 4px; font-size: 13.5px; font-weight: 600; color: var(--muted);
+    /* sans: "Chi tiết vận hành" carries the same broken-in-mono tiết/vận glyphs as the counters. */
+    cursor: pointer; padding: 10px 4px; font-family: var(--sans); font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
     list-style: none;
   }
   #operator-section summary::-webkit-details-marker { display: none; }
@@ -107,59 +134,60 @@
 
   .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
   .panel-head { padding: 18px 22px 14px; }
-  .panel-head h2 { margin: 0; font-size: 17px; font-weight: 700; color: var(--navy); letter-spacing: -.015em; }
+  .panel-head h2 { margin: 0; font-family: var(--mono); font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--navy); }
   .panel-head p { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); }
 
   /* ---------- agent table ---------- */
   table { width: 100%; border-collapse: collapse; }
   thead th {
-    text-align: left; font-size: 11px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase;
+    text-align: left; font-family: var(--mono); font-size: 11px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase;
     color: var(--faint); padding: 12px 22px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
-    background: #FCFDFF;
+    background: var(--bg);
   }
   tbody td { padding: 15px 22px; border-bottom: 1px solid var(--line); font-size: 13.5px; vertical-align: middle; }
   tbody tr:last-child td { border-bottom: 0; }
   tbody tr { cursor: pointer; transition: background .12s; }
-  tbody tr:hover { background: #FBFCFE; }
-  tbody tr.sel { background: #F4F8FF; }
-  tbody tr:focus-visible { outline: 2px solid var(--run-fg); outline-offset: -2px; }
-  .agent-name { font-weight: 650; color: var(--navy); }
+  tbody tr:hover { background: var(--bg); }
+  tbody tr.sel { background: var(--line); }
+  tbody tr:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+  .agent-name { font-family: var(--mono); font-weight: 650; color: var(--navy); }
   .agent-sub { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 3px; }
 
+  /* Pills read as instrument labels: mono, uppercase, tracked. Three weights carry the
+     hierarchy that colour used to (quiet / outline / filled) — .decision and .at-risk are
+     the only two that ever touch --signal / --warn; everything else stays grey. */
   .pill {
     display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 7px;
-    font-size: 12px; font-weight: 600; background: var(--idle-bg); color: var(--idle-fg); white-space: nowrap;
+    font-family: var(--mono); font-size: 11px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
+    background: var(--idle-bg); color: var(--idle-fg); border: 1px solid transparent; white-space: nowrap;
   }
   .pill .dot { width: 7px; height: 7px; background: currentColor; }
-  .pill.busy, .pill.working, .pill.running { background: var(--run-bg); color: var(--run-fg); }
-  .pill.idle    { background: var(--idle-bg); color: var(--idle-fg); }
-  .pill.done    { background: var(--ok-bg);   color: var(--ok-fg); }
-  .pill.blocked { background: var(--stop-bg); color: var(--stop-fg); }
-  .pill.stopped { background: var(--idle-bg); color: var(--faint); }
-  .pill.surface { background: #F1F5FC; color: #4A6489; font-weight: 500; }
-  .pill.mode    { background: #F3EEFD; color: #6D4AAE; font-weight: 500; }
-  .pill.decision { background: var(--warn-bg); color: var(--warn-fg); }
-  .pill.progress { background: var(--run-bg);  color: var(--run-fg); }
-  .pill.stalled { background: var(--stop-bg); color: var(--stop-fg); }
+  .pill.busy, .pill.working, .pill.running, .pill.progress, .pill.s-in_progress {
+    background: var(--card); color: var(--ink); border-color: var(--faint);
+  }
+  .pill.blocked, .pill.stalled, .pill.s-blocked, .pill.p-P0 { background: var(--ink); color: var(--card); }
+  .pill.decision { background: var(--card); color: var(--signal); border-color: var(--signal); }
+  .pill.p-P1 { background: var(--card); color: var(--ink); border-color: var(--faint); }
+  .pill.at-risk { background: var(--card); color: var(--warn); border-color: var(--warn); font-family: var(--sans); } /* "trễ hạn" — same mono glyph gap */
 
   /* ---------- tickets: the one glanceable summary — status + next action, nothing else ---------- */
   .ticket-row { display: flex; align-items: center; gap: 14px; padding: 14px 22px; border-top: 1px solid var(--line); }
   .ticket-row:first-child { border-top: 0; }
   .ticket-left { display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0; }
-  .ticket-id { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--run-fg); text-decoration: none; flex-shrink: 0; }
+  .ticket-id { font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: .02em; color: var(--ink); text-decoration: none; flex-shrink: 0; }
   .ticket-id:hover { text-decoration: underline; }
   .ticket-title { font-size: 13.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ticket-action { font-size: 13px; font-weight: 600; color: var(--run-fg); text-decoration: none; flex-shrink: 0; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+  .ticket-action { font-size: 13px; font-weight: 600; color: var(--ink); text-decoration: none; flex-shrink: 0; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
   .ticket-action:hover { text-decoration: underline; }
   .ticket-action.muted { color: var(--faint); font-weight: 500; text-decoration: none; }
 
-  .dispatch-form { padding: 14px 22px; border-top: 1px solid var(--line); background: #FBFCFE; display: flex; flex-direction: column; gap: 10px; }
+  .dispatch-form { padding: 14px 22px; border-top: 1px solid var(--line); background: var(--bg); display: flex; flex-direction: column; gap: 10px; }
   .dispatch-hint { font-size: 12.5px; color: var(--muted); }
   .dispatch-bundle { display: flex; flex-direction: column; gap: 6px; }
   .dispatch-bundle-item { font-size: 13px; display: flex; align-items: center; gap: 8px; }
   .dispatch-instructions { width: 100%; min-height: 64px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-family: var(--sans); font-size: 13px; resize: vertical; }
   .dispatch-actions { display: flex; gap: 9px; }
-  .dispatch-status { font-size: 12.5px; color: var(--stop-fg); }
+  .dispatch-status { font-size: 12.5px; color: var(--ink); font-weight: 600; }
 
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
   .btn {
@@ -168,61 +196,68 @@
     font-size: 12.5px; font-weight: 500; font-family: var(--sans); cursor: pointer; text-decoration: none;
     transition: border-color .12s, background .12s;
   }
-  .btn:hover { border-color: #CBD8EA; background: #FBFCFE; }
-  .btn:focus-visible { outline: 2px solid var(--run-fg); outline-offset: 1px; }
+  .btn:hover { border-color: var(--faint); background: var(--bg); }
+  .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 
-  /* ---------- live logs: dark terminal, deliberately distinct from the light app chrome ---------- */
+  /* ---------- live logs: dark terminal, deliberately distinct from the light app chrome.
+     Still greyscale — call/result/text rows differ by lightness and tag, not hue. No pulse:
+     a watch station doesn't need a permanently blinking dot to prove a panel is alive. ---------- */
   .term-bar {
     display: flex; align-items: center; gap: 10px; padding: 11px 22px;
     background: var(--term-bar); border-top: 1px solid var(--term-border); border-bottom: 1px solid var(--term-border);
-    font-family: var(--mono); font-size: 12.5px; color: var(--term-accent); white-space: nowrap;
+    font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: .03em; color: var(--term-accent); white-space: nowrap;
   }
-  .term-bar span:last-child { overflow: hidden; text-overflow: ellipsis; }
-  .term-bar .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--term-accent); flex-shrink: 0; animation: term-pulse 1.6s ease-in-out infinite; }
-  @keyframes term-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-  @media (prefers-reduced-motion: reduce) { .term-bar .pulse { animation: none; } }
+  .term-bar span:last-child { overflow: hidden; text-overflow: ellipsis; text-transform: none; letter-spacing: 0; font-weight: 400; }
 
   #logrows { max-height: 460px; overflow-y: auto; padding: 4px 0 8px; background: var(--term-bg); }
   #logrows .empty { color: var(--term-result); }
-  #logrows .empty.err { color: #F87171; }
+  #logrows .empty.err { color: var(--term-text); font-weight: 600; }
   .logrow { display: flex; gap: 13px; padding: 9px 22px; border-bottom: 1px solid var(--term-border); align-items: flex-start; }
   .logrow:last-child { border-bottom: 0; }
   .logrow .dot { margin-top: 6px; flex-shrink: 0; }
   .logrow .body { font-family: var(--mono); font-size: 12px; line-height: 1.6; display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
   .logrow .code { white-space: pre-wrap; word-break: break-word; }
-  .logrow .prose { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.6; }
+  .logrow .prose { white-space: pre-wrap; word-break: break-word; font-family: var(--sans); font-size: 12.5px; line-height: 1.6; }
   .logrow .tool-tag, .logrow .role-tag {
-    align-self: flex-start; font-size: 10.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
+    align-self: flex-start; font-family: var(--mono); font-size: 10px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase;
     padding: 1px 7px; border-radius: 5px;
   }
-  .logrow.call .tool-tag  { background: rgba(111,178,255,.14); color: var(--term-call); }
+  .logrow.call .tool-tag  { background: rgba(255,255,255,.12); color: var(--term-call); }
   .logrow.call .code      { color: var(--term-call); }
   .logrow.call .dot       { background: var(--term-call); }
   .logrow.result .code    { color: var(--term-result); }
   .logrow.result .dot     { background: var(--term-result); }
-  .logrow.text .role-tag  { background: rgba(52,211,153,.14); color: var(--term-accent); }
+  .logrow.text .role-tag  { background: rgba(255,255,255,.12); color: var(--term-accent); }
   .logrow.text .prose     { color: var(--term-text); }
   .logrow.text .dot       { background: var(--term-accent); }
 
   /* ---------- side panel rows ---------- */
   .srow { display: flex; align-items: center; gap: 11px; padding: 13px 22px; border-top: 1px solid var(--line); font-size: 13.5px; }
-  .srow .k { color: var(--muted); }
+  .srow .k { font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .srow .v { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--navy); font-weight: 600;
              max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .srow a.v { color: var(--run-fg); text-decoration: none; }
-  .srow a.v:hover { text-decoration: underline; }
+  .srow a.v { color: var(--ink); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
+  .srow a.v:hover { text-decoration-color: var(--ink); }
 
   .empty { padding: 34px 22px; text-align: center; color: var(--faint); font-size: 13.5px; }
-  .empty.err { color: var(--stop-fg); }
+  .empty.err { color: var(--ink); font-weight: 600; }
   svg { display: block; }
 
-  .btn.primary { background: var(--navy); border-color: var(--navy); color: #fff; font-weight: 600; }
-  .btn.primary:hover { background: #12305c; border-color: #12305c; }
+  .btn.primary { background: var(--ink); border-color: var(--ink); color: var(--card); font-weight: 650; }
+  .btn.primary:hover { opacity: .85; }
 
-  /* ---------- decisions & assignments panels: bare h2, no .panel-head wrapper ---------- */
+  /* ---------- decisions + assignments + ADO backlog: one continuous surface (.panel),
+     three zones separated by their own header and a hairline — a document, not three
+     floating cards. #decisions is first, so its accent (when active) is a left rule, not
+     a top border. ---------- */
   .muted { color: var(--muted); }
-  #decisions h2, #assignments h2 { margin: 0; padding: 18px 22px 14px; font-size: 17px; font-weight: 700; color: var(--navy); letter-spacing: -.015em; }
+  .zone + .zone { border-top: 1px solid var(--line); }
+  /* sans, not mono: "Cần bạn quyết" / "Việc đang giao" carry the same broken glyphs as the
+     counters (Ầ/Ế in "Cần"/"quyết") — see the note on .counter-label. */
+  #decisions h2, #assignments h2 { margin: 0; padding: 18px 22px 14px; font-family: var(--sans); font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--navy); }
   #decisions > p, #assignments > p { margin: 0; padding: 0 22px 22px; font-size: 13.5px; }
+  #decisions.has-signal { border-left: 3px solid var(--signal); }
+  #decisions.has-signal > h2 { color: var(--signal); }
 
   .decision { padding: 18px 22px; border-top: 1px solid var(--line); }
   #decisions h2 + .decision { border-top: 0; }
@@ -242,36 +277,33 @@
           padding: 7px 0 7px 14px; margin-top: 4px; font-size: 12.5px; border-left: 2px solid var(--line); }
   .step-name { color: var(--ink); }
   .step-done .step-name { color: var(--faint); text-decoration: line-through; }
-  .step-doing { border-left-color: var(--run-dot); }
-  .step-doing .step-name { color: var(--run-fg); font-weight: 600; }
+  .step-doing { border-left-color: var(--ink); }
+  .step-doing .step-name { color: var(--ink); font-weight: 600; }
+  .step .muted { font-family: var(--mono); font-size: 11px; letter-spacing: .02em; }
 
-  .pill.p-P0 { background: var(--stop-bg); color: var(--stop-fg); }
-  .pill.p-P1 { background: var(--warn-bg); color: var(--warn-fg); }
   .pill.p-P2 { background: var(--idle-bg); color: var(--idle-fg); }
   .pill.s-assigned { background: var(--idle-bg); color: var(--idle-fg); }
-  .pill.s-in_progress { background: var(--run-bg); color: var(--run-fg); }
-  .pill.s-blocked { background: var(--stop-bg); color: var(--stop-fg); }
   .pill.s-done { background: var(--ok-bg); color: var(--ok-fg); }
   .pill.s-cancelled { background: var(--idle-bg); color: var(--faint); }
-  .pill.at-risk { background: var(--stop-bg); color: var(--stop-fg); }
 
   /* ---------- manager chat ---------- */
   .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 22px 14px; }
-  .chat-head h2 { margin: 0; font-size: 17px; font-weight: 700; color: var(--navy); letter-spacing: -.015em; }
+  .chat-head h2 { margin: 0; font-family: var(--mono); font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--navy); }
   .chat-log { flex: 1; min-height: 240px; overflow-y: auto; padding: 4px 22px; border-top: 1px solid var(--line);
               display: flex; flex-direction: column; gap: 10px; }
-  .chat-compose { display: flex; gap: 8px; align-items: flex-end; padding: 14px 22px; border-top: 1px solid var(--line); background: #FBFCFE; }
+  .chat-compose { display: flex; gap: 8px; align-items: flex-end; padding: 14px 22px; border-top: 1px solid var(--line); background: var(--bg); }
   .chat-compose .chat-input { flex: 1; }
 
   .msg { max-width: 92%; padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.5; }
-  .msg-cto { align-self: flex-end; background: #EAF1FD; color: var(--ink); }
-  .msg-manager { align-self: flex-start; background: var(--idle-bg); color: var(--ink); }
+  .msg-cto { align-self: flex-end; background: var(--idle-bg); color: var(--ink); }
+  .msg-manager { align-self: flex-start; background: var(--card); color: var(--ink); border: 1px solid var(--line); }
   .msg-system { align-self: center; max-width: 100%; background: transparent; color: var(--muted); font-size: 12px; text-align: center; }
   .msg-thinking { align-self: flex-start; background: transparent; color: var(--faint); font-style: italic; font-size: 12.5px; }
-  .msg-error { align-self: center; max-width: 100%; background: transparent; color: var(--stop-fg); text-align: center; }
-  /* proactive work (anything not a direct reply to the CTO) — tinted so it stays visible, not silent */
-  .msg-auto { background: var(--warn-bg); border-left: 3px solid var(--warn-dot); }
-  .msg-why { font-size: 10.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--warn-fg); margin-bottom: 3px; }
+  .msg-error { align-self: center; max-width: 100%; background: transparent; color: var(--ink); font-weight: 600; text-align: center; }
+  /* proactive work (anything not a direct reply to the CTO) — flagged via the same left-rule
+     grammar as an active #decisions zone, just in ink: "notable", not "needs a decision". */
+  .msg-auto { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--ink); }
+  .msg-why { font-family: var(--mono); font-size: 10px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
   .msg-text { white-space: pre-wrap; word-break: break-word; }
 </style>
 </head>
@@ -311,15 +343,17 @@
     <div id="counters" class="counters"></div>
     <div id="manager-grid" class="manager-grid">
       <div class="manager-col-main">
-        <section id="decisions" class="panel"></section>
-        <section id="assignments" class="panel"></section>
-        <section id="ado" class="panel">
-          <div class="panel-head">
-            <h2>ADO backlog</h2>
-            <p>Reference only — assign an outcome, not a ticket</p>
-          </div>
-          <div id="tickets"></div>
-        </section>
+        <div class="panel">
+          <section id="decisions" class="zone"></section>
+          <section id="assignments" class="zone"></section>
+          <section id="ado" class="zone">
+            <div class="panel-head">
+              <h2>ADO backlog</h2>
+              <p>Chỉ để tham khảo — giao một kết quả, không phải một vé.</p>
+            </div>
+            <div id="tickets"></div>
+          </section>
+        </div>
       </div>
       <aside id="manager-chat" class="panel manager-col-side"></aside>
     </div>
@@ -358,7 +392,6 @@
         <p id="log-sub">Select a session above.</p>
       </div>
       <div id="log-summary" class="term-bar" hidden>
-        <span class="pulse"></span>
         <span id="log-summary-text"></span>
       </div>
       <div id="logrows"></div>
@@ -599,10 +632,10 @@ function renderStats(data) {
   const resting = st.filter(s => s === "idle" || s === "done").length;
   const stuck = st.filter(s => s === "blocked").length;
   document.getElementById("stats").replaceChildren(
-    statCard(ICONS.globe, "#EAF1FD", "#2E7DE0", data.length, "sessions"),
-    statCard(ICONS.cycle, "#E8F1FE", "#1D6FD8", active, "working now"),
-    statCard(ICONS.check, "#E7F7EE", "#197A46", resting, "idle or done"),
-    statCard(ICONS.warn, "#FEF3E2", "#B4690E", stuck, "blocked")
+    statCard(ICONS.globe, "var(--idle-bg)", "var(--ink)", data.length, "sessions"),
+    statCard(ICONS.cycle, "var(--idle-bg)", "var(--ink)", active, "working now"),
+    statCard(ICONS.check, "var(--idle-bg)", "var(--muted)", resting, "idle or done"),
+    statCard(ICONS.warn, "var(--idle-bg)", "var(--muted)", stuck, "blocked")
   );
   const n = active;
   document.getElementById("live-count").textContent = n + (n === 1 ? " agent live" : " agents live");
@@ -798,9 +831,19 @@ async function pollLog() {
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
-function counterCard(label, n) {
+// kind ("signal" | "warn" | null) picks which reserved hue a non-zero value renders in — a
+// counter that is "—" (unknown, a failed poll) or literally 0 never takes a hue regardless of
+// kind, so a stale fetch can never be mistaken for a real signal.
+function counterCard(label, n, kind) {
   const card = el("div", "counter");
-  card.append(el("div", "counter-n", String(n)), el("div", "counter-label", label));
+  const unknown = n === "—";
+  const zero = !unknown && Number(n) === 0;
+  let cls = "counter-n";
+  if (unknown) cls += " unknown";
+  else if (zero) cls += " zero";
+  else if (kind === "signal") cls += " signal";
+  else if (kind === "warn") cls += " warn";
+  card.append(el("div", cls, String(n)), el("div", "counter-label", label));
   return card;
 }
 
@@ -813,12 +856,12 @@ function renderCounters(assignments, escalations, failures) {
   const A = failures.assignments;
   const E = failures.escalations;
   const cards = [
-    ["Đang giao", A ? "—" : String(open.length)],
-    ["Trễ hạn", A ? "—" : String(open.filter(a => a.at_risk).length)],
-    ["Chờ bạn", E ? "—" : String(escalations.length)],
-    ["Xong tuần này", A ? "—" : String(assignments.filter(a => a.status === "done" && (a.ts || 0) >= weekAgo).length)],
+    ["Đang giao", A ? "—" : String(open.length), null],
+    ["Trễ hạn", A ? "—" : String(open.filter(a => a.at_risk).length), "warn"],
+    ["Chờ bạn", E ? "—" : String(escalations.length), "signal"],
+    ["Xong tuần này", A ? "—" : String(assignments.filter(a => a.status === "done" && (a.ts || 0) >= weekAgo).length), null],
   ];
-  document.getElementById("counters").replaceChildren(...cards.map(([label, n]) => counterCard(label, n)));
+  document.getElementById("counters").replaceChildren(...cards.map(([label, n, kind]) => counterCard(label, n, kind)));
 }
 
 function decisionCard(rec) {
@@ -846,6 +889,9 @@ function decisionCard(rec) {
 // runs. Trust the array as given, same as computeTickets already does with this same field.
 function renderDecisions(escalations) {
   const panel = document.getElementById("decisions");
+  // The one place the page is allowed to shout: a pending decision colours its own zone's
+  // rule so the eye lands here first, before it ever reaches the counters above.
+  panel.classList.toggle("has-signal", escalations.length > 0);
   const head = el("h2", null, "Cần bạn quyết");
   if (!escalations.length) {
     panel.replaceChildren(head, el("p", "muted", "Không có gì chờ bạn."));
@@ -922,7 +968,9 @@ async function pollEscalations() {
 
   pollFailures.escalations = !!err;
   if (err) {
-    document.getElementById("decisions").replaceChildren(
+    const panel = document.getElementById("decisions");
+    panel.classList.remove("has-signal");   // a failed fetch is unknown, never a stale signal
+    panel.replaceChildren(
       el("h2", null, "Cần bạn quyết"),
       el("p", "empty err", "Không tải được: " + err));
     renderCounters(lastAssignments, lastEscalations.needs_human || [], pollFailures);
@@ -1023,6 +1071,8 @@ function renderChatLog(payload) {
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   const rows = (payload.entries || []).map(chatRow);
   if (payload.busy) rows.push(el("div", "msg msg-thinking", "Manager đang xử lý…"));
+  // No history yet is not an error — invite the first message instead of a blank box.
+  if (!rows.length) rows.push(el("div", "empty", "Chưa có tin nhắn nào — nhắn để giao việc, đổi ưu tiên, hoặc hỏi tiến độ."));
   log.replaceChildren(...rows);
   if (atBottom) log.scrollTop = log.scrollHeight;   // only follow new messages if already at the bottom
 }
