@@ -356,6 +356,9 @@ let lastData = [];
 let lastEscalations = { needs_human: [], recent_decisions: [] };
 let lastAdoTickets = [];
 let lastAssignments = [];
+let pollFailures = { assignments: false, escalations: false }; // which source is currently stale —
+                                                                // renderCounters shows "—" instead
+                                                                // of a false zero for that source.
 let showManagedOnly = true;
 let tasksFailed = false; // true while /api/tasks is failing — session state is unknown, so
                          // ticket rows would be guessing; renderTickets shows a banner instead.
@@ -779,15 +782,19 @@ function counterCard(label, n) {
   return card;
 }
 
-// escalations here is the flat needs_human array — both callers pass lastEscalations.needs_human.
-function renderCounters(assignments, escalations) {
+// escalations here is the flat needs_human array — already the curated "needs a human" set from
+// get_escalations() (see renderDecisions below), both callers pass lastEscalations.needs_human.
+// failures marks which source is currently stale — that half of the row reads "—", never a false 0.
+function renderCounters(assignments, escalations, failures) {
   const open = assignments.filter(a => !["done", "cancelled"].includes(a.status));
   const weekAgo = Date.now() / 1000 - 7 * 86400;
+  const A = failures.assignments;
+  const E = failures.escalations;
   const cards = [
-    ["Đang giao", open.length],
-    ["Trễ hạn", open.filter(a => a.at_risk).length],
-    ["Chờ bạn", escalations.filter(e => e.status === "needs_human").length],
-    ["Xong tuần này", assignments.filter(a => a.status === "done" && (a.ts || 0) >= weekAgo).length],
+    ["Đang giao", A ? "—" : String(open.length)],
+    ["Trễ hạn", A ? "—" : String(open.filter(a => a.at_risk).length)],
+    ["Chờ bạn", E ? "—" : String(escalations.length)],
+    ["Xong tuần này", A ? "—" : String(assignments.filter(a => a.status === "done" && (a.ts || 0) >= weekAgo).length)],
   ];
   document.getElementById("counters").replaceChildren(...cards.map(([label, n]) => counterCard(label, n)));
 }
@@ -808,25 +815,35 @@ function decisionCard(rec) {
 
 // The record already carries options, validate_decision already requires the answer to be one
 // of them, and POST /api/escalations/<id>/answer already exists — one button per option.
+//
+// escalations is already the curated "needs a human" set get_escalations() (bin/dashboard.py)
+// returns as needs_human: it folds in every tier-3 record WITHOUT rewriting that record's own
+// status field, which stays "open" until manager_daemon.py's process_open() runs (and that daemon
+// is optional — the README only starts dashboard.py). Re-filtering here by status === "needs_human"
+// would throw those freshly-classified records right back out, permanently if the daemon never
+// runs. Trust the array as given, same as computeTickets already does with this same field.
 function renderDecisions(escalations) {
-  const pending = escalations.filter(e => e.status === "needs_human");
   const panel = document.getElementById("decisions");
   const head = el("h2", null, "Cần bạn quyết");
-  if (!pending.length) {
+  if (!escalations.length) {
     panel.replaceChildren(head, el("p", "muted", "Không có gì chờ bạn."));
     return;
   }
-  panel.replaceChildren(head, ...pending.map(decisionCard));
+  panel.replaceChildren(head, ...escalations.map(decisionCard));
 }
 
 async function answerEscalation(id, answer) {
-  const res = await fetch(`/api/escalations/${encodeURIComponent(id)}/answer`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ answer, decided_by: "cto" }),
-  });
-  if (!res.ok) { alert(`Không gửi được: ${res.status}`); return; }
-  pollEscalations();
+  try {
+    const res = await fetch(`/api/escalations/${encodeURIComponent(id)}/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer, decided_by: "cto" }),
+    });
+    if (!res.ok) { alert(`Không gửi được: ${res.status}`); return; }
+    pollEscalations();
+  } catch (e) {
+    alert("Không gửi được: " + (e.message || e));
+  }
 }
 
 function assignCard(a) {
@@ -881,15 +898,17 @@ async function pollEscalations() {
     err = checkResponse(res, data);
   } catch (e) { err = e.message || "request failed"; }
 
+  pollFailures.escalations = !!err;
   if (err) {
     document.getElementById("decisions").replaceChildren(
       el("h2", null, "Cần bạn quyết"),
       el("p", "empty err", "Không tải được: " + err));
+    renderCounters(lastAssignments, lastEscalations.needs_human || [], pollFailures);
     return;
   }
   lastEscalations = data;
   renderDecisions(data.needs_human || []);
-  renderCounters(lastAssignments, data.needs_human || []);
+  renderCounters(lastAssignments, data.needs_human || [], pollFailures);
   renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
 }
 
@@ -901,15 +920,17 @@ async function pollAssignments() {
     err = checkResponse(res, data);
   } catch (e) { err = e.message || "request failed"; }
 
+  pollFailures.assignments = !!err;
   if (err) {
     document.getElementById("assignments").replaceChildren(
       el("h2", null, "Việc đang giao"),
       el("p", "empty err", "Không tải được: " + err));
+    renderCounters(lastAssignments, lastEscalations.needs_human || [], pollFailures);
     return;
   }
   lastAssignments = data;
   renderAssignments(lastAssignments);
-  renderCounters(lastAssignments, lastEscalations.needs_human || []);
+  renderCounters(lastAssignments, lastEscalations.needs_human || [], pollFailures);
 }
 
 async function pollAdoTickets() {
