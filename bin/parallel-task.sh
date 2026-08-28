@@ -19,7 +19,7 @@
 #
 # Usage:
 #   parallel-task.sh start    <task-name> <native|docker> [base-ref] [--ticket <id> ...]
-#   parallel-task.sh dispatch <task-name> <prompt>
+#   parallel-task.sh dispatch <task-name> <prompt> [--model <model>] [--effort low|medium|high|xhigh|max]
 #   parallel-task.sh list     [--json]
 #   parallel-task.sh stop     <task-name>
 #   parallel-task.sh rm       <task-name> [--force]
@@ -135,6 +135,31 @@ parse_start_args() {
   local ado_ids_json
   ado_ids_json="$(jq -cn --args '$ARGS.positional' -- "${ticket_ids[@]}")"
   printf '%s\t%s\t%s\t%s\n' "$task" "$mode" "$base_ref" "$ado_ids_json"
+}
+
+# parse_dispatch_args "$@" -> sets DISPATCH_MODEL, DISPATCH_EFFORT, DISPATCH_PROMPT; returns 1 on error.
+# Globals rather than a printed tab-separated line: a prompt is multi-line, and a newline inside a
+# tab-delimited return would break the caller's read.
+parse_dispatch_args() {
+  DISPATCH_MODEL=""; DISPATCH_EFFORT=""; DISPATCH_PROMPT=""
+  local -a positional=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --model)
+        [[ $# -ge 2 ]] || { echo "error: --model requires a value" >&2; return 1; }
+        DISPATCH_MODEL="$2"; shift 2 ;;
+      --effort)
+        [[ $# -ge 2 ]] || { echo "error: --effort requires a value" >&2; return 1; }
+        case "$2" in
+          low|medium|high|xhigh|max) DISPATCH_EFFORT="$2" ;;
+          *) echo "error: --effort must be low|medium|high|xhigh|max, got '$2'" >&2; return 1 ;;
+        esac
+        shift 2 ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  [[ ${#positional[@]} -ge 1 ]] || { echo "error: dispatch needs <task-name> <prompt>" >&2; return 1; }
+  DISPATCH_PROMPT="${positional[*]}"
 }
 
 cmd_start() {
@@ -327,13 +352,19 @@ cmd_rm() {
 cmd_dispatch() {
   [[ $# -ge 2 ]] || { echo "error: dispatch needs <task-name> <prompt>" >&2; usage; }
   local task="$1"; shift
-  local prompt="$*"
+  parse_dispatch_args "$@" || usage
+  local prompt="$DISPATCH_PROMPT"
   [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]] || { echo "error: unknown task '$task' (see: $0 list)" >&2; exit 1; }
   local wt_path
   wt_path="$(reg_get --arg k "$task" '.[$k].path')"
 
+  local -a launch=(claude --bg -n "$task")
+  if [[ -n "$DISPATCH_MODEL" ]]; then launch+=(--model "$DISPATCH_MODEL"); fi
+  if [[ -n "$DISPATCH_EFFORT" ]]; then launch+=(--effort "$DISPATCH_EFFORT"); fi
+  launch+=("$prompt")
+
   local launch_out
-  if ! launch_out="$( cd "$wt_path" && claude --bg -n "$task" "$prompt" 2>&1 )"; then
+  if ! launch_out="$( cd "$wt_path" && "${launch[@]}" 2>&1 )"; then
     echo "error: claude --bg failed to launch for '$task':" >&2
     echo "$launch_out" >&2
     exit 1
@@ -356,8 +387,13 @@ cmd_dispatch() {
     exit 1
   fi
 
-  reg_merge_entry "$task" "$(jq -n --arg sid "$short_id" --arg fid "$session_id" '{short_id:$sid, session_id:$fid}')"
-  echo ">> $task dispatched: short id $short_id  session $session_id"
+  reg_merge_entry "$task" "$(jq -n \
+    --arg sid "$short_id" --arg fid "$session_id" \
+    --arg m "$DISPATCH_MODEL" --arg e "$DISPATCH_EFFORT" \
+    '{short_id:$sid, session_id:$fid}
+       + (if $m == "" then {} else {model:$m} end)
+       + (if $e == "" then {} else {effort:$e} end)')"
+  echo ">> $task dispatched: short id $short_id  session $session_id${DISPATCH_MODEL:+  model $DISPATCH_MODEL}${DISPATCH_EFFORT:+  effort $DISPATCH_EFFORT}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

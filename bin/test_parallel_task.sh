@@ -39,4 +39,49 @@ else
   echo "PASS: trailing --ticket with no value returns non-zero"
 fi
 
+# --- parse_dispatch_args --------------------------------------------------
+
+parse_dispatch_args "do the thing"
+assert_eq "dispatch: prompt only" "||do the thing" "$DISPATCH_MODEL|$DISPATCH_EFFORT|$DISPATCH_PROMPT"
+
+parse_dispatch_args "do it" --model opus --effort max
+assert_eq "dispatch: both flags" "opus|max|do it" "$DISPATCH_MODEL|$DISPATCH_EFFORT|$DISPATCH_PROMPT"
+
+parse_dispatch_args "do it" --model sonnet
+assert_eq "dispatch: model only" "sonnet|" "$DISPATCH_MODEL|$DISPATCH_EFFORT"
+
+parse_dispatch_args "do it" --effort low
+assert_eq "dispatch: effort only" "|low" "$DISPATCH_MODEL|$DISPATCH_EFFORT"
+
+parse_dispatch_args "$(printf 'line one\nline two')" --effort high
+assert_eq "dispatch: multi-line prompt survives" "$(printf 'line one\nline two')" "$DISPATCH_PROMPT"
+
+parse_dispatch_args "flags before the prompt" --effort max
+assert_eq "dispatch: flag order does not matter" "max|flags before the prompt" \
+  "$DISPATCH_EFFORT|$DISPATCH_PROMPT"
+
+if parse_dispatch_args "do it" --effort turbo 2>/dev/null; then
+  echo "FAIL: unknown effort should return non-zero"; fail=1
+else
+  echo "PASS: unknown effort returns non-zero"
+fi
+
+if parse_dispatch_args "do it" --effort 2>/dev/null; then
+  echo "FAIL: --effort with no value should return non-zero"; fail=1
+else
+  echo "PASS: --effort with no value returns non-zero"
+fi
+
+if parse_dispatch_args "do it" --model 2>/dev/null; then
+  echo "FAIL: --model with no value should return non-zero"; fail=1
+else
+  echo "PASS: --model with no value returns non-zero"
+fi
+
+if parse_dispatch_args --model opus 2>/dev/null; then
+  echo "FAIL: dispatch with no prompt should return non-zero"; fail=1
+else
+  echo "PASS: dispatch with no prompt returns non-zero"
+fi
+
 [[ $fail -eq 0 ]] && echo "all passed" || { echo "FAILURES ABOVE"; exit 1; }
