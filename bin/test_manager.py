@@ -489,6 +489,64 @@ def test_manager_no_longer_spawns_a_throwaway_process():
     assert hasattr(manager, "deliver_answer")
 
 
+def test_finished_sessions_fires_once_on_the_transition_to_idle():
+    import manager_daemon as md
+
+    agents = [{"sessionId": "a", "name": "task-a", "status": "idle"}]
+    fired, seen = md.finished_sessions(agents, {"a": "busy"})
+    assert [f["sessionId"] for f in fired] == ["a"]
+    assert seen["a"] == "idle"
+
+    fired_again, _ = md.finished_sessions(agents, seen)
+    assert fired_again == [], "the same status must not fire twice"
+
+
+def test_finished_sessions_records_an_unseen_session_without_firing():
+    """A daemon restart must not re-announce work that finished days ago."""
+    import manager_daemon as md
+
+    fired, seen = md.finished_sessions([{"sessionId": "a", "name": "t", "status": "idle"}], {})
+    assert fired == []
+    assert seen == {"a": "idle"}
+
+
+def test_finished_sessions_ignores_a_still_busy_worker():
+    import manager_daemon as md
+
+    fired, _ = md.finished_sessions([{"sessionId": "a", "name": "t", "status": "busy"}], {"a": "busy"})
+    assert fired == []
+
+
+def test_list_agents_degrades_to_empty_on_a_subprocess_failure():
+    import subprocess
+
+    import manager_daemon as md
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("claude", 30)
+
+    assert md.list_agents(run=boom) == []
+
+
+def test_should_tick_stays_quiet_with_nothing_open():
+    import manager_daemon as md
+
+    assert md.should_tick(0, md.TICK_SECONDS + 1, open_count=0, running_count=0) is False
+
+
+def test_should_tick_fires_when_work_is_open_and_the_interval_has_passed():
+    import manager_daemon as md
+
+    assert md.should_tick(0, md.TICK_SECONDS + 1, open_count=1, running_count=0) is True
+    assert md.should_tick(0, md.TICK_SECONDS + 1, open_count=0, running_count=2) is True
+
+
+def test_should_tick_waits_out_the_interval():
+    import manager_daemon as md
+
+    assert md.should_tick(0, md.TICK_SECONDS - 1, open_count=3, running_count=1) is False
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
