@@ -464,35 +464,41 @@ def test_assignments_post_rejects_bare_string_ado_refs():
 def test_assignments_post_rejects_non_list_ado_refs():
     import dashboard
 
+    appended = []
     status, resp = dashboard._assignments_post(
-        {"title": "fix it", "ado_refs": 8172}, append_fn=lambda rec: None, start=lambda *a: None
+        {"title": "fix it", "ado_refs": 8172}, append_fn=appended.append, start=lambda *a: None
     )
     assert status == 400
     assert "error" in resp
+    assert appended == []
 
 
 def test_assignments_post_rejects_ado_ref_missing_id():
     import dashboard
 
+    appended = []
     status, resp = dashboard._assignments_post(
         {"title": "fix it", "ado_refs": [{"url": "https://example.com"}]},
-        append_fn=lambda rec: None,
+        append_fn=appended.append,
         start=lambda *a: None,
     )
     assert status == 400
     assert "error" in resp
+    assert appended == []
 
 
 def test_assignments_post_rejects_ado_ref_with_non_string_id():
     import dashboard
 
+    appended = []
     status, resp = dashboard._assignments_post(
         {"title": "fix it", "ado_refs": [{"id": 8172, "url": "https://example.com"}]},
-        append_fn=lambda rec: None,
+        append_fn=appended.append,
         start=lambda *a: None,
     )
     assert status == 400
     assert "error" in resp
+    assert appended == []
 
 
 def test_assignments_post_normalises_ado_refs_and_defaults_missing_url():
@@ -517,19 +523,72 @@ def test_assignments_post_normalises_ado_refs_and_defaults_missing_url():
 def test_assignments_post_rejects_blank_title():
     import dashboard
 
-    status, resp = dashboard._assignments_post({"title": "   "}, append_fn=lambda rec: None, start=lambda *a: None)
+    appended = []
+    status, resp = dashboard._assignments_post({"title": "   "}, append_fn=appended.append, start=lambda *a: None)
     assert status == 400
     assert "error" in resp
+    assert appended == []
 
 
 def test_assignments_post_rejects_out_of_range_priority():
     import dashboard
 
+    appended = []
     status, resp = dashboard._assignments_post(
-        {"title": "fix it", "priority": "P9"}, append_fn=lambda rec: None, start=lambda *a: None
+        {"title": "fix it", "priority": "P9"}, append_fn=appended.append, start=lambda *a: None
     )
     assert status == 400
     assert "error" in resp
+    assert appended == []
+
+
+def test_assignments_post_rejects_non_string_title_int():
+    """The sibling bug to malformed ado_refs: {"title": 12345} is valid JSON and reaches
+    `title.strip()` inside new_assignment unless caught first."""
+    import dashboard
+
+    appended = []
+    status, resp = dashboard._assignments_post({"title": 12345}, append_fn=appended.append, start=lambda *a: None)
+    assert status == 400
+    assert "error" in resp
+    assert appended == []
+
+
+def test_assignments_post_rejects_non_string_title_list():
+    import dashboard
+
+    appended = []
+    status, resp = dashboard._assignments_post(
+        {"title": ["not", "a", "string"]}, append_fn=appended.append, start=lambda *a: None
+    )
+    assert status == 400
+    assert "error" in resp
+    assert appended == []
+
+
+def test_assignments_post_falsy_non_string_title_still_blank_not_type_error():
+    """0 and False must still take the `or ""` fallback — the existing "title is required"
+    message from new_assignment — not the new "title must be a string" branch."""
+    import dashboard
+
+    for falsy in (0, False):
+        appended = []
+        status, resp = dashboard._assignments_post({"title": falsy}, append_fn=appended.append, start=lambda *a: None)
+        assert status == 400
+        assert resp["error"] == "title is required"
+        assert appended == []
+
+
+def test_assignments_post_rejects_non_dict_body():
+    """body.get(...) on a non-dict raises AttributeError before validation even starts — the
+    broadened except must turn that into a 400 too, not an uncaught crash."""
+    import dashboard
+
+    appended = []
+    status, resp = dashboard._assignments_post(["not", "a", "dict"], append_fn=appended.append, start=lambda *a: None)
+    assert status == 400
+    assert "error" in resp
+    assert appended == []
 
 
 def test_assignments_post_returns_500_and_skips_notify_when_ledger_write_fails():

@@ -540,13 +540,19 @@ def _assignments_post(body, append_fn=None, start=None):
     start = start or start_manager_turn
     try:
         refs = _parse_ado_refs(body.get("ado_refs"))
+        title = body.get("title") or ""
+        if not isinstance(title, str):
+            raise ValueError("title must be a string")
         record = ledger.new_assignment(
-            body.get("title") or "",
+            title,
             priority=body.get("priority") or "P1",
             deadline=body.get("deadline"),
             ado_refs=refs,
         )
-    except ValueError as e:
+    except (ValueError, AttributeError, TypeError) as e:
+        # Broad on purpose: this is a request boundary, and every JSON type a caller can send must
+        # become a 400. Dropping the connection with no response is strictly worse than a 400 that
+        # names the wrong cause.
         return 400, {"error": str(e)}
     try:
         append_fn(record)
