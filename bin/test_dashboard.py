@@ -519,6 +519,7 @@ def test_manager_chat_post_spawns_when_not_busy():
 def test_concurrent_posts_spawn_only_one_manager_turn():
     """The busy-check and the spawn must be atomic, or a burst pays for N Opus calls."""
     import threading as _t
+    import time as _time
 
     import dashboard
 
@@ -531,6 +532,7 @@ def test_concurrent_posts_spawn_only_one_manager_turn():
         return state["busy"]
 
     def fake_start(text, source):
+        _time.sleep(0.02)  # widen the check-then-act window so an unlocked impl reliably loses
         state["busy"] = True  # stands in for the real session lock being taken
         spawned.append(text)
 
