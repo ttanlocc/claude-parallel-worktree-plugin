@@ -44,7 +44,7 @@ def _isolate():
 def test_argv_bootstraps_without_resume():
     argv = ms.ask_argv(None, "hello")
     assert "--resume" not in argv
-    assert argv[-2:] == ["-p", "hello"]
+    assert argv[-3:] == ["-p", "--", "hello"]
     assert "--model" in argv and "--effort" in argv
 
 
@@ -59,6 +59,13 @@ def test_effort_and_model_are_sent_on_every_call():
         argv = ms.ask_argv(sid, "x")
         assert argv[argv.index("--model") + 1] == ms.MANAGER_MODEL
         assert argv[argv.index("--effort") + 1] == ms.MANAGER_EFFORT
+
+
+def test_argv_separates_the_prompt_so_a_leading_dash_is_not_read_as_a_flag():
+    """-p is a boolean flag and the prompt is positional; the charter starts with '---'."""
+    argv = ms.ask_argv(None, "--- charter starts like this")
+    assert argv[-3:] == ["-p", "--", "--- charter starts like this"]
+    assert argv.index("--") > argv.index("--model"), "every flag must precede the separator"
 
 
 def test_bootstrap_saves_the_session_id_and_prepends_the_charter():

@@ -136,7 +136,7 @@ def ask_argv(session_id, text: str) -> list[str]:
     argv = ["claude", "--model", MANAGER_MODEL, "--effort", MANAGER_EFFORT, "--output-format", "json"]
     if session_id:
         argv += ["--resume", session_id]
-    return argv + ["-p", text]
+    return argv + ["-p", "--", text]
 
 
 def _log_quietly(role: str, source: str, text: str) -> None:

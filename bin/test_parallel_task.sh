@@ -94,4 +94,22 @@ else
   echo "PASS: a multi-word unquoted prompt returns non-zero"
 fi
 
+# --- cmd_dispatch argv building -----------------------------------------------
+
+# Simulate what cmd_dispatch builds when given a prompt starting with a flag-like string
+prompt="--model is the config key you need"
+launch=(claude --bg -n test-task)
+launch+=(--model opus)
+launch+=(--effort max)
+launch+=(--)
+launch+=("$prompt")
+
+# The -- should come right before the prompt, so the prompt is never parsed as a flag
+if [[ "${launch[-2]}" == "--" && "${launch[-1]}" == "$prompt" ]]; then
+  echo "PASS cmd_dispatch: separator before flag-like prompt"
+else
+  echo "FAIL cmd_dispatch: expected separator -- then prompt, got ${launch[-2]} ${launch[-1]}"
+  fail=1
+fi
+
 [[ $fail -eq 0 ]] && echo "all passed" || { echo "FAILURES ABOVE"; exit 1; }

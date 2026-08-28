@@ -365,6 +365,7 @@ cmd_dispatch() {
   local -a launch=(claude --bg -n "$task")
   if [[ -n "$DISPATCH_MODEL" ]]; then launch+=(--model "$DISPATCH_MODEL"); fi
   if [[ -n "$DISPATCH_EFFORT" ]]; then launch+=(--effort "$DISPATCH_EFFORT"); fi
+  launch+=(--)
   launch+=("$prompt")
 
   local launch_out
