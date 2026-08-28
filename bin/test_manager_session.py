@@ -5,8 +5,11 @@ import json
 import os as _os
 import subprocess
 import tempfile
+import threading
 
 import manager_session as ms
+
+_CHARTER_BACKUP = ms.CHARTER_PATH
 
 
 class _Recorder:
@@ -22,7 +25,10 @@ class _Recorder:
         self.calls.append(argv)
         if self.raises:
             raise self.raises
-        payload = json.dumps({"session_id": self.session_id, "result": self.result})
+        payload_dict = {"result": self.result}
+        if self.session_id is not None:
+            payload_dict["session_id"] = self.session_id
+        payload = json.dumps(payload_dict)
         return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
 
 
@@ -96,6 +102,8 @@ def test_a_failing_call_is_recorded_not_swallowed():
     reply = ms.ask("x", "cto", run=_Recorder(raises=subprocess.TimeoutExpired("claude", 600)))
     assert "failed" in reply.lower()
     entries = ms.history()
+    assert len(entries) == 2
+    assert entries[0]["text"] == "x"
     assert entries[-1]["role"] == "manager"
     assert "failed" in entries[-1]["text"].lower()
 
@@ -137,6 +145,90 @@ def test_charter_has_its_load_bearing_sections():
     text = ms.load_charter()
     for heading in ("## The eight actions", "## Routing work", "## Hard boundaries"):
         assert heading in text, heading
+
+
+def test_a_second_caller_gets_manager_busy_while_the_first_holds_the_lock():
+    _isolate()
+    ms.LOCK_TIMEOUT = 1
+    started, release = threading.Event(), threading.Event()
+
+    def slow_run(argv, **kwargs):
+        started.set()
+        release.wait(5)
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"session_id": "s", "result": "ok"}), stderr="")
+
+    first = threading.Thread(target=ms.ask, args=("first", "cto"), kwargs={"run": slow_run})
+    first.start()
+    try:
+        assert started.wait(5), "the first call never reached the subprocess"
+        assert ms.busy() is True
+        try:
+            ms.ask("second", "cto", run=_Recorder())
+        except ms.ManagerBusy:
+            pass
+        else:
+            raise AssertionError("a second caller should have hit ManagerBusy")
+    finally:
+        release.set()
+        first.join(5)
+    assert ms.busy() is False
+    ms.LOCK_TIMEOUT = 300
+
+
+def test_a_busy_timeout_is_recorded_before_it_raises():
+    _isolate()
+    ms.LOCK_TIMEOUT = 1
+    started, release = threading.Event(), threading.Event()
+
+    def slow_run(argv, **kwargs):
+        started.set()
+        release.wait(5)
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"session_id": "s", "result": "ok"}), stderr="")
+
+    first = threading.Thread(target=ms.ask, args=("first", "cto"), kwargs={"run": slow_run})
+    first.start()
+    try:
+        assert started.wait(5)
+        try:
+            ms.ask("lost one", "cto", run=_Recorder())
+        except ms.ManagerBusy:
+            pass
+    finally:
+        release.set()
+        first.join(5)
+    assert any("busy" in e["text"] for e in ms.history()), "a dropped turn must be visible in the log"
+    ms.LOCK_TIMEOUT = 300
+
+
+def test_a_reply_without_a_session_id_warns_instead_of_silently_rebootstrapping():
+    _isolate()
+    run = _Recorder()
+    run.session_id = None
+    reply = ms.ask("first", "cto", run=run)
+    assert reply == "ok"
+    assert any("without a session id" in e["text"] for e in ms.history())
+
+
+def test_a_non_dict_payload_is_reported_not_raised():
+    _isolate()
+
+    def weird(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout="[1, 2, 3]", stderr="")
+
+    reply = ms.ask("x", "cto", run=weird)
+    assert "failed" in reply.lower()
+    assert ms.history()[-1]["role"] == "manager"
+
+
+def test_a_missing_charter_is_reported_not_raised():
+    d = _isolate()
+    ms.CHARTER_PATH = _os.path.join(d, "nope.md")
+    try:
+        reply = ms.ask("x", "cto", run=_Recorder())
+        assert "failed" in reply.lower()
+        assert ms.history()[0]["text"] == "x", "the incoming turn must survive the failure"
+    finally:
+        ms.CHARTER_PATH = _CHARTER_BACKUP
 
 
 if __name__ == "__main__":

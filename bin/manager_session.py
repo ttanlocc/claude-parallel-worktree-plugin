@@ -28,7 +28,9 @@ CHARTER_PATH = os.path.join(
 MANAGER_MODEL = os.environ.get("PWT_MANAGER_MODEL", "claude-opus-5")
 MANAGER_EFFORT = os.environ.get("PWT_MANAGER_EFFORT", "max")
 
-LOCK_TIMEOUT = 30
+# ponytail: global lock, per-account locks if throughput matters. 300s = background threads never
+# starve while an HTTP request waits; a short timeout drops daemon wakes with no UI retry surface.
+LOCK_TIMEOUT = 300
 CALL_TIMEOUT = 600
 
 SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
@@ -38,8 +40,9 @@ class ManagerBusy(RuntimeError):
     """Another caller held the lock past the timeout."""
 
 
-def load_charter(path: str = CHARTER_PATH) -> str:
-    with open(path, encoding="utf-8") as fh:
+def load_charter(path: str | None = None) -> str:
+    """Read the charter. Resolved at call time so the module global stays the single source."""
+    with open(path or CHARTER_PATH, encoding="utf-8") as fh:
         return fh.read()
 
 
@@ -87,7 +90,8 @@ def history(limit: int = 200) -> list[dict]:
 
 
 @contextlib.contextmanager
-def _locked(timeout: int = LOCK_TIMEOUT):
+def _locked(timeout: int | None = None):
+    timeout = LOCK_TIMEOUT if timeout is None else timeout
     os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
     fh = open(LOCK_PATH, "w")
     deadline = time.monotonic() + timeout
@@ -135,32 +139,79 @@ def ask_argv(session_id, text: str) -> list[str]:
     return argv + ["-p", text]
 
 
+def _log_quietly(role: str, source: str, text: str) -> None:
+    """Append a chat entry, never raising — a failure to log must not mask the failure it records."""
+    try:
+        append_chat(role, source, text)
+    except OSError:
+        pass
+
+
+def _ask_locked(text: str, source: str, run, timeout: int) -> str:
+    """One turn, with the lock already held. Returns a string on every path."""
+    _log_quietly("cto" if source == "cto" else "system", source, text)
+    try:
+        session_id = _read_state().get("session_id")
+        prompt = text if session_id else f"{load_charter()}\n\n---\n\n{text}"
+    except OSError as e:
+        reply = f"manager call failed before dispatch: {e}"
+        _log_quietly("manager", source, reply)
+        return reply
+
+    try:
+        proc = run(
+            ask_argv(session_id, prompt),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout,
+        )
+        payload = json.loads(proc.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError(f"expected a JSON object, got {type(payload).__name__}")
+    except SUBPROC_ERRORS + (ValueError,) as e:
+        reply = f"manager call failed: {e}"
+        _log_quietly("manager", source, reply)
+        return reply
+
+    reply = payload.get("result") or ""
+    if not session_id:
+        new_id = payload.get("session_id")
+        if not new_id:
+            _log_quietly(
+                "manager",
+                source,
+                "WARNING: the manager replied without a session id — the next turn will start a "
+                "new session and lose this context",
+            )
+        else:
+            try:
+                _write_state(new_id)
+            except OSError as e:
+                _log_quietly(
+                    "manager",
+                    source,
+                    f"WARNING: replied but could not save the session id ({e}) — the next turn "
+                    "will start a new session and lose this context",
+                )
+    _log_quietly("manager", source, reply)
+    return reply
+
+
 def ask(text: str, source: str, run=subprocess.run, timeout: int = CALL_TIMEOUT) -> str:
     """Send one turn to the manager and return its reply.
 
     The charter is prepended to the FIRST user message rather than passed as a flag, because
-    --resume replays the transcript: a charter inside the transcript is re-read on every later call,
-    while a flag passed once at bootstrap is not.
+    --resume replays the transcript: a charter inside the transcript is re-read on every later
+    call, while a flag passed once at bootstrap is not.
+
+    Every failure except ManagerBusy becomes a logged reply string rather than an exception — a
+    caller that loses its message cannot recover it, so the chat log is the record. ManagerBusy
+    alone propagates, because the HTTP layer maps it to a 503.
     """
-    with _locked():
-        session_id = _read_state().get("session_id")
-        prompt = text if session_id else f"{load_charter()}\n\n---\n\n{text}"
-        append_chat("cto" if source == "cto" else "system", source, text)
-        try:
-            proc = run(
-                ask_argv(session_id, prompt),
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=timeout,
-            )
-            payload = json.loads(proc.stdout)
-        except SUBPROC_ERRORS as e:
-            reply = f"manager call failed: {e}"
-            append_chat("manager", source, reply)
-            return reply
-        if not session_id and payload.get("session_id"):
-            _write_state(payload["session_id"])
-        reply = payload.get("result") or ""
-        append_chat("manager", source, reply)
-        return reply
+    try:
+        with _locked():
+            return _ask_locked(text, source, run, timeout)
+    except ManagerBusy:
+        _log_quietly("manager", source, "manager busy — this turn was not delivered")
+        raise
