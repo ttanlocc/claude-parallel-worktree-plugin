@@ -254,6 +254,25 @@
   .pill.s-done { background: var(--ok-bg); color: var(--ok-fg); }
   .pill.s-cancelled { background: var(--idle-bg); color: var(--faint); }
   .pill.at-risk { background: var(--stop-bg); color: var(--stop-fg); }
+
+  /* ---------- manager chat ---------- */
+  .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 22px 14px; }
+  .chat-head h2 { margin: 0; font-size: 17px; font-weight: 700; color: var(--navy); letter-spacing: -.015em; }
+  .chat-log { flex: 1; min-height: 240px; overflow-y: auto; padding: 4px 22px; border-top: 1px solid var(--line);
+              display: flex; flex-direction: column; gap: 10px; }
+  .chat-compose { display: flex; gap: 8px; align-items: flex-end; padding: 14px 22px; border-top: 1px solid var(--line); background: #FBFCFE; }
+  .chat-compose .chat-input { flex: 1; }
+
+  .msg { max-width: 92%; padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.5; }
+  .msg-cto { align-self: flex-end; background: #EAF1FD; color: var(--ink); }
+  .msg-manager { align-self: flex-start; background: var(--idle-bg); color: var(--ink); }
+  .msg-system { align-self: center; max-width: 100%; background: transparent; color: var(--muted); font-size: 12px; text-align: center; }
+  .msg-thinking { align-self: flex-start; background: transparent; color: var(--faint); font-style: italic; font-size: 12.5px; }
+  .msg-error { align-self: center; max-width: 100%; background: transparent; color: var(--stop-fg); text-align: center; }
+  /* proactive work (anything not a direct reply to the CTO) — tinted so it stays visible, not silent */
+  .msg-auto { background: var(--warn-bg); border-left: 3px solid var(--warn-dot); }
+  .msg-why { font-size: 10.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--warn-fg); margin-bottom: 3px; }
+  .msg-text { white-space: pre-wrap; word-break: break-word; }
 </style>
 </head>
 <body>
@@ -356,9 +375,12 @@ let lastData = [];
 let lastEscalations = { needs_human: [], recent_decisions: [] };
 let lastAdoTickets = [];
 let lastAssignments = [];
-let pollFailures = { assignments: false, escalations: false }; // which source is currently stale —
-                                                                // renderCounters shows "—" instead
-                                                                // of a false zero for that source.
+let pollFailures = { assignments: false, escalations: false, chat: false }; // which source is
+                                                                // currently stale — renderCounters
+                                                                // reads assignments/escalations for
+                                                                // "—" instead of a false zero; chat
+                                                                // has no counter, so pollChat renders
+                                                                // its own honest error state instead.
 let showManagedOnly = true;
 let tasksFailed = false; // true while /api/tasks is failing — session state is unknown, so
                          // ticket rows would be guessing; renderTickets shows a banner instead.
@@ -943,11 +965,127 @@ async function pollAdoTickets() {
   } catch (e) { /* leave the last-known backlog in place on a transient failure */ }
 }
 
+// Built once, on the first poll (success or failure), and never touched again — a poll tick can
+// never rebuild the composer out from under whatever the operator is mid-typing because there is
+// no rebuild path after the first mount, only renderChatLog() replacing #chat-log's own children.
+function ensureChatShell() {
+  if (document.getElementById("chat-log")) return;
+  const panel = document.getElementById("manager-chat");
+
+  const input = document.createElement("textarea");
+  input.className = "chat-input";
+  input.rows = 3;
+  input.placeholder = "Giao việc, đổi ưu tiên, hỏi tiến độ…";
+  input.setAttribute("aria-label", "Nhắn tin cho manager");
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendChat(input); }
+  });
+  const send = el("button", "btn primary", "Gửi");
+  send.addEventListener("click", () => sendChat(input));
+
+  const reset = el("button", "btn", "Phiên mới");
+  reset.addEventListener("click", async () => {
+    if (!confirm("Bắt đầu phiên manager mới? Lịch sử chat sẽ không được nạp lại.")) return;
+    await fetch("/api/manager/reset", { method: "POST" });
+  });
+
+  const head = el("div", "chat-head");
+  head.append(el("h2", null, "Manager"), reset);
+  const log = el("div", "chat-log");
+  log.id = "chat-log";
+  const compose = el("div", "chat-compose");
+  compose.append(input, send);
+  panel.replaceChildren(head, log, compose);
+}
+
+function sourceLabel(source) {
+  return {
+    "daemon:escalation": "escalation từ worker",
+    "daemon:worker-finished": "worker vừa xong",
+    "daemon:tick": "tự rà soát định kỳ",
+  }[source] || source;
+}
+
+// role (cto/system/manager) picks the bubble side + base tint; msg-auto retints anything that
+// isn't a direct reply to the CTO so proactive work (incl. the daemon's system-role wake message)
+// stays visible instead of blending in as a silent aside. Chat text is untrusted model/worker
+// output — textContent only, never innerHTML.
+function chatRow(e) {
+  const row = el("div", `msg msg-${e.role}` + (e.source !== "cto" ? " msg-auto" : ""));
+  if (e.source !== "cto") row.append(el("div", "msg-why", sourceLabel(e.source)));
+  row.append(el("div", "msg-text", e.text || ""));
+  return row;
+}
+
+function renderChatLog(payload) {
+  const log = document.getElementById("chat-log");
+  if (!log) return;
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  const rows = (payload.entries || []).map(chatRow);
+  if (payload.busy) rows.push(el("div", "msg msg-thinking", "Manager đang xử lý…"));
+  log.replaceChildren(...rows);
+  if (atBottom) log.scrollTop = log.scrollHeight;   // only follow new messages if already at the bottom
+}
+
+function renderChat(payload) {
+  ensureChatShell();
+  renderChatLog(payload);
+}
+
+async function sendChat(input) {
+  const text = input.value.trim();
+  if (!text) return;
+  const btn = input.nextElementSibling;   // compose = [input, send] — the button is always the next sibling
+  input.disabled = true;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/manager/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(res.status === 503 ? "Manager đang bận, thử lại sau." : `Lỗi ${res.status}: ${body.error || ""}`);
+      return;   // the typed text stays in the box so nothing is lost
+    }
+    input.value = "";
+    pollChat();
+  } catch (e) {
+    alert("Không gửi được: " + (e.message || e));   // typed text stays in the box here too
+  } finally {
+    input.disabled = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function pollChat() {
+  let data, err;
+  try {
+    const res = await fetch("/api/manager/chat");
+    data = await res.json();
+    err = checkResponse(res, data);
+  } catch (e) { err = e.message || "request failed"; }
+
+  pollFailures.chat = !!err;
+  if (err) {
+    // honest state, not a silently frozen panel — but never touch the composer itself here,
+    // whether or not it's focused, so a stretch of poll failures can't cost typed text either.
+    ensureChatShell();
+    document.getElementById("chat-log").replaceChildren(el("div", "msg msg-error", "Không tải được chat: " + err));
+    return;
+  }
+  renderChat(data);
+}
+
 pollEscalations();
 setInterval(pollEscalations, 2000);
 
 pollAssignments();
 setInterval(pollAssignments, 2000);
+
+pollChat();
+setInterval(pollChat, 2000);
 
 document.getElementById("managed-only-toggle").addEventListener("change", (e) => {
   showManagedOnly = e.target.checked;
