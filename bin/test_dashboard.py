@@ -8,16 +8,10 @@ import tempfile
 
 import dashboard
 from dashboard import (
-    PARALLEL_TASK_SH,
-    _build_dispatch_argv,
-    _build_dispatch_prompt,
     _fetch_ado_description,
     _find_ado_links,
-    _parse_ticket_ids,
-    _run_dispatch,
     _shape_ado_ticket,
     _strip_html,
-    _ticket_task_slug,
     get_ado_backlog,
     render_task_log,
     render_transcript_line,
@@ -315,117 +309,6 @@ def test_fetch_ado_description_degrades_on_timeout():
         subprocess.run = original_run
 
 
-def test_ticket_task_slug_kebab_cases_and_truncates():
-    assert _ticket_task_slug("Fix the Setpoint Guard!") == "fix-the-setpoint-guard"
-    long_title = "A very long ticket title that goes on and on past forty characters easily"
-    slug = _ticket_task_slug(long_title)
-    assert len(slug) <= 40
-    assert slug == slug.lower()
-    assert " " not in slug
-
-
-def test_ticket_task_slug_handles_non_ascii():
-    assert _ticket_task_slug("Cùng 1 input, câu trả lời không đổi") != ""
-
-
-def test_build_dispatch_prompt_includes_all_ticket_content_and_instructions():
-    tickets = [
-        {"id": "8172", "title": "Fix setpoint guard", "description": "Root cause is X."},
-        {"id": "8165", "title": "Related follow-up", "description": "Second half of the fix."},
-    ]
-    prompt = _build_dispatch_prompt(tickets, "Focus on the backend only, skip the UI part.")
-    assert "AB#8172" in prompt
-    assert "Fix setpoint guard" in prompt
-    assert "Root cause is X." in prompt
-    assert "AB#8165" in prompt
-    assert "Second half of the fix." in prompt
-    assert "Focus on the backend only, skip the UI part." in prompt
-    assert "verify" in prompt.lower()  # the Hermes verify-before-done reminder is present
-
-
-def test_build_dispatch_prompt_omits_instructions_section_when_blank():
-    tickets = [{"id": "1", "title": "T", "description": "D"}]
-    prompt = _build_dispatch_prompt(tickets, "")
-    assert "Extra instructions" not in prompt
-
-
-def test_build_dispatch_argv_includes_one_ticket_flag_per_id():
-    argv = _build_dispatch_argv("fix-setpoint-guard", "native", ["8172", "8165"])
-    assert argv == [
-        PARALLEL_TASK_SH,
-        "start",
-        "fix-setpoint-guard",
-        "native",
-        "--ticket",
-        "8172",
-        "--ticket",
-        "8165",
-    ]
-
-
-def test_build_dispatch_argv_with_no_tickets():
-    argv = _build_dispatch_argv("some-task", "native", [])
-    assert argv == [PARALLEL_TASK_SH, "start", "some-task", "native"]
-
-
-def test_parse_ticket_ids_rejects_non_list_string():
-    # A JSON string body like {"ticket_ids": "8172"} must not silently iterate into ['8','1','7','2'].
-    try:
-        _parse_ticket_ids("8172")
-        raise AssertionError("expected ValueError")
-    except ValueError:
-        pass
-
-
-def test_parse_ticket_ids_rejects_non_list_number():
-    # A JSON number body like {"ticket_ids": 8172} must not raise an uncaught TypeError when iterated.
-    try:
-        _parse_ticket_ids(8172)
-        raise AssertionError("expected ValueError")
-    except ValueError:
-        pass
-
-
-def test_parse_ticket_ids_accepts_list_and_treats_absent_as_empty():
-    assert _parse_ticket_ids(["8172", 8165]) == ["8172", "8165"]
-    assert _parse_ticket_ids(None) == []
-    assert _parse_ticket_ids([]) == []
-
-
-def test_run_dispatch_returns_500_on_start_stage_subprocess_error_instead_of_raising():
-    original_run = subprocess.run
-
-    def mock_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired("parallel-task.sh", 180)
-
-    subprocess.run = mock_run
-    try:
-        status, resp = dashboard._run_dispatch([PARALLEL_TASK_SH, "start", "x", "native"], "x", "prompt")
-        assert status == 500
-        assert "start failed" in resp["error"]
-    finally:
-        subprocess.run = original_run
-
-
-def test_run_dispatch_returns_500_on_dispatch_stage_subprocess_error_instead_of_raising():
-    original_run = subprocess.run
-    calls = []
-
-    def mock_run(argv, **kwargs):
-        calls.append(argv)
-        if len(calls) == 1:  # start succeeds
-            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
-        raise OSError("parallel-task.sh not found")  # dispatch fails
-
-    subprocess.run = mock_run
-    try:
-        status, resp = _run_dispatch([PARALLEL_TASK_SH, "start", "x", "native"], "x", "prompt")
-        assert status == 500
-        assert "dispatch failed" in resp["error"]
-    finally:
-        subprocess.run = original_run
-
-
 def test_start_manager_turn_returns_before_the_model_does():
     """A model call must never be held inside an HTTP request."""
     import threading
@@ -591,6 +474,40 @@ def test_read_json_body_parses_valid_object():
     payload = json.dumps({"text": "hi"}).encode()
     fake = types.SimpleNamespace(headers={"Content-Length": str(len(payload))}, rfile=io.BytesIO(payload))
     assert dashboard.Handler._read_json_body(fake) == {"text": "hi"}
+
+
+def test_get_assignments_decorates_with_at_risk_and_progress():
+    import os as _os
+    import tempfile
+
+    import dashboard
+    from assignments import new_assignment
+    from escalations import append
+
+    fd, path = tempfile.mkstemp()
+    _os.close(fd)
+    try:
+        a = new_assignment("late one", deadline="2020-01-01")
+        a["plan"] = [{"state": "done"}, {"state": "todo"}]
+        append(path, a)
+        rows = dashboard.get_assignments(path=path)
+        assert rows[0]["at_risk"] is True
+        assert rows[0]["progress"] == 0.5
+    finally:
+        _os.unlink(path)
+
+
+def test_ticket_dispatch_helpers_are_gone():
+    import dashboard
+
+    for gone in (
+        "_build_dispatch_argv",
+        "_run_dispatch",
+        "_build_dispatch_prompt",
+        "_ticket_task_slug",
+        "_parse_ticket_ids",
+    ):
+        assert not hasattr(dashboard, gone), f"{gone} should have been removed with the route"
 
 
 if __name__ == "__main__":

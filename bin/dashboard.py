@@ -109,8 +109,9 @@ import threading
 import time
 from urllib.parse import urlparse
 
+import assignments as ledger
 import manager_session
-from escalations import QUEUE_PATH, classify, current_state, record_answer
+from escalations import QUEUE_PATH, append, classify, current_state, record_answer
 
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
@@ -144,6 +145,16 @@ def get_escalations() -> dict:
     decisions = [r for r in state if r.get("decided_by") == "manager"]
     decisions.sort(key=lambda r: r.get("answered_at") or 0, reverse=True)
     return {"needs_human": needs_human, "recent_decisions": decisions[:20]}
+
+
+def get_assignments(path: str = None, now: float = None) -> list[dict]:
+    """Every assignment, each decorated with the two derived values the UI needs."""
+    path = path or ledger.LEDGER_PATH
+    now = now if now is not None else time.time()
+    rows = []
+    for rec in current_state(path):
+        rows.append({**rec, "at_risk": ledger.at_risk(rec, now), "progress": ledger.progress(rec)})
+    return rows
 
 
 # The repo whose copies we report on. Set once in main(); `parallel-task.sh` finds
@@ -328,75 +339,6 @@ def _shape_ado_ticket(raw: dict) -> dict:
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
-_SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
-
-
-def _ticket_task_slug(title: str) -> str:
-    ascii_title = title.encode("ascii", "ignore").decode("ascii")
-    slug = _SLUG_STRIP_RE.sub("-", ascii_title.lower()).strip("-")
-    return slug[:40].strip("-") or "ticket"
-
-
-def _build_dispatch_prompt(tickets: list[dict], instructions: str) -> str:
-    sections = []
-    for t in tickets:
-        sections.append(f"AB#{t['id']}: {t['title']}\n{t['description']}")
-    body = "\n\n".join(sections)
-    parts = [
-        "You've been assigned the following ticket(s):",
-        body,
-    ]
-    if instructions.strip():
-        parts.append(f"Extra instructions from the manager:\n{instructions.strip()}")
-    parts.append(
-        "Follow this repo's CLAUDE.md conventions. Before reporting done: run the relevant "
-        "tests and confirm they're green, and verify the actual behavior — don't mark this "
-        "complete on a self-report alone."
-    )
-    return "\n\n".join(parts)
-
-
-def _build_dispatch_argv(slug: str, mode: str, ticket_ids: list[str]) -> list[str]:
-    argv = [PARALLEL_TASK_SH, "start", slug, mode]
-    for tid in ticket_ids:
-        argv += ["--ticket", tid]
-    return argv
-
-
-def _parse_ticket_ids(raw) -> list[str]:
-    """raw is body.get('ticket_ids'): absent/empty (None, [], "", 0, False) means no tickets
-    requested, same as before. Anything else must be a list — a bare string would otherwise pass
-    the caller's `if not ticket_ids` check by iterating into its own characters, and a bare number
-    would raise an uncaught TypeError when iterated. Raises ValueError, caught by do_POST's
-    existing body-parsing except block."""
-    if not raw:
-        return []
-    if not isinstance(raw, list):
-        raise ValueError("ticket_ids must be a list")
-    return [str(i) for i in raw]
-
-
-def _run_dispatch(start_argv: list[str], slug: str, prompt: str) -> tuple[int, dict]:
-    """Runs `parallel-task.sh start` then `dispatch` for an already-validated request. Returns
-    (http_status, body) instead of letting a subprocess failure (timeout, or the script missing/
-    non-executable) cross into do_POST uncaught and drop the connection with no response."""
-    try:
-        start_result = subprocess.run(start_argv, capture_output=True, text=True, cwd=REPO_DIR, timeout=180)
-    except (subprocess.SubprocessError, OSError) as e:
-        return 500, {"error": f"start failed: {e}"}
-    if start_result.returncode != 0:
-        return 500, {"error": f"start failed: {start_result.stderr[-2000:]}"}
-
-    try:
-        dispatch_result = subprocess.run(
-            [PARALLEL_TASK_SH, "dispatch", slug, prompt], capture_output=True, text=True, cwd=REPO_DIR, timeout=60
-        )
-    except (subprocess.SubprocessError, OSError) as e:
-        return 500, {"error": f"dispatch failed: {e}"}
-    if dispatch_result.returncode != 0:
-        return 500, {"error": f"dispatch failed: {dispatch_result.stderr[-2000:]}"}
-
-    return 200, {"ok": True, "task": slug}
 
 
 def _strip_html(raw: str) -> str:
@@ -577,8 +519,7 @@ def _manager_chat_post(text: str, busy=None, start=None) -> tuple[int, dict]:
     reaches manager_session's own flock, and each would spawn its own paid manager call. The lock
     covers only this fast check-then-spawn pair, never the model call itself, so no request is held
     across it. start() can also raise RuntimeError (thread.start() under OS thread exhaustion) —
-    caught here so this route returns 503 instead of dropping the connection, matching
-    _run_dispatch's precedent for the same failure mode.
+    caught here so this route returns 503 instead of dropping the connection.
     """
     busy = busy or manager_session.busy
     start = start or start_manager_turn
@@ -656,6 +597,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e)}, status=500)
             return
+        if parsed.path == "/api/assignments":
+            try:
+                self._json(get_assignments())
+            except (OSError, ValueError) as e:
+                self._json({"error": str(e)}, status=500)
+            return
         if parsed.path == "/api/ado-tickets":
             try:
                 self._json(get_ado_backlog())
@@ -730,34 +677,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self._json({"ok": True, "record": updated})
             return
-        if parsed.path == "/api/tickets/dispatch":
+        if parsed.path == "/api/assignments":
             try:
                 body = self._read_json_body()
             except ValueError as e:
                 self._body_error(e)
                 return
             try:
-                ticket_ids = _parse_ticket_ids(body.get("ticket_ids"))
+                record = ledger.new_assignment(
+                    body.get("title") or "",
+                    priority=body.get("priority") or "P1",
+                    deadline=body.get("deadline"),
+                    ado_refs=body.get("ado_refs") or [],
+                )
             except ValueError as e:
-                self._json({"error": f"bad request body: {e}"}, status=400)
+                self._json({"error": str(e)}, status=400)
                 return
-            instructions = str(body.get("instructions") or "")
-            if not ticket_ids:
-                self._json({"error": "ticket_ids is required and must be non-empty"}, status=400)
-                return
-
-            backlog_by_id = {t["id"]: t for t in get_ado_backlog()}
-            tickets = []
-            for tid in ticket_ids:
-                title = backlog_by_id.get(tid, {}).get("title", f"ticket {tid}")
-                tickets.append({"id": tid, "title": title, "description": _fetch_ado_description(tid)})
-
-            slug = _ticket_task_slug(tickets[0]["title"])
-            prompt = _build_dispatch_prompt(tickets, instructions)
-            start_argv = _build_dispatch_argv(slug, "native", ticket_ids)
-
-            status, resp = _run_dispatch(start_argv, slug, prompt)
-            self._json(resp, status=status)
+            append(ledger.LEDGER_PATH, record)
+            refs = ", ".join(f"AB#{r.get('id')}" for r in record["ado_refs"]) or "none"
+            start_manager_turn(
+                f"New assignment {record['id']}: {record['title']}\n"
+                f"Priority {record['priority']}, deadline {record['deadline'] or 'none'}, "
+                f"ADO refs: {refs}.\n"
+                "It is already in the ledger. Plan it, size each step, dispatch, and confirm in one line.",
+                "cto",
+            )
+            self._json({"ok": True, "record": record}, status=202)
             return
         if parsed.path == "/api/manager/chat":
             try:
