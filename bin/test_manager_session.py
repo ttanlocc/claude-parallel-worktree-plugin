@@ -147,6 +147,25 @@ def test_charter_has_its_load_bearing_sections():
         assert heading in text, heading
 
 
+def test_a_broken_chat_log_does_not_cost_the_caller_its_reply():
+    d = _isolate()
+    blocker = _os.path.join(d, "blocker")
+    open(blocker, "w").close()
+    ms.CHAT_PATH = _os.path.join(blocker, "chat.jsonl")
+    reply = ms.ask("x", "cto", run=_Recorder())
+    assert reply == "ok", "a broken chat log must not cost the caller its reply"
+
+
+def test_a_failed_state_write_does_not_discard_the_reply():
+    d = _isolate()
+    blocker = _os.path.join(d, "sblock")
+    open(blocker, "w").close()
+    ms.STATE_PATH = _os.path.join(blocker, "state.json")
+    reply = ms.ask("x", "cto", run=_Recorder())
+    assert reply == "ok", "a bookkeeping failure must not discard a reply already received"
+    assert any("could not save the session id" in e["text"] for e in ms.history())
+
+
 def test_a_second_caller_gets_manager_busy_while_the_first_holds_the_lock():
     _isolate()
     ms.LOCK_TIMEOUT = 1
@@ -168,11 +187,11 @@ def test_a_second_caller_gets_manager_busy_while_the_first_holds_the_lock():
             pass
         else:
             raise AssertionError("a second caller should have hit ManagerBusy")
-    finally:
         release.set()
         first.join(5)
-    assert ms.busy() is False
-    ms.LOCK_TIMEOUT = 300
+        assert ms.busy() is False
+    finally:
+        ms.LOCK_TIMEOUT = 300
 
 
 def test_a_busy_timeout_is_recorded_before_it_raises():
@@ -193,11 +212,11 @@ def test_a_busy_timeout_is_recorded_before_it_raises():
             ms.ask("lost one", "cto", run=_Recorder())
         except ms.ManagerBusy:
             pass
-    finally:
         release.set()
         first.join(5)
-    assert any("busy" in e["text"] for e in ms.history()), "a dropped turn must be visible in the log"
-    ms.LOCK_TIMEOUT = 300
+        assert any("busy" in e["text"] for e in ms.history()), "a dropped turn must be visible in the log"
+    finally:
+        ms.LOCK_TIMEOUT = 300
 
 
 def test_a_reply_without_a_session_id_warns_instead_of_silently_rebootstrapping():
