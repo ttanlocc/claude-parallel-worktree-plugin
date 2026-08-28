@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """The manager tier: turn one escalation into a decision, and deliver it back to the worker.
 
-Everything here except run_manager()/deliver_answer() is pure, so the judgement logic is testable
-without spawning a model.
+Everything here except deliver_answer() is pure, so the judgement logic is testable without
+spawning a model.
 """
 
 import json
 import subprocess
 
 from escalations import classify
-
-MANAGER_MODEL = "claude-fable-5"
 
 _INSTRUCTIONS = """You are the manager for a team of autonomous coding sessions.
 
@@ -88,26 +86,9 @@ def validate_decision(decision, record: dict) -> str | None:
     return None
 
 
-def manager_argv(prompt: str) -> list[str]:
-    """Argv for one short-lived manager call. Print mode: one question in, one answer out."""
-    return ["claude", "--model", MANAGER_MODEL, "-p", prompt]
-
-
 def resume_argv(session_id: str, message: str) -> list[str]:
     """Argv that delivers a message into an existing session (verified: works, exits 0)."""
     return ["claude", "--resume", session_id, "-p", message]
-
-
-def run_manager(record: dict, timeout: int = 180) -> str:
-    """Thin shell: spawn the manager and hand back its raw reply."""
-    result = subprocess.run(
-        manager_argv(build_prompt(record)),
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=timeout,
-    )
-    return result.stdout
 
 
 def deliver_answer(session_id: str, message: str, timeout: int = 180) -> str:

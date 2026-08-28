@@ -5,9 +5,7 @@ import json
 
 from escalations import new_record
 from manager import (
-    MANAGER_MODEL,
     build_prompt,
-    manager_argv,
     parse_decision,
     resume_argv,
     validate_decision,
@@ -83,15 +81,6 @@ def test_validate_decision_rejects_non_dict():
     r = new_record("s", "red_tests", "q")
     assert validate_decision(None, r) is not None
     assert validate_decision(["a"], r) is not None
-
-
-def test_manager_argv_uses_fable_and_print_mode():
-    argv = manager_argv("hello")
-    assert argv[0] == "claude"
-    assert "--model" in argv
-    assert argv[argv.index("--model") + 1] == MANAGER_MODEL
-    assert "-p" in argv
-    assert argv[-1] == "hello"
 
 
 def test_resume_argv_targets_the_session():
@@ -431,6 +420,33 @@ def test_a_manager_answer_is_delivered_exactly_once_ever():
         assert delivered == [("sess-1", "retry once")], f"expected exactly one delivery, got {delivered}"
     finally:
         _os.unlink(path)
+
+
+def test_ask_via_session_sends_the_built_prompt_tagged_as_an_escalation():
+    import manager_daemon
+    from escalations import new_record
+
+    sent = {}
+
+    def fake_ask(text, source):
+        sent["text"] = text
+        sent["source"] = source
+        return '{"answer": "retry", "reason": "transient", "confidence": "high"}'
+
+    rec = new_record("s1", "red_tests", "Retry or reassign?", options=["retry", "reassign"])
+    raw = manager_daemon.ask_via_session(rec, ask=fake_ask)
+    assert "Retry or reassign?" in sent["text"]
+    assert sent["source"] == "daemon:escalation"
+    assert "retry" in raw
+
+
+def test_manager_no_longer_spawns_a_throwaway_process():
+    import manager
+
+    for gone in ("manager_argv", "run_manager", "MANAGER_MODEL"):
+        assert not hasattr(manager, gone), f"{gone} should have moved or been removed"
+    assert hasattr(manager, "resume_argv"), "delivering into a worker session is still manager.py's job"
+    assert hasattr(manager, "deliver_answer")
 
 
 if __name__ == "__main__":

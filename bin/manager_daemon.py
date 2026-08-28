@@ -8,10 +8,20 @@ import sys
 import time
 import traceback
 
+import manager_session
 from escalations import QUEUE_PATH, append, classify, current_state, record_answer
-from manager import decide, deliver_answer, run_manager
+from manager import build_prompt, decide, deliver_answer
 
 DELIVERY_ATTEMPTS = 3
+
+
+def ask_via_session(record: dict, ask=manager_session.ask) -> str:
+    """Put one escalation to the persistent manager and hand back its raw reply.
+
+    Same contract as the throwaway process it replaces — a JSON decision as text — but the manager
+    now answers with the rest of its work in context.
+    """
+    return ask(build_prompt(record), "daemon:escalation")
 
 
 def _try_deliver(path: str, rec: dict, message: str, deliver) -> str:
@@ -76,7 +86,7 @@ def main() -> None:
     print(f"manager daemon watching {path}")
     while True:
         try:
-            for outcome in process_open(path, run_manager, deliver_answer):
+            for outcome in process_open(path, ask_via_session, deliver_answer):
                 print(f"  {outcome['outcome']}: {outcome['reason']}")
         except Exception as e:  # a bad pass must not kill the daemon
             print(f"  pass failed: {e}", file=sys.stderr)
