@@ -755,6 +755,9 @@ def main():
     port = int(args[0]) if args and args[0].isdigit() else 4400
     repo_args = [a for a in args if not a.isdigit()]
     REPO_DIR = os.path.abspath(repo_args[0]) if repo_args else os.getcwd()
+    # The manager's `claude` subprocess must run in the same repo this dashboard serves —
+    # that's where Claude Code resolves its permission settings from (see manager_session.REPO_ROOT).
+    manager_session.REPO_ROOT = REPO_DIR
 
     # Fail loudly at startup rather than serving 500s: a wrong repo dir is the
     # difference between "no copies running" and "you're looking at the wrong repo".

@@ -10,6 +10,9 @@ import threading
 import manager_session as ms
 
 _CHARTER_BACKUP = ms.CHARTER_PATH
+# Captured before any test can reassign ms.REPO_ROOT — the true import-time default, computed
+# with whatever PWT_REPO_ROOT was (or wasn't) set in this process's environment.
+_REPO_ROOT_AT_IMPORT = ms.REPO_ROOT
 
 
 class _Recorder:
@@ -20,9 +23,11 @@ class _Recorder:
         self.result = result
         self.raises = raises
         self.calls = []
+        self.kwargs = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
+        self.kwargs.append(kwargs)
         if self.raises:
             raise self.raises
         payload_dict = {"result": self.result}
@@ -87,6 +92,33 @@ def test_second_call_resumes_and_does_not_resend_the_charter():
     second = run.calls[1]
     assert "--resume" in second
     assert second[-1] == "second", "the charter must not be resent on a resume"
+
+
+def test_ask_passes_cwd_as_the_resolved_repo_root():
+    """Claude Code resolves permission settings from cwd — the manager's subprocess must run in
+    the target repo, not wherever the caller happened to launch the dashboard/daemon from."""
+    _isolate()
+    d = tempfile.mkdtemp()
+    ms.REPO_ROOT = d
+    run = _Recorder()
+    ms.ask("x", "cto", run=run)
+    assert run.kwargs[0]["cwd"] == d
+
+
+def test_reassigning_repo_root_changes_the_next_calls_cwd():
+    _isolate()
+    run = _Recorder(session_id="s")
+    ms.REPO_ROOT = "/repo-a"
+    ms.ask("first", "cto", run=run)
+    ms.REPO_ROOT = "/repo-b"
+    ms.ask("second", "cto", run=run)
+    assert run.kwargs[0]["cwd"] == "/repo-a"
+    assert run.kwargs[1]["cwd"] == "/repo-b"
+
+
+def test_repo_root_falls_back_to_cwd_when_the_env_var_is_unset():
+    assert "PWT_REPO_ROOT" not in _os.environ, "test env must not already override this"
+    assert _os.getcwd() == _REPO_ROOT_AT_IMPORT
 
 
 def test_both_turns_reach_the_chat_log_with_their_source():

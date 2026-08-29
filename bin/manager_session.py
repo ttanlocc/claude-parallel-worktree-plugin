@@ -28,6 +28,12 @@ CHARTER_PATH = os.path.join(
 MANAGER_MODEL = os.environ.get("PWT_MANAGER_MODEL", "claude-opus-5")
 MANAGER_EFFORT = os.environ.get("PWT_MANAGER_EFFORT", "max")
 
+# Claude Code resolves permission settings from the subprocess's cwd, so the manager's tool
+# access silently depends on where it runs, not on anything in this file. dashboard.py and
+# manager_daemon.py both set this from the repo they're serving; PWT_REPO_ROOT overrides
+# directly for anything that doesn't.
+REPO_ROOT = os.environ.get("PWT_REPO_ROOT") or os.getcwd()
+
 # ponytail: global lock, per-account locks if throughput matters. 300s = background threads never
 # starve while an HTTP request waits; a short timeout drops daemon wakes with no UI retry surface.
 LOCK_TIMEOUT = 300
@@ -182,6 +188,7 @@ def _ask_locked(text: str, source: str, run, timeout: int) -> tuple[bool, str]:
             text=True,
             check=True,
             timeout=timeout,
+            cwd=REPO_ROOT,
         )
         payload = json.loads(proc.stdout)
         if not isinstance(payload, dict):
