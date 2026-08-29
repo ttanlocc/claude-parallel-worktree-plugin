@@ -108,8 +108,6 @@
     --pad: 22px;
     --shadow: 0 1px 2px rgba(21,24,27,.05);
 
-    --term-bg: #14181A; --term-bar: #1C2124; --term-border: #2A3034;
-    --term-text: #D6D9DA; --term-call: #EEF0F0; --term-result: #868D91;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -290,73 +288,6 @@
   .msg-thinking { color: var(--faint); font-style: italic; font-size: 12.5px; }
   .msg-error .msg-text { color: var(--red); font-weight: 500; }
 
-  /* ---------- machine room ---------- */
-  #operator-section { margin-top: 18px; }
-  #operator-section summary {
-    cursor: pointer; padding: 8px 2px; font-family: var(--mono); font-size: 12px; font-weight: 500;
-    text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); list-style: none;
-  }
-  #operator-section summary:hover { color: var(--ink); }
-  #operator-section summary::-webkit-details-marker { display: none; }
-  #operator-section summary::before { content: "▸ "; color: var(--faint); }
-  #operator-section[open] summary::before { content: "▾ "; }
-  #operator-section .strip { padding: 4px 2px 14px; }
-
-  .cols { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 16px; align-items: start; }
-  @media (max-width: 1080px) { .cols { grid-template-columns: minmax(0,1fr); } }
-
-  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px var(--pad) 12px; }
-  .panel-head h2 { margin: 0; font-family: var(--mono); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
-  .panel-head p { margin: 3px 0 0; font-size: 12px; color: var(--ink-soft); }
-
-  table { width: 100%; border-collapse: collapse; }
-  thead th {
-    text-align: left; font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: .09em; text-transform: uppercase;
-    color: var(--faint); padding: 9px var(--pad); border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); background: var(--paper);
-  }
-  tbody td { padding: 12px var(--pad); border-bottom: 1px solid var(--rule-soft); font-size: 13px; vertical-align: middle; }
-  tbody tr:last-child td { border-bottom: 0; }
-  tbody tr { cursor: pointer; transition: background .12s; }
-  tbody tr:hover { background: var(--paper); }
-  tbody tr.sel { background: var(--rule-soft); }
-  tbody tr:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
-  .agent-name { font-family: var(--mono); font-size: 12.5px; font-weight: 500; }
-  .agent-sub { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 3px; }
-  .cell-sub { font-family: var(--mono); font-size: 10px; color: var(--faint); margin-top: 4px; letter-spacing: .03em; text-transform: uppercase; }
-  .cell-age { font-family: var(--mono); font-size: 11.5px; color: var(--ink-soft); }
-  .actions { display: flex; gap: 6px; justify-content: flex-end; }
-
-  .srow { display: flex; align-items: baseline; gap: 11px; padding: 10px var(--pad); border-top: 1px solid var(--rule-soft); font-size: 13px; }
-  .srow:first-child { border-top: 0; }
-  .srow .k { font-size: 11.5px; color: var(--ink-soft); }
-  .srow .v { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--ink);
-             max-width: 58%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .srow a.v { text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
-  .srow a.v:hover { text-decoration-color: var(--ink); }
-
-  /* ---------- live log: dark, because it is raw machine output and should not be mistaken for
-     the ledger. Rows differ by lightness and tag, never by hue. ---------- */
-  .term-bar {
-    display: flex; align-items: center; gap: 10px; padding: 9px var(--pad);
-    background: var(--term-bar); border-top: 1px solid var(--term-border); border-bottom: 1px solid var(--term-border);
-    font-family: var(--mono); font-size: 11.5px; color: var(--term-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  #logrows { max-height: 420px; overflow-y: auto; padding: 2px 0 6px; background: var(--term-bg); }
-  #logrows .empty { color: var(--term-result); }
-  #logrows .empty.err { color: var(--term-text); font-weight: 600; }
-  .logrow { display: flex; gap: 12px; padding: 8px var(--pad); border-bottom: 1px solid var(--term-border); align-items: flex-start; }
-  .logrow:last-child { border-bottom: 0; }
-  .logrow .body { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
-  .logrow .code { white-space: pre-wrap; word-break: break-word; }
-  .logrow .prose { white-space: pre-wrap; word-break: break-word; font-family: var(--sans); font-size: 12.5px; line-height: 1.6; }
-  .logrow .tool-tag, .logrow .role-tag {
-    align-self: flex-start; font-family: var(--mono); font-size: 9.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
-    padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,.11); color: var(--term-call);
-  }
-  .logrow.call .code   { color: var(--term-call); }
-  .logrow.result .code { color: var(--term-result); }
-  .logrow.text .prose  { color: var(--term-text); }
-
   .empty { padding: 28px var(--pad); text-align: center; color: var(--faint); font-size: 13px; }
   .empty.err { color: var(--red); font-weight: 500; }
   svg { display: block; }
@@ -396,47 +327,10 @@
       <aside id="manager-chat" class="panel manager-col-side"></aside>
     </div>
 
-    <details id="operator-section">
-      <summary>Phiên đang chạy</summary>
-
-      <div id="stats" class="strip"></div>
-
-      <div class="cols">
-        <section class="panel">
-          <div class="panel-head">
-            <div>
-              <h2>Phiên</h2>
-              <p>Mọi thứ đang chạy trong repo này. Chọn một phiên để xem nó đang làm gì.</p>
-            </div>
-            <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--ink-soft); white-space:nowrap; cursor:pointer;">
-              <input type="checkbox" id="managed-only-toggle" checked>
-              Chỉ phiên được quản lý
-            </label>
-          </div>
-          <div id="table-wrap"></div>
-        </section>
-
-        <aside style="display:flex; flex-direction:column; gap:16px;">
-          <section class="panel">
-            <div class="panel-head"><h2>Chi tiết phiên</h2></div>
-            <div id="details"><div class="empty">Chưa chọn phiên nào</div></div>
-          </section>
-        </aside>
-      </div>
-
-      <section class="panel" style="margin-top:16px;">
-        <div class="panel-head"><h2>Nhật ký trực tiếp</h2></div>
-        <div id="log-summary" class="term-bar" hidden><span id="log-summary-text"></span></div>
-        <div id="logrows"></div>
-      </section>
-
-    </details>
   </main>
 </div>
 
 <script>
-let selected = null;
-let byName = {};
 let lastData = [];
 let lastEscalations = { needs_human: [], recent_decisions: [] };
 let lastAdoTickets = [];
@@ -447,18 +341,7 @@ let pollFailures = { assignments: false, escalations: false, chat: false }; // w
                                                                 // "—" instead of a false zero; chat
                                                                 // has no counter, so pollChat renders
                                                                 // its own honest error state instead.
-let showManagedOnly = true;
 let tasksFailed = false; // true while /api/tasks is failing — session state is unknown, so
-                         // ticket rows would be guessing; renderTickets shows a banner instead.
-
-function fmtAge(ms) {
-  if (!ms) return "—";
-  const m = Math.floor((Date.now() - ms) / 60000);
-  if (m < 1) return "vừa xong";
-  if (m < 60) return m + "m";
-  const h = Math.floor(m / 60);
-  return h < 24 ? h + "h" : Math.floor(h / 24) + "d";
-}
 function checkResponse(res, data) {
   if (res.ok && !data.error) return null;
   return data.error || ("HTTP " + res.status);
@@ -476,12 +359,6 @@ function pill(tone, label) {
   p.append(document.createTextNode(label));
   return p;
 }
-
-const STATE_LABEL = {
-  busy: "đang chạy", working: "đang chạy", running: "đang chạy",
-  idle: "rảnh", done: "xong", blocked: "bị chặn", stopped: "đã dừng",
-};
-const STATE_TONE = { busy: "on-line", working: "on-line", running: "on-line", blocked: "on-ink" };
 
 // One row per ticket in the manager's ADO backlog, not per session — a ticket with no
 // dispatched session yet still shows up as "Not started" so it's a click away from being one.
@@ -652,120 +529,6 @@ function openDispatchForm(rowEl, ticket) {
 
 function stateOf(t) { return (t.agent_state || t.agent_status || "").toLowerCase(); }
 
-function renderStats(data) {
-  const st = data.map(stateOf);
-  const active = st.filter(s => s === "busy" || s === "working").length;
-  const resting = st.filter(s => s === "idle" || s === "done").length;
-  const stuck = st.filter(s => s === "blocked").length;
-  document.getElementById("stats").replaceChildren(
-    stripItem("đang chạy", active, null),
-    stripItem("rảnh hoặc xong", resting, null),
-    stripItem("bị chặn", stuck, null)
-  );
-  const summary = document.querySelector("#operator-section summary");
-  if (summary) summary.textContent = `Phiên đang chạy · ${data.length}`;
-}
-
-function renderTable(data) {
-  const wrap = document.getElementById("table-wrap");
-  if (!data.length) {
-    const msg = showManagedOnly && lastData.length
-      ? `Không có bản sao nào được quản lý — bỏ chọn "Chỉ phiên được quản lý" để xem cả ${lastData.length}.`
-      : "Chưa có gì chạy trong repo này.";
-    wrap.replaceChildren(el("div", "empty", msg));
-    return;
-  }
-
-  const table = el("table");
-  const thead = el("thead"), htr = el("tr");
-  ["Phiên", "Loại", "Trạng thái", "Đã chạy", ""].forEach((h, i) => {
-    const th = el("th", null, h);
-    if (i === 4) th.style.textAlign = "right";
-    htr.append(th);
-  });
-  thead.append(htr);
-
-  const tbody = el("tbody");
-  for (const t of data) {
-    const st = stateOf(t);
-    const tr = el("tr", t.task === selected ? "sel" : null);
-    tr.tabIndex = 0;
-
-    const c1 = el("td");
-    c1.append(el("div", "agent-name", t.task || "—"));
-    c1.append(el("div", "agent-sub", t.branch || t.path || ""));
-
-    const c2 = el("td");
-    if (t.mode) c2.append(pill("", t.mode));
-    else if (t.kind) c2.append(pill("", t.kind));
-
-    // One row, one status. The stack's own state is a subordinate line, not a second pill
-    // arguing with the first.
-    const c3 = el("td");
-    c3.append(pill(STATE_TONE[st] || "", STATE_LABEL[st] || "không rõ"));
-    if (t.dev_status) c3.append(el("div", "cell-sub", "stack " + t.dev_status));
-
-    const c4 = el("td", "cell-age", fmtAge(t.started_at));
-
-    const c5 = el("td");
-    const acts = el("div", "actions");
-    const logs = el("button", "btn quiet", "Nhật ký");
-    logs.onclick = (e) => { e.stopPropagation(); pick(t.task); };
-    acts.append(logs);
-    if (t.ports && t.ports.frontend) {
-      const open = el("a", "btn quiet", "Mở");
-      open.href = "http://localhost:" + t.ports.frontend;
-      open.target = "_blank"; open.rel = "noopener";
-      open.onclick = (e) => e.stopPropagation();
-      acts.append(open);
-    }
-    c5.append(acts);
-
-    tr.append(c1, c2, c3, c4, c5);
-    tr.onclick = () => pick(t.task);
-    tr.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(t.task); } };
-    tbody.append(tr);
-  }
-  table.append(thead, tbody);
-  wrap.replaceChildren(table);
-}
-
-function renderDetails() {
-  const box = document.getElementById("details");
-  const t = byName[selected];
-  if (!t) { box.replaceChildren(el("div", "empty", "Chưa chọn phiên nào")); return; }
-
-  const rows = [];
-  const add = (k, v, href) => {
-    if (!v) return;
-    const r = el("div", "srow");
-    r.append(el("span", "k", k));
-    if (href) { const a = el("a", "v", v); a.href = href; a.target = "_blank"; a.rel = "noopener"; r.append(a); }
-    else r.append(el("span", "v", v));
-    rows.push(r);
-  };
-  add("Trạng thái", STATE_LABEL[stateOf(t)] || "không rõ");
-  add("Loại", t.kind);
-  add("Nhánh", t.branch);
-  if (t.pr_url) add("PR", "#" + t.pr_number + (t.pr_state ? " (" + t.pr_state.toLowerCase() + ")" : ""), t.pr_url);
-  (t.ado_refs || []).forEach(r => add("Ticket ADO", "AB#" + r.id, r.url));
-  if (t.ports && t.ports.frontend) add("Frontend", "localhost:" + t.ports.frontend, "http://localhost:" + t.ports.frontend);
-  if (t.ports && t.ports.gateway) add("Gateway", "localhost:" + t.ports.gateway, "http://localhost:" + t.ports.gateway);
-  add("Gắn vào", t.short_id ? "claude attach " + t.short_id : null);
-  add("Bắt đầu", fmtAge(t.started_at) + " trước");
-  add("Đường dẫn", t.path);
-  box.replaceChildren(...rows);
-}
-
-function pick(name) {
-  selected = name;
-  renderDetails();
-  document.querySelectorAll("tbody tr").forEach(tr => {
-    tr.classList.toggle("sel", tr.querySelector(".agent-name").textContent === name);
-  });
-  pollLog();
-}
-
 async function pollTasks() {
   let data, err;
   try {
@@ -775,83 +538,13 @@ async function pollTasks() {
   } catch (e) { err = e.message || "request failed"; }
 
   if (err) {
-    document.getElementById("table-wrap").replaceChildren(el("div", "empty err", "Không kết nối được máy chủ — " + err));
     tasksFailed = true;
     renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
     return;
   }
   tasksFailed = false;
   lastData = data;
-  byName = {};
-  data.forEach(t => { byName[t.task] = t; });
-  renderAll();
-}
-
-function renderAll() {
-  const data = showManagedOnly ? lastData.filter(t => t.managed) : lastData;
-  renderStats(data);
-  renderTable(data);
-  if (selected) renderDetails();
-}
-
-function logRow(rec) {
-  const row = el("div", "logrow " + rec.kind);
-  row.append(el("span", "dot"));
-  const body = el("div", "body");
-  if (rec.kind === "call") {
-    body.append(el("span", "tool-tag", rec.tool || "tool"));
-    body.append(el("span", "code", rec.text));
-  } else if (rec.kind === "result") {
-    body.append(el("span", "code", rec.text));
-  } else {
-    body.append(el("span", "role-tag", rec.role === "user" ? "ban" : "agent"));
-    body.append(el("span", "prose", rec.text));
-  }
-  row.append(body);
-  return row;
-}
-
-async function pollLog() {
-  const box = document.getElementById("logrows");
-  const summaryEl = document.getElementById("log-summary");
-  const summaryText = document.getElementById("log-summary-text");
-  if (!selected) {
-    box.replaceChildren(el("div", "empty", "Chọn một phiên ở trên."));
-    summaryEl.hidden = true;
-    return;
-  }
-
-  let data, err;
-  try {
-    const res = await fetch("/api/tasks/" + encodeURIComponent(selected) + "/log");
-    data = await res.json();
-    err = checkResponse(res, data);
-  } catch (e) { err = e.message || "request failed"; }
-
-  if (err) {
-    box.replaceChildren(el("div", "empty err", "Không đọc được nhật ký — " + err));
-    summaryEl.hidden = true;
-    return;
-  }
-  if (data.status === "not-available") {
-    box.replaceChildren(el("div", "empty", "Chưa có phiên nào được giao vào bản sao này."));
-    summaryEl.hidden = true;
-    return;
-  }
-
-  // "what's it doing right now": the agent's own latest words, not tool plumbing.
-  const lastSaid = [...data.lines].reverse().find(r => r.kind === "text" && r.role === "assistant");
-  if (lastSaid) {
-    const said = lastSaid.text.length > 150 ? lastSaid.text.slice(0, 150) + "…" : lastSaid.text;
-    summaryText.textContent = selected + " — " + said;
-  } else {
-    summaryText.textContent = selected;
-  }
-  summaryEl.hidden = false;
-
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
-  box.replaceChildren(...data.lines.map(logRow));
-  if (atBottom) box.scrollTop = box.scrollHeight;
+  renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
 }
 
 // tone ("on-red" | "on-blue" | null) picks which pencil a non-zero value is written in. A value
@@ -1180,15 +873,8 @@ setInterval(pollAssignments, 2000);
 pollChat();
 setInterval(pollChat, 2000);
 
-document.getElementById("managed-only-toggle").addEventListener("change", (e) => {
-  showManagedOnly = e.target.checked;
-  renderAll();
-});
-
 pollTasks();
-pollLog();
 setInterval(pollTasks, 2000);
-setInterval(pollLog, 2000);
 
 pollAdoTickets();
 setInterval(pollAdoTickets, 5000);
