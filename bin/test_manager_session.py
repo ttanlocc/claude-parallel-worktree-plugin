@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """assert-based checks for the persistent manager session. Run: python3 bin/test_manager_session.py"""
 
+import contextlib
+import io
 import json
 import os as _os
 import subprocess
@@ -209,6 +211,20 @@ def test_a_broken_chat_log_does_not_cost_the_caller_its_reply():
     ms.CHAT_PATH = _os.path.join(blocker, "chat.jsonl")
     reply = ms.ask("x", "cto", run=_Recorder())
     assert reply == "ok", "a broken chat log must not cost the caller its reply"
+
+
+def test_log_quietly_swallows_and_names_the_failure_on_stderr():
+    """_log_quietly must still swallow the OSError (the end-to-end swallow is already proven by
+    the test above) but must not do so in total silence — an operator watching an empty chat
+    panel otherwise has no way to tell an idle manager from a broken log."""
+    d = _isolate()
+    blocker = _os.path.join(d, "blocker2")
+    open(blocker, "w").close()
+    ms.CHAT_PATH = _os.path.join(blocker, "chat.jsonl")
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        ms._log_quietly("manager", "cto", "hello")  # must not raise
+    assert buf.getvalue().strip() != "", "a broken chat log must still be named on stderr"
 
 
 def test_a_failed_state_write_does_not_discard_the_reply():

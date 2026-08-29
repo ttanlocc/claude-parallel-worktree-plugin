@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import subprocess
+import sys
 import time
 
 HERMES_DIR = os.path.expanduser("~/.claude/hermes")
@@ -146,11 +147,16 @@ def ask_argv(session_id, text: str) -> list[str]:
 
 
 def _log_quietly(role: str, source: str, text: str) -> None:
-    """Append a chat entry, never raising — a failure to log must not mask the failure it records."""
+    """Append a chat entry, never raising — a failure to log must not mask the failure it records.
+
+    Still swallowed on purpose, but named on stderr: a silently broken CHAT_PATH (disk full,
+    permissions, a path collision) would otherwise stop every turn from being recorded with no
+    signal anywhere, leaving an idle manager indistinguishable from a broken log.
+    """
     try:
         append_chat(role, source, text)
-    except OSError:
-        pass
+    except OSError as e:
+        print(f"_log_quietly: could not append to chat log: {e}", file=sys.stderr)
 
 
 def _failure_note(e: Exception) -> str:

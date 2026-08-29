@@ -182,8 +182,8 @@ def wake_pass(
         return last_tick
     try:
         ok, text = ask(
-            "Tick. Walk the open assignments: chase anything past its ETA, update each note, "
-            "and write a report if you have not written one in 24 hours.",
+            "Tick. Walk the open assignments: chase anything past its ETA or still unplanned, "
+            "update each note, and write a report if you have not written one in 24 hours.",
             "daemon:tick",
         )
     except Exception as e:

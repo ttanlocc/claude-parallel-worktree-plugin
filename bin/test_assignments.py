@@ -7,10 +7,12 @@ from datetime import UTC, datetime
 
 from assignments import (
     OPEN_STATUSES,
+    STALLED_AFTER_SECONDS,
     at_risk,
     new_assignment,
     open_assignments,
     progress,
+    stalled,
 )
 from assignments import append as ledger_append
 from escalations import append, current_state
@@ -121,6 +123,49 @@ def test_progress_ignores_a_malformed_plan_shape():
         a = new_assignment("malformed")
         a["plan"] = bad_plan
         assert progress(a) is None, bad_plan
+
+
+def test_stalled_when_open_unplanned_and_old():
+    a = new_assignment("dropped")
+    a["ts"] = NOW - STALLED_AFTER_SECONDS - 1
+    assert stalled(a, NOW) is True
+
+
+def test_stalled_false_when_recent():
+    a = new_assignment("just created")
+    a["ts"] = NOW - 60
+    assert stalled(a, NOW) is False
+
+
+def test_stalled_false_once_a_plan_exists():
+    a = new_assignment("planned")
+    a["ts"] = NOW - STALLED_AFTER_SECONDS - 1
+    a["plan"] = [{"step": "s", "owner": "w", "depends_on": [], "eta": None, "state": "todo"}]
+    assert stalled(a, NOW) is False
+
+
+def test_stalled_false_when_closed():
+    for status in ("done", "cancelled"):
+        a = new_assignment("closed")
+        a["ts"] = NOW - STALLED_AFTER_SECONDS - 1
+        a["status"] = status
+        assert stalled(a, NOW) is False, status
+
+
+def test_stalled_ignores_a_malformed_plan_shape():
+    """Same tolerance as at_risk/progress: a plan that isn't a list, or has no dict steps, is
+    still "no plan yet" for staleness purposes rather than raising."""
+    for bad_plan in ("not a list", {"s1": "done"}, ["step one", "step two"]):
+        a = new_assignment("malformed")
+        a["ts"] = NOW - STALLED_AFTER_SECONDS - 1
+        a["plan"] = bad_plan
+        assert stalled(a, NOW) is True, bad_plan
+
+
+def test_stalled_false_without_a_usable_timestamp():
+    a = new_assignment("no ts")
+    a["ts"] = "not-a-number"
+    assert stalled(a, NOW) is False
 
 
 def test_ledger_folds_to_the_latest_state():

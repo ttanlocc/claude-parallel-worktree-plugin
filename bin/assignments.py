@@ -21,6 +21,13 @@ PRIORITIES = ("P0", "P1", "P2")
 STATUSES = ("assigned", "in_progress", "blocked", "done", "cancelled")
 OPEN_STATUSES = ("assigned", "in_progress", "blocked")
 
+# How long an assignment can sit with no plan before it counts as stalled rather than merely
+# new. Long enough that the manager mid-turn on something else, or normal call latency, is not
+# flagged; short enough that a record the manager was never actually told about (this is how
+# Finding 1 was found live: the ledger write succeeded but the notify call failed) surfaces the
+# same day instead of sitting invisible indefinitely.
+STALLED_AFTER_SECONDS = 60 * 60  # 1 hour
+
 
 def new_assignment(title: str, priority: str = "P1", deadline=None, ado_refs=None) -> dict:
     """A fresh assignment. `plan` stays empty until the manager has decomposed it."""
@@ -100,6 +107,26 @@ def progress(rec: dict):
     if not steps:
         return None
     return sum(1 for s in steps if s.get("state") == "done") / len(steps)
+
+
+def stalled(rec: dict, now: float) -> bool:
+    """Open, has no plan steps, and has sat that way longer than STALLED_AFTER_SECONDS.
+
+    A distinct condition from at_risk, not a variant of it: at_risk fires on a deadline or a
+    step ETA that has passed, which presupposes the work was planned and is now late. stalled
+    fires on the absence of a plan altogether — nobody has broken the assignment into steps, so
+    there is no date for it to be late against. One is being worked and is late; the other was
+    never started. Reuses progress()'s notion of "no plan yet" rather than re-deriving it, so a
+    malformed `plan` (not a list, or a list with no dict steps) degrades the same way in both.
+    """
+    if rec.get("status") in ("done", "cancelled"):
+        return False
+    if progress(rec) is not None:
+        return False
+    ts = rec.get("ts")
+    if not isinstance(ts, (int, float)):
+        return False
+    return (now - ts) > STALLED_AFTER_SECONDS
 
 
 def open_assignments(path: str = LEDGER_PATH) -> list[dict]:

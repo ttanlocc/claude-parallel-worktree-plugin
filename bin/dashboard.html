@@ -684,6 +684,7 @@ function assignCard(a, byTicket) {
   top.append(el("span", "assign-title", a.title));
   top.append(pill(a.status === "blocked" ? "on-ink" : "", ASSIGN_STATUS_LABEL[a.status] || a.status));
   if (a.at_risk) top.append(pill("on-blue", "trễ hạn"));
+  if (a.stalled) top.append(pill("on-blue", "đứng im"));
   card.append(top);
 
   const refs = assignRefs(a, byTicket);

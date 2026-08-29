@@ -147,12 +147,19 @@ def get_escalations() -> dict:
 
 
 def get_assignments(path: str = None, now: float = None) -> list[dict]:
-    """Every assignment, each decorated with the two derived values the UI needs."""
+    """Every assignment, each decorated with the three derived values the UI needs."""
     path = path or ledger.LEDGER_PATH
     now = now if now is not None else time.time()
     rows = []
     for rec in current_state(path):
-        rows.append({**rec, "at_risk": ledger.at_risk(rec, now), "progress": ledger.progress(rec)})
+        rows.append(
+            {
+                **rec,
+                "at_risk": ledger.at_risk(rec, now),
+                "stalled": ledger.stalled(rec, now),
+                "progress": ledger.progress(rec),
+            }
+        )
     return rows
 
 

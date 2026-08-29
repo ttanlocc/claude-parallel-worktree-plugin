@@ -640,6 +640,28 @@ def test_get_assignments_decorates_with_at_risk_and_progress():
         rows = dashboard.get_assignments(path=path)
         assert rows[0]["at_risk"] is True
         assert rows[0]["progress"] == 0.5
+        assert rows[0]["stalled"] is False  # it already has a plan
+    finally:
+        _os.unlink(path)
+
+
+def test_get_assignments_decorates_with_stalled():
+    import os as _os
+    import tempfile
+    import time
+
+    import dashboard
+    from assignments import STALLED_AFTER_SECONDS, new_assignment
+    from escalations import append
+
+    fd, path = tempfile.mkstemp()
+    _os.close(fd)
+    try:
+        a = new_assignment("dropped one")
+        a["ts"] = time.time() - STALLED_AFTER_SECONDS - 1
+        append(path, a)
+        rows = dashboard.get_assignments(path=path)
+        assert rows[0]["stalled"] is True
     finally:
         _os.unlink(path)
 
