@@ -197,6 +197,13 @@
   .zone-head + .assign { border-top: 0; }
   .assign-top { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
   .assign-title { font-size: 14.5px; font-weight: 600; flex: 1; min-width: 140px; line-height: 1.35; }
+  .assign-refs { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 20px; margin-top: 7px;
+                 font-family: var(--mono); font-size: 11px; letter-spacing: .02em; }
+  .assign-refs .ref-pair { display: flex; align-items: baseline; gap: 7px; }
+  .assign-refs a { color: var(--ink-soft); text-decoration: underline;
+                   text-decoration-color: var(--rule); text-underline-offset: 3px; }
+  .assign-refs a:hover { color: var(--ink); text-decoration-color: var(--ink); }
+  .assign-refs .ref-none { color: var(--faint); }
   .assign-progress { display: flex; align-items: center; gap: 10px; margin-top: 11px; }
   .bar { width: 150px; height: 3px; background: var(--rule); overflow: hidden; border-radius: 2px; flex-shrink: 0; }
   .bar-fill { height: 100%; background: var(--ink); }
@@ -405,6 +412,7 @@ function computeTickets(adoTickets, tasks, esc) {
       title: ticket.title,
       prLabel: withPr && withPr.pr_number ? "PR #" + withPr.pr_number : null,
       prHref: withPr ? withPr.pr_url : null,
+      prState: withPr ? withPr.pr_state : null,
       status, action, actionHref,
     });
   }
@@ -545,6 +553,7 @@ async function pollTasks() {
   tasksFailed = false;
   lastData = data;
   renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
+  renderAssignments(lastAssignments);
 }
 
 // tone ("on-red" | "on-blue" | null) picks which pencil a non-zero value is written in. A value
@@ -643,7 +652,32 @@ const ASSIGN_STATUS_LABEL = {
   done: "xong", cancelled: "đã huỷ",
 };
 
-function assignCard(a) {
+const PR_STATE_LABEL = { OPEN: "đang mở", MERGED: "đã gộp", CLOSED: "đã đóng" };
+
+function assignRefs(a, byTicket) {
+  const refs = a.ado_refs || [];
+  if (!refs.length) return null;
+  const line = el("div", "assign-refs");
+  refs.forEach(ref => {
+    const row = byTicket[String(ref.id)];
+    const pair = el("span", "ref-pair");
+    const id = el("a", null, "AB#" + ref.id);
+    id.href = (row && row.href) || ref.url || "#"; id.target = "_blank"; id.rel = "noopener";
+    pair.append(id);
+    if (row && row.prLabel) {
+      const state = PR_STATE_LABEL[row.prState] || (row.prState || "").toLowerCase();
+      const pr = el("a", null, row.prLabel + (state ? ` (${state})` : ""));
+      pr.href = row.prHref; pr.target = "_blank"; pr.rel = "noopener";
+      pair.append(pr);
+    } else {
+      pair.append(el("span", "ref-none", "chưa có PR"));
+    }
+    line.append(pair);
+  });
+  return line;
+}
+
+function assignCard(a, byTicket) {
   const card = el("div", "assign");
   const top = el("div", "assign-top");
   top.append(pill(PRIORITY_TONE[a.priority] || "", a.priority || "—"));
@@ -651,6 +685,9 @@ function assignCard(a) {
   top.append(pill(a.status === "blocked" ? "on-ink" : "", ASSIGN_STATUS_LABEL[a.status] || a.status));
   if (a.at_risk) top.append(pill("on-blue", "trễ hạn"));
   card.append(top);
+
+  const refs = assignRefs(a, byTicket);
+  if (refs) card.append(refs);
 
   // progress is null when there's no plan yet — draw no bar rather than a zero-width one,
   // which would read as "started and got nowhere".
@@ -685,7 +722,9 @@ function renderAssignments(rows) {
     panel.replaceChildren(head, el("p", null, "Chưa có việc nào được giao — nhắn cho Manager để giao một kết quả."));
     return;
   }
-  panel.replaceChildren(head, ...open.map(assignCard));
+  const byTicket = {};
+  computeTickets(lastAdoTickets, lastData, lastEscalations).forEach(r => { byTicket[String(r.id)] = r; });
+  panel.replaceChildren(head, ...open.map(a => assignCard(a, byTicket)));
 }
 
 async function pollEscalations() {
@@ -740,6 +779,7 @@ async function pollAdoTickets() {
     if (checkResponse(res, data)) return;
     lastAdoTickets = data;
     renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
+    renderAssignments(lastAssignments);
   } catch (e) { /* leave the last-known backlog in place on a transient failure */ }
 }
 
