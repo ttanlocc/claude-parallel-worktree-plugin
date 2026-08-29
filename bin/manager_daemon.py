@@ -266,12 +266,15 @@ def process_open(path: str, ask_model, deliver) -> list[dict]:
 
 def main() -> None:
     path = sys.argv[1] if len(sys.argv) > 1 else QUEUE_PATH
-    print(f"manager daemon watching {path}")
+    # flush=True: stdout is block-buffered once it is not a tty (the normal case for a
+    # backgrounded daemon), so without it these lines can sit in the buffer indefinitely and an
+    # operator tailing the log sees nothing even though the daemon is alive and working.
+    print(f"manager daemon watching {path}", flush=True)
     last_tick = time.time()
     while True:
         try:
             for outcome in process_open(path, ask_via_session, deliver_answer):
-                print(f"  {outcome['outcome']}: {outcome['reason']}")
+                print(f"  {outcome['outcome']}: {outcome['reason']}", flush=True)
         except Exception as e:  # a bad pass must not kill the daemon
             print(f"  pass failed: {e}", file=sys.stderr)
             traceback.print_exc()

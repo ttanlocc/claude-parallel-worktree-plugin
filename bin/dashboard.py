@@ -110,7 +110,7 @@ from urllib.parse import urlparse
 
 import assignments as ledger
 import manager_session
-from escalations import QUEUE_PATH, append, classify, current_state, record_answer
+from escalations import QUEUE_PATH, classify, current_state, record_answer
 
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
@@ -536,7 +536,7 @@ def _assignments_post(body, append_fn=None, start=None):
     the manager is reported but does not fail the request, because the daemon's tick walks open
     assignments and will rediscover it.
     """
-    append_fn = append_fn or (lambda rec: append(ledger.LEDGER_PATH, rec))
+    append_fn = append_fn or ledger.append
     start = start or start_manager_turn
     try:
         refs = _parse_ado_refs(body.get("ado_refs"))

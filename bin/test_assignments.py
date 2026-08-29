@@ -12,6 +12,7 @@ from assignments import (
     open_assignments,
     progress,
 )
+from assignments import append as ledger_append
 from escalations import append, current_state
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC).timestamp()
@@ -151,6 +152,28 @@ def test_open_assignments_excludes_closed():
         assert all(s in OPEN_STATUSES for s in ("assigned", "in_progress", "blocked"))
     finally:
         _os.unlink(path)
+
+
+def test_ledger_append_round_trips_through_current_state():
+    fd, path = tempfile.mkstemp()
+    _os.close(fd)
+    try:
+        a = new_assignment("shipped via assignments.append")
+        ledger_append(a, path=path)
+        state = current_state(path)
+        assert len(state) == 1
+        assert state[0]["title"] == "shipped via assignments.append"
+    finally:
+        _os.unlink(path)
+
+
+def test_ledger_append_is_the_same_code_path_as_escalations_append():
+    """Proves delegation rather than a second locking implementation. Does not re-exercise the
+    flock itself — that coverage already lives in test_escalations.py."""
+    import assignments
+    import escalations
+
+    assert assignments._queue_append is escalations.append
 
 
 if __name__ == "__main__":

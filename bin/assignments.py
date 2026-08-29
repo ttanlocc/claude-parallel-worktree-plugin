@@ -12,6 +12,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 
+from escalations import append as _queue_append
 from escalations import current_state
 
 LEDGER_PATH = os.path.expanduser("~/.claude/hermes/assignments.jsonl")
@@ -38,6 +39,14 @@ def new_assignment(title: str, priority: str = "P1", deadline=None, ado_refs=Non
         "plan": [],
         "note": "",
     }
+
+
+def append(record: dict, path: str = LEDGER_PATH) -> None:
+    """Append one record to the ledger. Delegates to escalations.append so there is exactly one
+    locked writer for both queues — appending by shell redirection instead would skip that lock
+    and risk a torn line, which every reader then silently drops.
+    """
+    _queue_append(path, record)
 
 
 def _date_passed(value, now: float) -> bool:

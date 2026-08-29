@@ -52,6 +52,23 @@ latest record per `id` wins. Fields: `id`, `ts`, `title`, `priority` (`P0`/`P1`/
 A plan step is `{"step", "owner", "depends_on", "eta", "state"}` where `state` is `todo`, `doing`,
 or `done`. `at_risk` and `progress` are computed from these — never store them.
 
+Append with `assignments.append`, never with shell redirection — the dashboard and the daemon both
+take a lock while they write this same file, and `echo '{...}' >> assignments.jsonl` does not take
+it. An unlocked write that lands mid-append produces a torn line, and a torn line is dropped
+silently by every reader, including your own next read of this ledger.
+
+    python3 - <<'PY'
+    import sys; sys.path.insert(0, "<plugin bin dir>")
+    from assignments import append, current_state, LEDGER_PATH
+
+    latest = {r["id"]: r for r in current_state(LEDGER_PATH)}
+    rec = {**latest["<assignment id>"], "status": "in_progress", "note": "dispatched step 1"}
+    append(rec)
+    PY
+
+To assign brand-new work rather than update existing work, build the record with
+`new_assignment(title, priority, deadline, ado_refs)` from the same module before appending it.
+
 ## Dispatching work
 
 Provision a copy, then dispatch into it:
