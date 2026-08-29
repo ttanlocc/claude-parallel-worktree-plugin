@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent Control Center</title>
+<title>Engineering Manager</title>
 <style>
   /* Self-hosted, subsetted to Latin + Vietnamese only (no cyrillic/greek/latin-ext) —
      zero network requests. JetBrains Mono ships as a variable font (wght 400-800), so one
@@ -73,345 +73,321 @@
     unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
   }
 
+  /* ============================================================================
+     Sổ trực — the manager keeps a running ledger; the CTO countersigns a few lines.
+     Two rules hold the page together:
+
+       1. MONO IS THE INSTRUMENT VOICE. Labels, pills, counts, identifiers and table headers
+          are set in JetBrains Mono; prose a person reads — questions, titles, chat, notes —
+          is Be Vietnam Pro. Both faces are self-hosted with the Vietnamese subset, so a
+          diacritic renders correctly in either; the split is editorial, not a workaround.
+       2. TWO PENCILS, ONE MEANING EACH. --red is the CTO's: it appears only where a human
+          decision is required. --blue is the manager's: it appears only where the manager has
+          flagged something it is already chasing. Late is blue, not amber, because a late
+          assignment is the manager's job to chase, not the CTO's to decide. Nothing else on
+          the page carries a hue.
+
+     Sans tops out at 700 — that is every weight the self-hosted subset ships.
+     ============================================================================ */
   :root {
-    /* Greyscale instrument palette. Old names kept where they map cleanly onto the new
-       spec (--bg=ground, --card=surface, --line=rule, --muted=ink-soft) so declarations
-       change, not call sites. --signal and --warn are new: the only two hues on the page,
-       each reserved for exactly one meaning, never used as a background tint. */
-    --bg: #EFEFEC;
-    --card: #FFFFFF;
-    --line: #DFDFDA;
-    --navy: #16191C;
-    --ink: #16191C;
-    --muted: #6B7075;
-    --faint: #8B9095;
+    --paper:     #E7E9EA;   /* drafting stock */
+    --leaf:      #F8F9F9;   /* the ledger leaf */
+    --rule:      #D3D7D8;
+    --rule-soft: #E4E7E8;
+    --ink:       #15181B;
+    --ink-soft:  #5C6469;
+    --faint:     #8B9296;
 
-    --signal: #C8102E;  /* needs the operator's decision — reserved, nowhere else */
-    --warn:   #B26B00;  /* late / at risk — reserved, nowhere else */
+    --red:  #A6322A;   /* the CTO must act — nowhere else */
+    --blue: #2C5578;   /* the manager flagged it — nowhere else */
 
-    /* Status-family triads collapse to neutral greys by default; the handful of pills that
-       need more weight (filled/outline/signal/warn) override directly at their own selector
-       rather than through these shared names. */
-    --ok-bg: var(--line);    --ok-fg: var(--faint);   --ok-dot: var(--faint);
-    --run-bg: var(--line);   --run-fg: var(--ink);    --run-dot: var(--ink);
-    --warn-bg: var(--line);  --warn-fg: var(--muted); --warn-dot: var(--muted);
-    --stop-bg: var(--line);  --stop-fg: var(--muted); --stop-dot: var(--muted);
-    --idle-bg: var(--line);  --idle-fg: var(--muted); --idle-dot: var(--faint);
-
-    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     --sans: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif;
-    --shadow: 0 1px 3px rgba(22,25,28,.05), 0 1px 2px rgba(22,25,28,.04);
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
-    --term-bg: #16191C;   --term-bar: #1E2226;   --term-border: #2B3034;
-    --term-text: #D9DADB; --term-call: #EDEDEC;  --term-result: #8D9296; --term-accent: #D9DADB;
+    --gutter: 12px;
+    --pad: 22px;
+    --shadow: 0 1px 2px rgba(21,24,27,.05);
+
+    --term-bg: #14181A; --term-bar: #1C2124; --term-border: #2A3034;
+    --term-text: #D6D9DA; --term-call: #EEF0F0; --term-result: #868D91;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
-  body { background: var(--bg); color: var(--ink); font-family: var(--sans); display: flex; }
+  body { background: var(--paper); color: var(--ink); font-family: var(--sans); font-size: 14px; display: flex; }
   :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
-  /* ---------- icon rail ---------- */
-  #rail {
-    width: 72px; flex-shrink: 0; background: var(--card); border-right: 1px solid var(--line);
-    display: flex; flex-direction: column; align-items: center; padding: 16px 0; gap: 6px;
-  }
-  .logo {
-    width: 42px; height: 42px; border-radius: 11px; background: var(--navy); color: #fff;
-    display: grid; place-items: center; font-family: var(--mono); font-weight: 700; font-size: 19px; margin-bottom: 14px;
-  }
-  .rail-btn {
-    width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
-    color: var(--faint); background: transparent; border: 0; cursor: default;
-  }
-  .rail-btn.on { background: var(--line); color: var(--ink); }
-  .rail-spacer { flex: 1; }
-
-  /* ---------- main ---------- */
+  /* ---------- topbar + status strip ---------- */
   #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   #topbar {
-    display: flex; align-items: center; gap: 14px; padding: 16px 30px;
-    border-bottom: 1px solid var(--line); background: var(--card);
+    display: flex; align-items: center; gap: 22px; padding: 13px 26px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--rule); background: var(--leaf);
   }
-  .brand h1 { margin: 0; font-family: var(--mono); font-size: 17px; font-weight: 700; color: var(--navy); letter-spacing: .01em; }
-  .brand p  { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px; background: var(--ink); color: var(--leaf); flex-shrink: 0;
+    display: grid; place-items: center; font-family: var(--mono); font-weight: 700; font-size: 15px;
+  }
+  .brand h1 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+  .brand p  { margin: 1px 0 0; font-size: 12px; color: var(--ink-soft); }
   .topbar-spacer { flex: 1; }
-  .chip {
-    display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px;
-    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
-    font-family: var(--mono); font-size: 12.5px; font-weight: 600; letter-spacing: .03em;
-    color: var(--ink); white-space: nowrap;
-  }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok-dot); flex-shrink: 0; }
   .avatar {
-    width: 40px; height: 40px; border-radius: 50%; background: var(--line); color: var(--ink);
-    display: grid; place-items: center; font-family: var(--mono); font-size: 13px; font-weight: 650;
+    width: 32px; height: 32px; border-radius: 50%; background: var(--rule-soft); color: var(--ink-soft);
+    display: grid; place-items: center; font-family: var(--mono); font-size: 11px; font-weight: 700; flex-shrink: 0;
   }
 
-  #content { flex: 1; overflow-y: auto; padding: 26px 30px 34px; }
-  .page-title { margin: 0 0 20px; font-family: var(--mono); font-size: 25px; font-weight: 700; color: var(--navy); letter-spacing: .01em; }
+  /* The four numbers that used to be four cards of zeros. One line, always in view because the
+     topbar doesn't scroll. Zero and unknown recede; only "chờ bạn" is allowed to shout. */
+  .strip { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  .strip-item { display: flex; align-items: baseline; gap: 6px; font-family: var(--mono);
+                font-size: 11.5px; font-weight: 500; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-soft); }
+  .strip-item + .strip-item::before { content: "·"; color: var(--faint); margin-right: 10px; }
+  .strip-n { font-size: 14px; font-weight: 700; color: var(--ink); text-transform: none; letter-spacing: 0; }
+  .strip-item.zero, .strip-item.unknown { color: var(--faint); }
+  .strip-item.zero .strip-n, .strip-item.unknown .strip-n { font-weight: 400; color: var(--faint); }
+  .strip-item.on-red .strip-n  { color: var(--red);  font-size: 17px; }
+  .strip-item.on-red           { color: var(--red);  font-weight: 700; }
+  .strip-item.on-blue .strip-n { color: var(--blue); }
+  .strip-item.on-blue          { color: var(--blue); }
 
-  /* ---------- stat cards ---------- */
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
-  .stat {
-    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
-    padding: 20px; display: flex; align-items: center; gap: 15px; box-shadow: var(--shadow);
+  /* Below this the four numbers already fill the bar; the spacer would only push the avatar
+     onto a line of its own. */
+  @media (max-width: 900px) { .topbar-spacer { display: none; } }
+
+  #content { flex: 1; overflow-y: auto; padding: 20px 26px 32px; }
+
+  /* ---------- the ledger ---------- */
+  .manager-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(330px, 400px); gap: 18px; align-items: start; }
+  .manager-col-side { position: sticky; top: 0; max-height: calc(100dvh - 92px); display: flex; flex-direction: column; }
+  @media (max-width: 1080px) { .manager-grid { grid-template-columns: minmax(0, 1fr); } .manager-col-side { position: static; max-height: 70dvh; } }
+
+  .panel { background: var(--leaf); border: 1px solid var(--rule); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
+
+  /* The signature: a margin gutter down the left edge of every ledger zone. It is a flat
+     hairline rule by default; when a decision is waiting, that zone's gutter fills red and picks
+     up pencil hatching — texture as well as hue, so it survives greyscale and colour-blindness.
+     This is the page's only animation. */
+  .zone { position: relative; padding-left: var(--gutter); }
+  .zone + .zone { border-top: 1px solid var(--rule); }
+  .zone::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: var(--gutter);
+    background-color: var(--rule-soft); border-right: 1px solid var(--rule);
+    transition: background-color .4s ease, border-color .4s ease;
   }
-  .stat-icon { width: 46px; height: 46px; border-radius: 12px; display: grid; place-items: center; flex-shrink: 0; }
-  .stat-num { font-family: var(--mono); font-size: 24px; font-weight: 700; color: var(--navy); line-height: 1.1; letter-spacing: 0; }
-  .stat-lbl { font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-top: 4px; }
-
-  /* ---------- CTO counters — the signature of the page: quiet at zero, the only saturated
-     thing on the screen when "Chờ bạn" isn't. The transition is the one deliberate motion
-     on the page, guarded below for prefers-reduced-motion. ---------- */
-  .counters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
-  .counter { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; box-shadow: var(--shadow); }
-  .counter-n {
-    font-family: var(--mono); font-size: 26px; font-weight: 700; color: var(--ink); line-height: 1;
-    letter-spacing: -.01em; transition: color .15s ease, font-size .15s ease;
+  #decisions.has-signal::before {
+    background-color: var(--red); border-right-color: var(--red);
+    background-image: repeating-linear-gradient(135deg, rgba(255,255,255,.40) 0 2px, transparent 2px 7px);
   }
-  .counter-n.zero { font-size: 19px; font-weight: 500; color: var(--faint); }
-  .counter-n.unknown { color: var(--faint); font-weight: 500; font-style: italic; }
-  .counter-n.signal { font-size: 36px; color: var(--signal); }
-  .counter-n.warn { color: var(--warn); }
-  .counter-label { font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-top: 6px; }
-  @media (prefers-reduced-motion: reduce) { .counter-n { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .zone::before { transition: none; } }
 
-  /* ---------- manager view: decisions/assignments/ADO left, chat right ---------- */
-  .manager-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 16px; align-items: start; }
-  .manager-col-main { display: flex; flex-direction: column; }
-  .manager-col-side { position: sticky; top: 16px; max-height: calc(100dvh - 32px); display: flex; flex-direction: column; }
-  @media (max-width: 1100px) { .manager-grid { grid-template-columns: minmax(0, 1fr); } .manager-col-side { position: static; max-height: none; } }
+  .zone-head { display: flex; align-items: baseline; gap: 10px; padding: 17px var(--pad) 12px; }
+  .zone-head h2 { margin: 0; font-family: var(--mono); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--ink); }
+  .zone-head .hint { font-size: 12px; color: var(--faint); }
+  #decisions.has-signal .zone-head h2 { color: var(--red); }
+  .zone > p { margin: 0; padding: 0 var(--pad) 20px; font-size: 13px; color: var(--ink-soft); }
 
-  /* ---------- layout below stats (operator section) ---------- */
-  .cols { display: grid; grid-template-columns: 1fr 360px; gap: 16px; align-items: start; }
-  @media (max-width: 1180px) { .cols { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2,1fr); } .counters { grid-template-columns: repeat(2,1fr); } }
+  /* ---------- decisions ---------- */
+  .decision { padding: 16px var(--pad) 18px; border-top: 1px solid var(--rule-soft); }
+  .zone-head + .decision { border-top: 0; }
+  .decision-q { font-size: 15px; font-weight: 600; line-height: 1.4; }
+  .decision-why { font-size: 12.5px; color: var(--ink-soft); margin-top: 5px; line-height: 1.5; }
+  .decision-actions { display: flex; gap: 8px; margin-top: 13px; flex-wrap: wrap; }
+  .decision-actions .btn { border-color: var(--red); color: var(--red); font-weight: 600; }
+  .decision-actions .btn:hover { background: var(--red); color: var(--leaf); }
 
-  #operator-section { margin-top: 4px; }
+  /* ---------- assignments ---------- */
+  .assign { padding: 16px var(--pad) 18px; border-top: 1px solid var(--rule-soft); }
+  .zone-head + .assign { border-top: 0; }
+  .assign-top { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+  .assign-title { font-size: 14.5px; font-weight: 600; flex: 1; min-width: 140px; line-height: 1.35; }
+  .assign-progress { display: flex; align-items: center; gap: 10px; margin-top: 11px; }
+  .bar { width: 150px; height: 3px; background: var(--rule); overflow: hidden; border-radius: 2px; flex-shrink: 0; }
+  .bar-fill { height: 100%; background: var(--ink); }
+  .assign-meta { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .02em; }
+  .assign-note { font-size: 12.5px; color: var(--ink-soft); margin-top: 9px; line-height: 1.5; }
+  .step { display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+          padding: 6px 0 6px 12px; margin-top: 3px; font-size: 12.5px; border-left: 2px solid var(--rule); }
+  .step-done .step-name { color: var(--faint); text-decoration: line-through; }
+  .step-doing { border-left-color: var(--ink); }
+  .step-doing .step-name { font-weight: 600; }
+  .step .step-meta { font-family: var(--mono); font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+
+  /* ---------- pills: instrument labels, grey unless a pencil applies ---------- */
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 5px;
+    font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase;
+    background: var(--rule-soft); color: var(--ink-soft); border: 1px solid transparent; white-space: nowrap;
+  }
+  .pill.on-ink  { background: var(--rule); color: var(--ink); font-weight: 700; }
+  .pill.on-line { background: transparent; color: var(--ink-soft); border-color: var(--rule); }
+  .pill.on-red  { background: transparent; color: var(--red);  border-color: var(--red);  font-weight: 700; }
+  .pill.on-blue { background: transparent; color: var(--blue); border-color: var(--blue); }
+
+  /* ---------- backlog: reference weight. It is not the CTO's queue, so it never competes
+     with the two zones above it. ---------- */
+  .ticket-row { display: grid; grid-template-columns: minmax(0, 1fr) 118px 136px; align-items: baseline;
+                gap: 12px; padding: 10px var(--pad); border-top: 1px solid var(--rule-soft); }
+  .ticket-row > .pill { justify-self: start; }
+  .zone-head + .ticket-row, #tickets > .ticket-row:first-child { border-top: 0; }
+  .ticket-left { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+  .ticket-id { font-family: var(--mono); font-size: 11.5px; font-weight: 500; color: var(--ink-soft); text-decoration: none; flex-shrink: 0; }
+  .ticket-id:hover { color: var(--ink); text-decoration: underline; }
+  .ticket-title { font-size: 13px; color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ticket-action { justify-self: end; text-align: right; font-size: 12.5px; color: var(--ink-soft);
+                   text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px;
+                   white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+                   background: none; border: 0; padding: 0; font-family: var(--sans); cursor: pointer; }
+  .ticket-action:hover { color: var(--ink); text-decoration-color: var(--ink); }
+  .ticket-action.muted { color: var(--faint); cursor: default; text-decoration: none; }
+  .ticket-action.muted:hover { color: var(--faint); }
+
+  .dispatch-form { padding: 13px var(--pad) 16px; border-top: 1px solid var(--rule-soft); background: var(--paper); display: flex; flex-direction: column; gap: 9px; }
+  .dispatch-hint { font-size: 12px; color: var(--ink-soft); }
+  .dispatch-bundle { display: flex; flex-direction: column; gap: 5px; }
+  .dispatch-bundle-item { font-size: 12.5px; display: flex; align-items: center; gap: 7px; }
+  .dispatch-actions { display: flex; gap: 8px; }
+  .dispatch-status { font-size: 12.5px; color: var(--red); font-weight: 600; }
+
+  /* ---------- controls ---------- */
+  textarea, input[type=text] { font-family: var(--sans); color: var(--ink); }
+  .dispatch-instructions, .chat-input {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--rule); border-radius: 7px;
+    background: var(--leaf); font-size: 13px; line-height: 1.5; resize: vertical;
+  }
+  .dispatch-instructions { min-height: 60px; }
+  .chat-input:focus, .dispatch-instructions:focus { outline: none; border-color: var(--ink); }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 7px;
+    border: 1px solid var(--rule); background: var(--leaf); color: var(--ink);
+    font-size: 12.5px; font-weight: 500; font-family: var(--sans); cursor: pointer; text-decoration: none;
+    transition: border-color .12s, background .12s, color .12s;
+  }
+  .btn:hover { border-color: var(--ink-soft); background: var(--paper); }
+  .btn.primary { background: var(--ink); border-color: var(--ink); color: var(--leaf); font-weight: 600; }
+  .btn.primary:hover { background: #000; border-color: #000; color: var(--leaf); }
+  .btn.quiet { border-color: transparent; color: var(--ink-soft); padding: 4px 8px; font-size: 12px; }
+  .btn.quiet:hover { border-color: var(--rule); background: var(--paper); }
+  .btn:disabled { opacity: .5; cursor: default; }
+
+  /* ---------- manager transcript: a record, not a chat app. Speaker tag above the words, both
+     flush left, so the CTO's own line and the manager's read as one column. ---------- */
+  .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 15px var(--pad) 11px; }
+  .chat-head h2 { margin: 0; font-family: var(--mono); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+  .chat-log { flex: 1; min-height: 200px; overflow-y: auto; padding: 14px var(--pad); border-top: 1px solid var(--rule);
+              display: flex; flex-direction: column; gap: 16px; }
+  .chat-log:has(> .empty) { justify-content: center; }
+  .chat-compose { display: flex; gap: 8px; align-items: flex-end; padding: 12px var(--pad); border-top: 1px solid var(--rule); background: var(--paper); }
+  .chat-compose .chat-input { flex: 1; }
+
+  .msg { display: flex; flex-direction: column; gap: 4px; }
+  .msg-who { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+  .msg-text { font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .msg-cto .msg-who { color: var(--ink); }
+  .msg-cto .msg-text { color: var(--ink-soft); }
+  /* Proactive work — anything the manager did without being asked — carries the same margin
+     grammar as the ledger, one step quieter: an ink rule instead of a red gutter. */
+  .msg-auto { border-left: 2px solid var(--rule); padding-left: 12px; }
+  .msg-thinking { color: var(--faint); font-style: italic; font-size: 12.5px; }
+  .msg-error .msg-text { color: var(--red); font-weight: 500; }
+
+  /* ---------- machine room ---------- */
+  #operator-section { margin-top: 18px; }
   #operator-section summary {
-    cursor: pointer; padding: 10px 4px; font-family: var(--mono); font-size: 12px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
-    list-style: none;
+    cursor: pointer; padding: 8px 2px; font-family: var(--mono); font-size: 12px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); list-style: none;
   }
+  #operator-section summary:hover { color: var(--ink); }
   #operator-section summary::-webkit-details-marker { display: none; }
-  #operator-section summary::before { content: "▸ "; }
+  #operator-section summary::before { content: "▸ "; color: var(--faint); }
   #operator-section[open] summary::before { content: "▾ "; }
+  #operator-section .strip { padding: 4px 2px 14px; }
 
-  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
-  .panel-head { padding: 18px 22px 14px; }
-  .panel-head h2 { margin: 0; font-family: var(--mono); font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--navy); }
-  .panel-head p { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); }
+  .cols { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 16px; align-items: start; }
+  @media (max-width: 1080px) { .cols { grid-template-columns: minmax(0,1fr); } }
 
-  /* ---------- agent table ---------- */
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px var(--pad) 12px; }
+  .panel-head h2 { margin: 0; font-family: var(--mono); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+  .panel-head p { margin: 3px 0 0; font-size: 12px; color: var(--ink-soft); }
+
   table { width: 100%; border-collapse: collapse; }
   thead th {
-    text-align: left; font-family: var(--mono); font-size: 11px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase;
-    color: var(--faint); padding: 12px 22px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
-    background: var(--bg);
+    text-align: left; font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--faint); padding: 9px var(--pad); border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); background: var(--paper);
   }
-  tbody td { padding: 15px 22px; border-bottom: 1px solid var(--line); font-size: 13.5px; vertical-align: middle; }
+  tbody td { padding: 12px var(--pad); border-bottom: 1px solid var(--rule-soft); font-size: 13px; vertical-align: middle; }
   tbody tr:last-child td { border-bottom: 0; }
   tbody tr { cursor: pointer; transition: background .12s; }
-  tbody tr:hover { background: var(--bg); }
-  tbody tr.sel { background: var(--line); }
+  tbody tr:hover { background: var(--paper); }
+  tbody tr.sel { background: var(--rule-soft); }
   tbody tr:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
-  .agent-name { font-family: var(--mono); font-weight: 650; color: var(--navy); }
-  .agent-sub { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 3px; }
+  .agent-name { font-family: var(--mono); font-size: 12.5px; font-weight: 500; }
+  .agent-sub { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 3px; }
+  .cell-sub { font-family: var(--mono); font-size: 10px; color: var(--faint); margin-top: 4px; letter-spacing: .03em; text-transform: uppercase; }
+  .cell-age { font-family: var(--mono); font-size: 11.5px; color: var(--ink-soft); }
+  .actions { display: flex; gap: 6px; justify-content: flex-end; }
 
-  /* Pills read as instrument labels: mono, uppercase, tracked. Three weights carry the
-     hierarchy that colour used to (quiet / outline / filled) — .decision and .at-risk are
-     the only two that ever touch --signal / --warn; everything else stays grey. */
-  .pill {
-    display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 7px;
-    font-family: var(--mono); font-size: 11px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
-    background: var(--idle-bg); color: var(--idle-fg); border: 1px solid transparent; white-space: nowrap;
-  }
-  .pill .dot { width: 7px; height: 7px; background: currentColor; }
-  .pill.busy, .pill.working, .pill.running, .pill.progress, .pill.s-in_progress {
-    background: var(--card); color: var(--ink); border-color: var(--faint);
-  }
-  .pill.blocked, .pill.stalled, .pill.s-blocked, .pill.p-P0 { background: var(--ink); color: var(--card); }
-  .pill.decision { background: var(--card); color: var(--signal); border-color: var(--signal); }
-  .pill.p-P1 { background: var(--card); color: var(--ink); border-color: var(--faint); }
-  .pill.at-risk { background: var(--card); color: var(--warn); border-color: var(--warn); }
+  .srow { display: flex; align-items: baseline; gap: 11px; padding: 10px var(--pad); border-top: 1px solid var(--rule-soft); font-size: 13px; }
+  .srow:first-child { border-top: 0; }
+  .srow .k { font-size: 11.5px; color: var(--ink-soft); }
+  .srow .v { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+             max-width: 58%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srow a.v { text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
+  .srow a.v:hover { text-decoration-color: var(--ink); }
 
-  /* ---------- tickets: the one glanceable summary — status + next action, nothing else ---------- */
-  .ticket-row { display: flex; align-items: center; gap: 14px; padding: 14px 22px; border-top: 1px solid var(--line); }
-  .ticket-row:first-child { border-top: 0; }
-  .ticket-left { display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0; }
-  .ticket-id { font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: .02em; color: var(--ink); text-decoration: none; flex-shrink: 0; }
-  .ticket-id:hover { text-decoration: underline; }
-  .ticket-title { font-size: 13.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ticket-action { font-size: 13px; font-weight: 600; color: var(--ink); text-decoration: none; flex-shrink: 0; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
-  .ticket-action:hover { text-decoration: underline; }
-  .ticket-action.muted { color: var(--faint); font-weight: 500; text-decoration: none; }
-
-  .dispatch-form { padding: 14px 22px; border-top: 1px solid var(--line); background: var(--bg); display: flex; flex-direction: column; gap: 10px; }
-  .dispatch-hint { font-size: 12.5px; color: var(--muted); }
-  .dispatch-bundle { display: flex; flex-direction: column; gap: 6px; }
-  .dispatch-bundle-item { font-size: 13px; display: flex; align-items: center; gap: 8px; }
-  .dispatch-instructions { width: 100%; min-height: 64px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-family: var(--sans); font-size: 13px; resize: vertical; }
-  .dispatch-actions { display: flex; gap: 9px; }
-  .dispatch-status { font-size: 12.5px; color: var(--ink); font-weight: 600; }
-
-  .actions { display: flex; gap: 8px; justify-content: flex-end; }
-  .btn {
-    display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 8px;
-    border: 1px solid var(--line); background: var(--card); color: var(--ink);
-    font-size: 12.5px; font-weight: 500; font-family: var(--sans); cursor: pointer; text-decoration: none;
-    transition: border-color .12s, background .12s;
-  }
-  .btn:hover { border-color: var(--faint); background: var(--bg); }
-  .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
-
-  /* ---------- live logs: dark terminal, deliberately distinct from the light app chrome.
-     Still greyscale — call/result/text rows differ by lightness and tag, not hue. No pulse:
-     a watch station doesn't need a permanently blinking dot to prove a panel is alive. ---------- */
+  /* ---------- live log: dark, because it is raw machine output and should not be mistaken for
+     the ledger. Rows differ by lightness and tag, never by hue. ---------- */
   .term-bar {
-    display: flex; align-items: center; gap: 10px; padding: 11px 22px;
+    display: flex; align-items: center; gap: 10px; padding: 9px var(--pad);
     background: var(--term-bar); border-top: 1px solid var(--term-border); border-bottom: 1px solid var(--term-border);
-    font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: .03em; color: var(--term-accent); white-space: nowrap;
+    font-family: var(--mono); font-size: 11.5px; color: var(--term-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .term-bar span:last-child { overflow: hidden; text-overflow: ellipsis; text-transform: none; letter-spacing: 0; font-weight: 400; }
-
-  #logrows { max-height: 460px; overflow-y: auto; padding: 4px 0 8px; background: var(--term-bg); }
+  #logrows { max-height: 420px; overflow-y: auto; padding: 2px 0 6px; background: var(--term-bg); }
   #logrows .empty { color: var(--term-result); }
   #logrows .empty.err { color: var(--term-text); font-weight: 600; }
-  .logrow { display: flex; gap: 13px; padding: 9px 22px; border-bottom: 1px solid var(--term-border); align-items: flex-start; }
+  .logrow { display: flex; gap: 12px; padding: 8px var(--pad); border-bottom: 1px solid var(--term-border); align-items: flex-start; }
   .logrow:last-child { border-bottom: 0; }
-  .logrow .dot { margin-top: 6px; flex-shrink: 0; }
-  .logrow .body { font-family: var(--mono); font-size: 12px; line-height: 1.6; display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+  .logrow .body { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
   .logrow .code { white-space: pre-wrap; word-break: break-word; }
   .logrow .prose { white-space: pre-wrap; word-break: break-word; font-family: var(--sans); font-size: 12.5px; line-height: 1.6; }
   .logrow .tool-tag, .logrow .role-tag {
-    align-self: flex-start; font-family: var(--mono); font-size: 10px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase;
-    padding: 1px 7px; border-radius: 5px;
+    align-self: flex-start; font-family: var(--mono); font-size: 9.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,.11); color: var(--term-call);
   }
-  .logrow.call .tool-tag  { background: rgba(255,255,255,.12); color: var(--term-call); }
-  .logrow.call .code      { color: var(--term-call); }
-  .logrow.call .dot       { background: var(--term-call); }
-  .logrow.result .code    { color: var(--term-result); }
-  .logrow.result .dot     { background: var(--term-result); }
-  .logrow.text .role-tag  { background: rgba(255,255,255,.12); color: var(--term-accent); }
-  .logrow.text .prose     { color: var(--term-text); }
-  .logrow.text .dot       { background: var(--term-accent); }
+  .logrow.call .code   { color: var(--term-call); }
+  .logrow.result .code { color: var(--term-result); }
+  .logrow.text .prose  { color: var(--term-text); }
 
-  /* ---------- side panel rows ---------- */
-  .srow { display: flex; align-items: center; gap: 11px; padding: 13px 22px; border-top: 1px solid var(--line); font-size: 13.5px; }
-  .srow .k { font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-  .srow .v { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--navy); font-weight: 600;
-             max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .srow a.v { color: var(--ink); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
-  .srow a.v:hover { text-decoration-color: var(--ink); }
-
-  .empty { padding: 34px 22px; text-align: center; color: var(--faint); font-size: 13.5px; }
-  .empty.err { color: var(--ink); font-weight: 600; }
+  .empty { padding: 28px var(--pad); text-align: center; color: var(--faint); font-size: 13px; }
+  .empty.err { color: var(--red); font-weight: 500; }
   svg { display: block; }
-
-  .btn.primary { background: var(--ink); border-color: var(--ink); color: var(--card); font-weight: 650; }
-  .btn.primary:hover { opacity: .85; }
-
-  /* ---------- decisions + assignments + ADO backlog: one continuous surface (.panel),
-     three zones separated by their own header and a hairline — a document, not three
-     floating cards. #decisions is first, so its accent (when active) is a left rule, not
-     a top border. ---------- */
-  .muted { color: var(--muted); }
-  .zone + .zone { border-top: 1px solid var(--line); }
-  #decisions h2, #assignments h2 { margin: 0; padding: 18px 22px 14px; font-family: var(--mono); font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--navy); }
-  #decisions > p, #assignments > p { margin: 0; padding: 0 22px 22px; font-size: 13.5px; }
-  #decisions.has-signal { border-left: 3px solid var(--signal); }
-  #decisions.has-signal > h2 { color: var(--signal); }
-
-  .decision { padding: 18px 22px; border-top: 1px solid var(--line); }
-  #decisions h2 + .decision { border-top: 0; }
-  .decision-q { font-size: 14.5px; font-weight: 650; color: var(--navy); }
-  .decision-why { font-size: 12.5px; margin-top: 4px; }
-  .decision-actions { display: flex; gap: 9px; margin-top: 14px; flex-wrap: wrap; }
-
-  .assign { padding: 18px 22px; border-top: 1px solid var(--line); }
-  #assignments h2 + .assign { border-top: 0; }
-  .assign-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .assign-title { font-size: 14.5px; font-weight: 650; color: var(--navy); flex: 1; min-width: 120px; }
-  .assign > .muted { font-size: 12.5px; margin-top: 6px; }
-  .assign-note { font-size: 12.5px; margin-top: 10px; font-style: italic; }
-  .bar { height: 6px; border-radius: 4px; background: var(--idle-bg); margin-top: 12px; overflow: hidden; }
-  .bar-fill { height: 100%; background: var(--run-dot); border-radius: 4px; }
-  .step { display: flex; align-items: center; justify-content: space-between; gap: 10px;
-          padding: 7px 0 7px 14px; margin-top: 4px; font-size: 12.5px; border-left: 2px solid var(--line); }
-  .step-name { color: var(--ink); }
-  .step-done .step-name { color: var(--faint); text-decoration: line-through; }
-  .step-doing { border-left-color: var(--ink); }
-  .step-doing .step-name { color: var(--ink); font-weight: 600; }
-  .step .muted { font-family: var(--mono); font-size: 11px; letter-spacing: .02em; }
-
-  .pill.p-P2 { background: var(--idle-bg); color: var(--idle-fg); }
-  .pill.s-assigned { background: var(--idle-bg); color: var(--idle-fg); }
-  .pill.s-done { background: var(--ok-bg); color: var(--ok-fg); }
-  .pill.s-cancelled { background: var(--idle-bg); color: var(--faint); }
-
-  /* ---------- manager chat ---------- */
-  .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 22px 14px; }
-  .chat-head h2 { margin: 0; font-family: var(--mono); font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--navy); }
-  .chat-log { flex: 1; min-height: 240px; overflow-y: auto; padding: 4px 22px; border-top: 1px solid var(--line);
-              display: flex; flex-direction: column; gap: 10px; }
-  .chat-compose { display: flex; gap: 8px; align-items: flex-end; padding: 14px 22px; border-top: 1px solid var(--line); background: var(--bg); }
-  .chat-compose .chat-input { flex: 1; }
-
-  .msg { max-width: 92%; padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.5; }
-  .msg-cto { align-self: flex-end; background: var(--idle-bg); color: var(--ink); }
-  .msg-manager { align-self: flex-start; background: var(--card); color: var(--ink); border: 1px solid var(--line); }
-  .msg-system { align-self: center; max-width: 100%; background: transparent; color: var(--muted); font-size: 12px; text-align: center; }
-  .msg-thinking { align-self: flex-start; background: transparent; color: var(--faint); font-style: italic; font-size: 12.5px; }
-  .msg-error { align-self: center; max-width: 100%; background: transparent; color: var(--ink); font-weight: 600; text-align: center; }
-  /* proactive work (anything not a direct reply to the CTO) — flagged via the same left-rule
-     grammar as an active #decisions zone, just in ink: "notable", not "needs a decision". */
-  .msg-auto { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--ink); }
-  .msg-why { font-family: var(--mono); font-size: 10px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
-  .msg-text { white-space: pre-wrap; word-break: break-word; }
 </style>
 </head>
 <body>
 
-<nav id="rail" aria-label="Sections">
-  <div class="logo">A</div>
-  <button class="rail-btn on" title="Agents" aria-current="page">
-    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 01-1 1H4a1 1 0 01-1-1V9.5z"/></svg>
-  </button>
-  <button class="rail-btn" title="Copies">
-    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-  </button>
-  <button class="rail-btn" title="Activity">
-    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16l5-6 4 4 4-7 5 5"/></svg>
-  </button>
-  <button class="rail-btn" title="Terminal">
-    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l5 5-5 5M12 17h8"/></svg>
-  </button>
-  <div class="rail-spacer"></div>
-</nav>
-
 <div id="main">
   <header id="topbar">
     <div class="brand">
-      <h1>Agent Control Center</h1>
-      <p id="repo-label">Parallel worktree copies</p>
+      <div class="logo">A</div>
+      <div>
+        <h1>Engineering Manager</h1>
+        <p id="repo-label">Điều phối các phiên chạy song song</p>
+      </div>
     </div>
+    <div id="counters" class="strip" aria-label="Tổng quan"></div>
     <div class="topbar-spacer"></div>
-    <span class="chip"><span class="dot" id="live-dot"></span><span id="live-count">—</span></span>
     <div class="avatar">AQ</div>
   </header>
 
   <main id="content">
-    <h2 class="page-title">Engineering Manager</h2>
-
-    <div id="counters" class="counters"></div>
     <div id="manager-grid" class="manager-grid">
       <div class="manager-col-main">
         <div class="panel">
           <section id="decisions" class="zone"></section>
           <section id="assignments" class="zone"></section>
           <section id="ado" class="zone">
-            <div class="panel-head">
-              <h2>ADO backlog</h2>
-              <p>Chỉ để tham khảo — giao một kết quả, không phải một vé.</p>
+            <div class="zone-head">
+              <h2>Backlog ADO</h2>
+              <span class="hint">chỉ để tham khảo — giao một kết quả, không phải một vé</span>
             </div>
             <div id="tickets"></div>
           </section>
@@ -421,43 +397,38 @@
     </div>
 
     <details id="operator-section">
-      <summary>Chi tiết vận hành</summary>
+      <summary>Phiên đang chạy</summary>
 
-    <section class="stats" id="stats"></section>
+      <div id="stats" class="strip"></div>
 
-    <div class="cols">
-      <section class="panel">
-        <div class="panel-head" style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-          <div>
-            <h2>Sessions</h2>
-            <p>Everything running in this repo. Pick one to follow its work.</p>
-          </div>
-          <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--muted); white-space:nowrap; cursor:pointer;">
-            <input type="checkbox" id="managed-only-toggle" checked>
-            Managed only
-          </label>
-        </div>
-        <div id="table-wrap"></div>
-      </section>
-
-      <aside style="display:flex; flex-direction:column; gap:16px;">
+      <div class="cols">
         <section class="panel">
-          <div class="panel-head"><h2>Session details</h2></div>
-          <div id="details"><div class="empty">No session selected</div></div>
+          <div class="panel-head">
+            <div>
+              <h2>Phiên</h2>
+              <p>Mọi thứ đang chạy trong repo này. Chọn một phiên để xem nó đang làm gì.</p>
+            </div>
+            <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--ink-soft); white-space:nowrap; cursor:pointer;">
+              <input type="checkbox" id="managed-only-toggle" checked>
+              Chỉ phiên được quản lý
+            </label>
+          </div>
+          <div id="table-wrap"></div>
         </section>
-      </aside>
-    </div>
 
-    <section class="panel" style="margin-top:16px;">
-      <div class="panel-head">
-        <h2>Live logs</h2>
-        <p id="log-sub">Select a session above.</p>
+        <aside style="display:flex; flex-direction:column; gap:16px;">
+          <section class="panel">
+            <div class="panel-head"><h2>Chi tiết phiên</h2></div>
+            <div id="details"><div class="empty">Chưa chọn phiên nào</div></div>
+          </section>
+        </aside>
       </div>
-      <div id="log-summary" class="term-bar" hidden>
-        <span id="log-summary-text"></span>
-      </div>
-      <div id="logrows"></div>
-    </section>
+
+      <section class="panel" style="margin-top:16px;">
+        <div class="panel-head"><h2>Nhật ký trực tiếp</h2></div>
+        <div id="log-summary" class="term-bar" hidden><span id="log-summary-text"></span></div>
+        <div id="logrows"></div>
+      </section>
 
     </details>
   </main>
@@ -480,17 +451,10 @@ let showManagedOnly = true;
 let tasksFailed = false; // true while /api/tasks is failing — session state is unknown, so
                          // ticket rows would be guessing; renderTickets shows a banner instead.
 
-const ICONS = {
-  globe: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>',
-  check: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.3l2.4 2.4 4.6-4.9"/></svg>',
-  cycle: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 01-13.7 5.7M4 12a8 8 0 0113.7-5.7"/><path d="M17.5 3.5v3h-3M6.5 20.5v-3h3"/></svg>',
-  warn:  '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5l8.5 15h-17l8.5-15z"/><path d="M12 10v4M12 16.8v.1"/></svg>'
-};
-
 function fmtAge(ms) {
   if (!ms) return "—";
   const m = Math.floor((Date.now() - ms) / 60000);
-  if (m < 1) return "just now";
+  if (m < 1) return "vừa xong";
   if (m < 60) return m + "m";
   const h = Math.floor(m / 60);
   return h < 24 ? h + "h" : Math.floor(h / 24) + "d";
@@ -505,19 +469,29 @@ function el(tag, cls, text) {
   if (text != null) n.textContent = text;   // textContent everywhere: names never parse as HTML
   return n;
 }
-function pill(cls, label) {
-  const p = el("span", "pill " + cls);
-  if (["busy","working","running","idle","done","blocked","stopped","decision","progress","stalled"].includes(cls)) p.append(el("span", "dot"));
+// tone is one of "" (grey) | on-line | on-ink | on-red | on-blue — see the two-pencil rule at
+// the top of the stylesheet.
+function pill(tone, label) {
+  const p = el("span", "pill" + (tone ? " " + tone : ""));
   p.append(document.createTextNode(label));
   return p;
 }
 
+const STATE_LABEL = {
+  busy: "đang chạy", working: "đang chạy", running: "đang chạy",
+  idle: "rảnh", done: "xong", blocked: "bị chặn", stopped: "đã dừng",
+};
+const STATE_TONE = { busy: "on-line", working: "on-line", running: "on-line", blocked: "on-ink" };
+
 // One row per ticket in the manager's ADO backlog, not per session — a ticket with no
 // dispatched session yet still shows up as "Not started" so it's a click away from being one.
 const TICKET_STATUS_LABEL = {
-  done: "Done", decision: "Needs your decision", blocked: "Blocked",
-  progress: "In progress", "not-started": "Not started",
-  stalled: "Stalled",
+  done: "xong", decision: "cần bạn quyết", blocked: "bị chặn",
+  progress: "đang làm", "not-started": "chưa bắt đầu",
+  stalled: "đứng im",
+};
+const TICKET_STATUS_TONE = {
+  decision: "on-red", blocked: "on-ink", stalled: "on-ink", progress: "on-line",
 };
 
 function computeTickets(adoTickets, tasks, esc) {
@@ -532,9 +506,9 @@ function computeTickets(adoTickets, tasks, esc) {
 
     let status, action, actionHref = null;
     if (pendingEsc) {
-      status = "decision"; action = pendingEsc.question || "Needs a decision";
+      status = "decision"; action = pendingEsc.question || "Cần một quyết định";
     } else if (matched.some(t => stateOf(t) === "blocked")) {
-      status = "blocked"; action = "Check the blocker";
+      status = "blocked"; action = "Xem vướng ở đâu";
     } else if (matched.length && matched.every(t => t.kind === null) && !matched.some(t => t.pr_url)) {
       status = "stalled"; action = "Giao lại việc";
     } else if (!matched.length) {
@@ -542,7 +516,7 @@ function computeTickets(adoTickets, tasks, esc) {
     } else if (withPr && withPr.pr_state === "MERGED") {
       status = "done"; action = "—";
     } else if (withPr && withPr.pr_state === "OPEN") {
-      status = "progress"; action = "Review PR #" + withPr.pr_number; actionHref = withPr.pr_url;
+      status = "progress"; action = "Duyệt PR #" + withPr.pr_number; actionHref = withPr.pr_url;
     } else {
       status = "progress"; action = "—";
     }
@@ -569,8 +543,8 @@ function renderTickets(rows) {
     // "not-started" with a live dispatch button, risking a duplicate dispatch onto a ticket
     // that already has a session running. Show the warning and nothing else.
     box.replaceChildren(el("div", "empty err",
-      "Can't confirm what's running — session status is unavailable, so ticket state may be " +
-      "stale. Dispatching is disabled until this clears."));
+      "Không xác nhận được phiên nào đang chạy — trạng thái ticket có thể đã cũ. " +
+      "Tạm khoá việc giao cho tới khi đọc lại được."));
     return;
   }
   // ponytail: a 2s/5s poll tick would otherwise wipe an in-progress dispatch form (and
@@ -578,7 +552,7 @@ function renderTickets(rows) {
   // let the next tick after it closes pick up any changes.
   if (document.querySelector("#tickets .dispatch-form")) return;
   if (!rows.length) {
-    box.replaceChildren(el("div", "empty", "No tickets assigned — nothing to show yet."));
+    box.replaceChildren(el("div", "empty", "Chưa có ticket nào."));
     return;
   }
   const frag = document.createDocumentFragment();
@@ -594,10 +568,10 @@ function renderTickets(rows) {
       left.append(prLink);
     }
     left.append(el("span", "ticket-title", r.title || ""));
-    row.append(left, pill(r.status, TICKET_STATUS_LABEL[r.status] || r.status));
+    row.append(left, pill(TICKET_STATUS_TONE[r.status] || "", TICKET_STATUS_LABEL[r.status] || r.status));
 
     if (r.status === "not-started" || r.status === "stalled") {
-      const btn = el("button", "btn primary", r.status === "stalled" ? "Giao lại việc" : "Giao việc");
+      const btn = el("button", "ticket-action", r.status === "stalled" ? "Giao lại ›" : "Giao việc ›");
       btn.onclick = () => openDispatchForm(row, r);
       row.append(btn);
     } else if (r.actionHref) {
@@ -631,11 +605,11 @@ function openDispatchForm(rowEl, ticket) {
     label.append(cb, document.createTextNode(" " + c.label + " — " + c.title));
     checks.append(label);
   });
-  if (bundleCandidates.length) form.append(el("div", "dispatch-hint", "Bundle with related not-started tickets:"), checks);
+  if (bundleCandidates.length) form.append(el("div", "dispatch-hint", "Gộp thêm ticket chưa bắt đầu:"), checks);
 
   const textarea = document.createElement("textarea");
   textarea.className = "dispatch-instructions";
-  textarea.placeholder = "Extra instructions (optional)";
+  textarea.placeholder = "Ghi chú thêm (không bắt buộc)";
   form.append(textarea);
 
   const status = el("div", "dispatch-status");
@@ -678,47 +652,33 @@ function openDispatchForm(rowEl, ticket) {
 
 function stateOf(t) { return (t.agent_state || t.agent_status || "").toLowerCase(); }
 
-function statCard(icon, bg, fg, num, label) {
-  const s = el("div", "stat");
-  const box = el("div", "stat-icon");
-  box.style.background = bg; box.style.color = fg; box.innerHTML = icon;  // fixed icon set, not user data
-  const txt = el("div");
-  txt.append(el("div", "stat-num", String(num)), el("div", "stat-lbl", label));
-  s.append(box, txt);
-  return s;
-}
-
 function renderStats(data) {
   const st = data.map(stateOf);
   const active = st.filter(s => s === "busy" || s === "working").length;
   const resting = st.filter(s => s === "idle" || s === "done").length;
   const stuck = st.filter(s => s === "blocked").length;
   document.getElementById("stats").replaceChildren(
-    statCard(ICONS.globe, "var(--idle-bg)", "var(--ink)", data.length, "sessions"),
-    statCard(ICONS.cycle, "var(--idle-bg)", "var(--ink)", active, "working now"),
-    statCard(ICONS.check, "var(--idle-bg)", "var(--muted)", resting, "idle or done"),
-    statCard(ICONS.warn, "var(--idle-bg)", "var(--muted)", stuck, "blocked")
+    stripItem("đang chạy", active, null),
+    stripItem("rảnh hoặc xong", resting, null),
+    stripItem("bị chặn", stuck, null)
   );
-  const n = active;
-  document.getElementById("live-count").textContent = n + (n === 1 ? " agent live" : " agents live");
-  document.getElementById("live-dot").style.background = n ? "var(--run-dot)" : "var(--idle-dot)";
   const summary = document.querySelector("#operator-section summary");
-  if (summary) summary.textContent = `Chi tiết vận hành (${data.length})`;
+  if (summary) summary.textContent = `Phiên đang chạy · ${data.length}`;
 }
 
 function renderTable(data) {
   const wrap = document.getElementById("table-wrap");
   if (!data.length) {
     const msg = showManagedOnly && lastData.length
-      ? `No managed copies — turn off "Managed only" to see all ${lastData.length}.`
-      : "Nothing is running in this repo yet.";
+      ? `Không có bản sao nào được quản lý — bỏ chọn "Chỉ phiên được quản lý" để xem cả ${lastData.length}.`
+      : "Chưa có gì chạy trong repo này.";
     wrap.replaceChildren(el("div", "empty", msg));
     return;
   }
 
   const table = el("table");
   const thead = el("thead"), htr = el("tr");
-  ["Agent", "Surface", "Status", "Age", ""].forEach((h, i) => {
+  ["Phiên", "Loại", "Trạng thái", "Đã chạy", ""].forEach((h, i) => {
     const th = el("th", null, h);
     if (i === 4) th.style.textAlign = "right";
     htr.append(th);
@@ -736,23 +696,24 @@ function renderTable(data) {
     c1.append(el("div", "agent-sub", t.branch || t.path || ""));
 
     const c2 = el("td");
-    if (t.mode) c2.append(pill("mode", t.mode));
-    else if (t.kind) c2.append(pill("surface", t.kind));
+    if (t.mode) c2.append(pill("", t.mode));
+    else if (t.kind) c2.append(pill("", t.kind));
 
+    // One row, one status. The stack's own state is a subordinate line, not a second pill
+    // arguing with the first.
     const c3 = el("td");
-    c3.append(pill(st || "idle", st || "unknown"));
-    if (t.dev_status) { const d = pill(t.dev_status, "stack " + t.dev_status); d.style.marginLeft = "6px"; c3.append(d); }
+    c3.append(pill(STATE_TONE[st] || "", STATE_LABEL[st] || "không rõ"));
+    if (t.dev_status) c3.append(el("div", "cell-sub", "stack " + t.dev_status));
 
-    const c4 = el("td", null, fmtAge(t.started_at));
-    c4.style.color = "var(--muted)"; c4.style.fontFamily = "var(--mono)"; c4.style.fontSize = "12px";
+    const c4 = el("td", "cell-age", fmtAge(t.started_at));
 
     const c5 = el("td");
     const acts = el("div", "actions");
-    const logs = el("button", "btn", "Logs");
+    const logs = el("button", "btn quiet", "Nhật ký");
     logs.onclick = (e) => { e.stopPropagation(); pick(t.task); };
     acts.append(logs);
     if (t.ports && t.ports.frontend) {
-      const open = el("a", "btn", "Open");
+      const open = el("a", "btn quiet", "Mở");
       open.href = "http://localhost:" + t.ports.frontend;
       open.target = "_blank"; open.rel = "noopener";
       open.onclick = (e) => e.stopPropagation();
@@ -772,7 +733,7 @@ function renderTable(data) {
 function renderDetails() {
   const box = document.getElementById("details");
   const t = byName[selected];
-  if (!t) { box.replaceChildren(el("div", "empty", "No session selected")); return; }
+  if (!t) { box.replaceChildren(el("div", "empty", "Chưa chọn phiên nào")); return; }
 
   const rows = [];
   const add = (k, v, href) => {
@@ -783,22 +744,21 @@ function renderDetails() {
     else r.append(el("span", "v", v));
     rows.push(r);
   };
-  add("Status", stateOf(t) || "unknown");
-  add("Kind", t.kind);
-  add("Branch", t.branch);
+  add("Trạng thái", STATE_LABEL[stateOf(t)] || "không rõ");
+  add("Loại", t.kind);
+  add("Nhánh", t.branch);
   if (t.pr_url) add("PR", "#" + t.pr_number + (t.pr_state ? " (" + t.pr_state.toLowerCase() + ")" : ""), t.pr_url);
-  (t.ado_refs || []).forEach(r => add("ADO ticket", "AB#" + r.id, r.url));
+  (t.ado_refs || []).forEach(r => add("Ticket ADO", "AB#" + r.id, r.url));
   if (t.ports && t.ports.frontend) add("Frontend", "localhost:" + t.ports.frontend, "http://localhost:" + t.ports.frontend);
   if (t.ports && t.ports.gateway) add("Gateway", "localhost:" + t.ports.gateway, "http://localhost:" + t.ports.gateway);
-  add("Attach", t.short_id ? "claude attach " + t.short_id : null);
-  add("Started", fmtAge(t.started_at) + " ago");
-  add("Path", t.path);
+  add("Gắn vào", t.short_id ? "claude attach " + t.short_id : null);
+  add("Bắt đầu", fmtAge(t.started_at) + " trước");
+  add("Đường dẫn", t.path);
   box.replaceChildren(...rows);
 }
 
 function pick(name) {
   selected = name;
-  document.getElementById("log-sub").textContent = name;
   renderDetails();
   document.querySelectorAll("tbody tr").forEach(tr => {
     tr.classList.toggle("sel", tr.querySelector(".agent-name").textContent === name);
@@ -815,7 +775,7 @@ async function pollTasks() {
   } catch (e) { err = e.message || "request failed"; }
 
   if (err) {
-    document.getElementById("table-wrap").replaceChildren(el("div", "empty err", "Can't reach the server — " + err));
+    document.getElementById("table-wrap").replaceChildren(el("div", "empty err", "Không kết nối được máy chủ — " + err));
     tasksFailed = true;
     renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
     return;
@@ -844,7 +804,7 @@ function logRow(rec) {
   } else if (rec.kind === "result") {
     body.append(el("span", "code", rec.text));
   } else {
-    body.append(el("span", "role-tag", rec.role === "user" ? "you" : "agent"));
+    body.append(el("span", "role-tag", rec.role === "user" ? "ban" : "agent"));
     body.append(el("span", "prose", rec.text));
   }
   row.append(body);
@@ -856,7 +816,7 @@ async function pollLog() {
   const summaryEl = document.getElementById("log-summary");
   const summaryText = document.getElementById("log-summary-text");
   if (!selected) {
-    box.replaceChildren(el("div", "empty", "Select a session above."));
+    box.replaceChildren(el("div", "empty", "Chọn một phiên ở trên."));
     summaryEl.hidden = true;
     return;
   }
@@ -869,12 +829,12 @@ async function pollLog() {
   } catch (e) { err = e.message || "request failed"; }
 
   if (err) {
-    box.replaceChildren(el("div", "empty err", "Can't read the log — " + err));
+    box.replaceChildren(el("div", "empty err", "Không đọc được nhật ký — " + err));
     summaryEl.hidden = true;
     return;
   }
   if (data.status === "not-available") {
-    box.replaceChildren(el("div", "empty", "No session has been dispatched into this copy yet."));
+    box.replaceChildren(el("div", "empty", "Chưa có phiên nào được giao vào bản sao này."));
     summaryEl.hidden = true;
     return;
   }
@@ -882,31 +842,31 @@ async function pollLog() {
   // "what's it doing right now": the agent's own latest words, not tool plumbing.
   const lastSaid = [...data.lines].reverse().find(r => r.kind === "text" && r.role === "assistant");
   if (lastSaid) {
-    summaryText.textContent = lastSaid.text.length > 160 ? lastSaid.text.slice(0, 160) + "…" : lastSaid.text;
-    summaryEl.hidden = false;
+    const said = lastSaid.text.length > 150 ? lastSaid.text.slice(0, 150) + "…" : lastSaid.text;
+    summaryText.textContent = selected + " — " + said;
   } else {
-    summaryEl.hidden = true;
+    summaryText.textContent = selected;
   }
+  summaryEl.hidden = false;
 
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
   box.replaceChildren(...data.lines.map(logRow));
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
-// kind ("signal" | "warn" | null) picks which reserved hue a non-zero value renders in — a
-// counter that is "—" (unknown, a failed poll) or literally 0 never takes a hue regardless of
-// kind, so a stale fetch can never be mistaken for a real signal.
-function counterCard(label, n, kind) {
-  const card = el("div", "counter");
+// tone ("on-red" | "on-blue" | null) picks which pencil a non-zero value is written in. A value
+// that is "—" (unknown, a failed poll) or literally 0 never takes a pencil regardless of tone, so
+// a stale fetch can never be mistaken for a real signal.
+function stripItem(label, n, tone) {
   const unknown = n === "—";
   const zero = !unknown && Number(n) === 0;
-  let cls = "counter-n";
+  let cls = "strip-item";
   if (unknown) cls += " unknown";
   else if (zero) cls += " zero";
-  else if (kind === "signal") cls += " signal";
-  else if (kind === "warn") cls += " warn";
-  card.append(el("div", cls, String(n)), el("div", "counter-label", label));
-  return card;
+  else if (tone) cls += " " + tone;
+  const item = el("div", cls);
+  item.append(el("span", "strip-n", String(n)), el("span", null, label));
+  return item;
 }
 
 // escalations here is the flat needs_human array — already the curated "needs a human" set from
@@ -917,19 +877,27 @@ function renderCounters(assignments, escalations, failures) {
   const weekAgo = Date.now() / 1000 - 7 * 86400;
   const A = failures.assignments;
   const E = failures.escalations;
-  const cards = [
-    ["Đang giao", A ? "—" : String(open.length), null],
-    ["Trễ hạn", A ? "—" : String(open.filter(a => a.at_risk).length), "warn"],
-    ["Chờ bạn", E ? "—" : String(escalations.length), "signal"],
-    ["Xong tuần này", A ? "—" : String(assignments.filter(a => a.status === "done" && (a.ts || 0) >= weekAgo).length), null],
+  const items = [
+    ["chờ bạn", E ? "—" : String(escalations.length), "on-red"],
+    ["đang giao", A ? "—" : String(open.length), null],
+    ["trễ hạn", A ? "—" : String(open.filter(a => a.at_risk).length), "on-blue"],
+    ["xong tuần này", A ? "—" : String(assignments.filter(a => a.status === "done" && (a.ts || 0) >= weekAgo).length), null],
   ];
-  document.getElementById("counters").replaceChildren(...cards.map(([label, n, kind]) => counterCard(label, n, kind)));
+  document.getElementById("counters").replaceChildren(...items.map(([label, n, tone]) => stripItem(label, n, tone)));
+}
+
+// A zone's title bar. Kept in one place so the three ledger zones can never drift apart.
+function zoneHead(title, hint) {
+  const head = el("div", "zone-head");
+  head.append(el("h2", null, title));
+  if (hint) head.append(el("span", "hint", hint));
+  return head;
 }
 
 function decisionCard(rec) {
   const card = el("div", "decision");
   card.append(el("div", "decision-q", rec.question || ""));
-  card.append(el("div", "decision-why muted", rec.reason || ""));
+  card.append(el("div", "decision-why", rec.reason || ""));
   const actions = el("div", "decision-actions");
   (rec.options || []).forEach(opt => {
     const btn = el("button", "btn", opt);
@@ -954,9 +922,9 @@ function renderDecisions(escalations) {
   // The one place the page is allowed to shout: a pending decision colours its own zone's
   // rule so the eye lands here first, before it ever reaches the counters above.
   panel.classList.toggle("has-signal", escalations.length > 0);
-  const head = el("h2", null, "Cần bạn quyết");
+  const head = zoneHead("Cần bạn quyết");
   if (!escalations.length) {
-    panel.replaceChildren(head, el("p", "muted", "Không có gì chờ bạn."));
+    panel.replaceChildren(head, el("p", null, "Không có gì chờ bạn."));
     return;
   }
   panel.replaceChildren(head, ...escalations.map(decisionCard));
@@ -976,13 +944,19 @@ async function answerEscalation(id, answer) {
   }
 }
 
+const PRIORITY_TONE = { P0: "on-ink", P1: "on-line" };
+const ASSIGN_STATUS_LABEL = {
+  assigned: "đã giao", in_progress: "đang làm", blocked: "bị chặn",
+  done: "xong", cancelled: "đã huỷ",
+};
+
 function assignCard(a) {
   const card = el("div", "assign");
   const top = el("div", "assign-top");
-  top.append(el("span", "pill p-" + a.priority, a.priority));
+  top.append(pill(PRIORITY_TONE[a.priority] || "", a.priority || "—"));
   top.append(el("span", "assign-title", a.title));
-  top.append(el("span", "pill s-" + a.status, a.status));
-  if (a.at_risk) top.append(el("span", "pill at-risk", "trễ hạn"));
+  top.append(pill(a.status === "blocked" ? "on-ink" : "", ASSIGN_STATUS_LABEL[a.status] || a.status));
+  if (a.at_risk) top.append(pill("on-blue", "trễ hạn"));
   card.append(top);
 
   // progress is null when there's no plan yet — draw no bar rather than a zero-width one,
@@ -992,29 +966,30 @@ function assignCard(a) {
     const fill = el("div", "bar-fill");
     fill.style.width = Math.round(a.progress * 100) + "%";
     bar.append(fill);
-    card.append(bar);
     const steps = a.plan || [];
     const doneCount = steps.filter(s => s.state === "done").length;
-    card.append(el("div", "muted", `${doneCount}/${steps.length} bước`));
+    const row = el("div", "assign-progress");
+    row.append(bar, el("span", "assign-meta", `${doneCount}/${steps.length} bước`));
+    card.append(row);
   }
 
   (a.plan || []).forEach(s => {
     const row = el("div", "step step-" + s.state);
     row.append(el("span", "step-name", s.step || ""));
-    row.append(el("span", "muted", [s.owner, s.eta].filter(Boolean).join(" · ")));
+    row.append(el("span", "step-meta", [s.owner, s.eta].filter(Boolean).join(" · ")));
     card.append(row);
   });
 
-  if (a.note) card.append(el("div", "assign-note muted", a.note));
+  if (a.note) card.append(el("div", "assign-note", a.note));
   return card;
 }
 
 function renderAssignments(rows) {
   const open = rows.filter(a => !["done", "cancelled"].includes(a.status));
   const panel = document.getElementById("assignments");
-  const head = el("h2", null, "Việc đang giao");
+  const head = zoneHead("Việc đang giao");
   if (!open.length) {
-    panel.replaceChildren(head, el("p", "muted", "Chưa có việc nào được giao."));
+    panel.replaceChildren(head, el("p", null, "Chưa có việc nào được giao — nhắn cho Manager để giao một kết quả."));
     return;
   }
   panel.replaceChildren(head, ...open.map(assignCard));
@@ -1033,7 +1008,7 @@ async function pollEscalations() {
     const panel = document.getElementById("decisions");
     panel.classList.remove("has-signal");   // a failed fetch is unknown, never a stale signal
     panel.replaceChildren(
-      el("h2", null, "Cần bạn quyết"),
+      zoneHead("Cần bạn quyết"),
       el("p", "empty err", "Không tải được: " + err));
     renderCounters(lastAssignments, lastEscalations.needs_human || [], pollFailures);
     return;
@@ -1055,7 +1030,7 @@ async function pollAssignments() {
   pollFailures.assignments = !!err;
   if (err) {
     document.getElementById("assignments").replaceChildren(
-      el("h2", null, "Việc đang giao"),
+      zoneHead("Việc đang giao"),
       el("p", "empty err", "Không tải được: " + err));
     renderCounters(lastAssignments, lastEscalations.needs_human || [], pollFailures);
     return;
@@ -1120,9 +1095,13 @@ function sourceLabel(source) {
 // isn't a direct reply to the CTO so proactive work (incl. the daemon's system-role wake message)
 // stays visible instead of blending in as a silent aside. Chat text is untrusted model/worker
 // output — textContent only, never innerHTML.
+const SPEAKER = { cto: "CTO", manager: "Manager", system: "Hệ thống" };
+
 function chatRow(e) {
-  const row = el("div", `msg msg-${e.role}` + (e.source !== "cto" ? " msg-auto" : ""));
-  if (e.source !== "cto") row.append(el("div", "msg-why", sourceLabel(e.source)));
+  const auto = e.source !== "cto";
+  const row = el("div", `msg msg-${e.role}` + (auto ? " msg-auto" : ""));
+  const who = SPEAKER[e.role] || e.role;
+  row.append(el("div", "msg-who", auto ? `${who} · ${sourceLabel(e.source)}` : who));
   row.append(el("div", "msg-text", e.text || ""));
   return row;
 }
@@ -1132,7 +1111,7 @@ function renderChatLog(payload) {
   if (!log) return;
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   const rows = (payload.entries || []).map(chatRow);
-  if (payload.busy) rows.push(el("div", "msg msg-thinking", "Manager đang xử lý…"));
+  if (payload.busy) rows.push(el("div", "msg-thinking", "Manager đang xử lý…"));
   // No history yet is not an error — invite the first message instead of a blank box.
   if (!rows.length) rows.push(el("div", "empty", "Chưa có tin nhắn nào — nhắn để giao việc, đổi ưu tiên, hoặc hỏi tiến độ."));
   log.replaceChildren(...rows);
@@ -1184,7 +1163,9 @@ async function pollChat() {
     // honest state, not a silently frozen panel — but never touch the composer itself here,
     // whether or not it's focused, so a stretch of poll failures can't cost typed text either.
     ensureChatShell();
-    document.getElementById("chat-log").replaceChildren(el("div", "msg msg-error", "Không tải được chat: " + err));
+    const row = el("div", "msg msg-error");
+    row.append(el("div", "msg-text", "Không tải được chat: " + err));
+    document.getElementById("chat-log").replaceChildren(row);
     return;
   }
   renderChat(data);
