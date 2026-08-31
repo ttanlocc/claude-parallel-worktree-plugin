@@ -150,8 +150,9 @@ absolute registry path.
 The manager's `claude` subprocess also runs with the repo root as its working directory, and that
 is where Claude Code resolves its permission settings from — a manager started from the plugin's
 own directory (or any other cwd) can silently lose the tool access the target repo grants.
-`dashboard.py` and `manager_daemon.py` both set this from the repo they're serving; `PWT_REPO_ROOT`
-overrides it directly.
+`dashboard.py` resolves this from the repo it's serving (an explicit argv path, else its own cwd);
+`manager_daemon.py` takes no repo argument and serves no repo, so it always falls back to its own
+cwd. `PWT_REPO_ROOT` overrides both and wins over either's own resolution.
 
 The manager sizes each worker instead of dispatching everything on one model:
 

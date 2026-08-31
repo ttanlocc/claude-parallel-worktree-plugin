@@ -265,13 +265,14 @@ def process_open(path: str, ask_model, deliver) -> list[dict]:
 
 
 def main() -> None:
-    # Same env-or-cwd fallback as manager_session.REPO_ROOT's own default — set explicitly
-    # rather than left implicit, so a daemon started from anywhere still runs the manager's
-    # `claude` subprocess in the repo it manages, not wherever it happened to be launched from.
-    # Not derived from registry_path(): PWT_REGISTRY can point that file at an arbitrary
-    # location with no repo above it, and stripping `.claude/worktrees/...` off of it would
-    # silently produce the wrong directory instead of a clear one.
-    manager_session.REPO_ROOT = os.environ.get("PWT_REPO_ROOT") or os.getcwd()
+    # Same precedence as dashboard.py's main() — both resolve via manager_session.resolve_repo_root(),
+    # the one place PWT_REPO_ROOT / argv / cwd precedence is decided, so the two entry points that
+    # feed the SAME manager session can never disagree on where its `claude` subprocess runs. The
+    # daemon takes no repo argument of its own, so this collapses to PWT_REPO_ROOT-or-cwd. Not
+    # derived from registry_path(): PWT_REGISTRY can point that file at an arbitrary location with
+    # no repo above it, and stripping `.claude/worktrees/...` off of it would silently produce the
+    # wrong directory instead of a clear one.
+    manager_session.REPO_ROOT = manager_session.resolve_repo_root()
     path = sys.argv[1] if len(sys.argv) > 1 else QUEUE_PATH
     # flush=True: stdout is block-buffered once it is not a tty (the normal case for a
     # backgrounded daemon), so without it these lines can sit in the buffer indefinitely and an

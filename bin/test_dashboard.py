@@ -689,6 +689,54 @@ def test_get_escalations_normalizes_a_bare_string_options_field():
         _os.unlink(path)
 
 
+def test_argv_repo_dir_extracts_the_non_numeric_arg():
+    import dashboard
+
+    assert dashboard._argv_repo_dir(["4400", "/some/repo"]) == "/some/repo"
+
+
+def test_argv_repo_dir_none_when_only_a_port_is_given():
+    import dashboard
+
+    assert dashboard._argv_repo_dir(["4400"]) is None
+
+
+def test_argv_repo_dir_none_with_no_args():
+    import dashboard
+
+    assert dashboard._argv_repo_dir([]) is None
+
+
+def test_parse_ado_refs_allowlists_http_and_https_only():
+    """An untrusted ado_refs[].url reaches an <a href> in dashboard.html with no CSP — the manager
+    also writes ledger records straight through assignments.append(rec) with no validation at
+    all, so this allowlist (not target="_blank", which does not block a javascript: URL in every
+    browser) is what stands between model-authored ado_refs and script execution on a page holding
+    the operator's ledger, chat, and escalation queue."""
+    import dashboard
+
+    raw = [
+        {"id": "1", "url": "javascript:alert(1)"},
+        {"id": "2", "url": "data:text/html,<script>alert(1)</script>"},
+        {"id": "3", "url": "//evil.example/redirect"},
+        {"id": "4", "url": ""},
+        {"id": "5", "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/5"},
+    ]
+    by_id = {r["id"]: r["url"] for r in dashboard._parse_ado_refs(raw)}
+    assert by_id["1"] == "", "javascript: must not reach the page"
+    assert by_id["2"] == "", "data: must not reach the page"
+    assert by_id["3"] == "", "a scheme-relative URL must not reach the page"
+    assert by_id["4"] == ""
+    assert by_id["5"] == "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/5"
+
+
+def test_parse_ado_refs_allowlist_is_case_insensitive_on_the_scheme():
+    import dashboard
+
+    by_id = {r["id"]: r["url"] for r in dashboard._parse_ado_refs([{"id": "1", "url": "HTTPS://Example.com/x"}])}
+    assert by_id["1"] == "HTTPS://Example.com/x"
+
+
 def test_ticket_dispatch_helpers_are_gone():
     import dashboard
 

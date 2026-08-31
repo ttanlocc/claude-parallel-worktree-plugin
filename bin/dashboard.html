@@ -363,6 +363,14 @@ function el(tag, cls, text) {
   if (text != null) n.textContent = text;   // textContent everywhere: names never parse as HTML
   return n;
 }
+// ref.url (ado_refs[].url, from assignments.jsonl) is model/worker-authored — dashboard.py's own
+// _parse_ado_refs allowlists http(s) on the POST path, but the manager also writes ledger records
+// straight through assignments.append(rec) with no validation at all, so this page has no CSP and
+// must not trust the value at the sink either. "" (never trusted) falls through to the caller's
+// own "#" fallback, exactly like a url that was absent entirely.
+function safeHref(url) {
+  return /^https?:\/\//i.test(url || "") ? url : "";
+}
 // tone is one of "" (grey) | on-line | on-ink | on-red | on-blue — see the two-pencil rule at
 // the top of the stylesheet.
 function pill(tone, label) {
@@ -680,7 +688,7 @@ function assignRefs(a, byTicket) {
     const row = byTicket[String(ref.id)];
     const pair = el("span", "ref-pair");
     const id = el("a", null, "AB#" + ref.id);
-    id.href = (row && row.href) || ref.url || "#"; id.target = "_blank"; id.rel = "noopener";
+    id.href = (row && row.href) || safeHref(ref.url) || "#"; id.target = "_blank"; id.rel = "noopener";
     pair.append(id);
     if (row && row.prLabel) {
       const state = PR_STATE_LABEL[row.prState] || (row.prState || "").toLowerCase();

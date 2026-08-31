@@ -123,6 +123,52 @@ def test_repo_root_falls_back_to_cwd_when_the_env_var_is_unset():
     assert _os.getcwd() == _REPO_ROOT_AT_IMPORT
 
 
+def test_resolve_repo_root_prefers_env_over_argv_and_cwd():
+    """PWT_REPO_ROOT must win even when an entry point also resolved an explicit argv repo —
+    dashboard.py used to let its own argv-or-cwd value win unconditionally, ignoring the env var
+    entirely. `env`/`cwd_fn` are injected rather than mutating the real os.environ/os.getcwd, so
+    this needs no monkeypatch-and-restore."""
+    resolved = ms.resolve_repo_root("/argv/repo", env={"PWT_REPO_ROOT": "/env/repo"}, cwd_fn=lambda: "/cwd/repo")
+    assert resolved == "/env/repo"
+
+
+def test_resolve_repo_root_falls_back_to_argv_when_env_is_unset():
+    resolved = ms.resolve_repo_root("/argv/repo", env={}, cwd_fn=lambda: "/cwd/repo")
+    assert resolved == "/argv/repo"
+
+
+def test_resolve_repo_root_falls_back_to_cwd_when_neither_env_nor_argv_is_set():
+    """This is manager_daemon.py's own case exactly: it calls resolve_repo_root() with no argv
+    repo of its own (it takes no repo argument and serves no repo)."""
+    resolved = ms.resolve_repo_root(None, env={}, cwd_fn=lambda: "/cwd/repo")
+    assert resolved == "/cwd/repo"
+
+
+def test_resolve_repo_root_uses_the_real_environ_and_cwd_by_default():
+    """The injected env/cwd_fn parameters must not change the function's real-world behaviour —
+    calling it exactly as both main()s do (module defaults only) still reads the process's own
+    environment and working directory."""
+    assert "PWT_REPO_ROOT" not in _os.environ, "test env must not already override this"
+    assert ms.resolve_repo_root() == _os.getcwd()
+
+
+def test_dashboard_and_daemon_entry_points_agree_on_repo_root_when_env_is_set():
+    """The bug this pins: dashboard.py's main() used to ignore PWT_REPO_ROOT entirely and always
+    win with its own argv-or-cwd value, so with the env var set the CTO's chat (dashboard.py) and
+    the daemon's tick/escalation/wake turns (manager_daemon.py) resolved manager_session.REPO_ROOT
+    to two different directories — the same manager session, run from two working directories,
+    depending only on which entry point last woke it. Both entry points now call this one function
+    with the same env, so they cannot disagree by construction; this proves it with dashboard.py's
+    own argv-parsing helper feeding it, exactly as dashboard.main() does."""
+    import dashboard
+
+    env = {"PWT_REPO_ROOT": "/env/repo"}
+    dashboard_argv_repo = dashboard._argv_repo_dir(["4400", "/some/other/repo"])
+    dashboard_resolved = ms.resolve_repo_root(dashboard_argv_repo, env=env, cwd_fn=lambda: "/cwd/repo")
+    daemon_resolved = ms.resolve_repo_root(env=env, cwd_fn=lambda: "/cwd/repo")  # daemon has no argv of its own
+    assert dashboard_resolved == daemon_resolved == "/env/repo"
+
+
 def test_both_turns_reach_the_chat_log_with_their_source():
     _isolate()
     ms.ask("wake up", "daemon:tick", run=_Recorder(result="on it"))

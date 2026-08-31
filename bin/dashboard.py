@@ -520,11 +520,20 @@ def _manager_chat_post(text: str, busy=None, start=None) -> tuple[int, dict]:
     return 202, {"ok": True}
 
 
+_SAFE_URL_SCHEMES = ("http://", "https://")
+
+
 def _parse_ado_refs(raw):
     """Normalise the ado_refs field, raising ValueError with a caller-facing message.
 
     A list of bare id strings is the shape the retired ticket-dispatch route used, so it is the
     mistake a caller is most likely to make. It must produce a 400, not a dropped connection.
+
+    `url` ends up in an `<a href>` in dashboard.html with no CSP on the page — the manager also
+    writes ledger records straight through `assignments.append(rec)` with no validation at all, so
+    this is the only check some of these values ever see. Anything other than http(s)
+    (`javascript:`, `data:`, a scheme-relative `//host`) becomes "" rather than reaching the page,
+    the same default-to-safe treatment a non-string url already got.
     """
     if raw is None:
         return []
@@ -538,7 +547,9 @@ def _parse_ado_refs(raw):
         if not isinstance(rid, str) or not rid.strip():
             raise ValueError("each ado_refs entry needs a non-empty string id")
         url = item.get("url")
-        refs.append({"id": rid, "url": url if isinstance(url, str) else ""})
+        if not (isinstance(url, str) and url.lower().startswith(_SAFE_URL_SCHEMES)):
+            url = ""
+        refs.append({"id": rid, "url": url})
     return refs
 
 
@@ -762,14 +773,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass  # ponytail: quiet by default; add real logging if this needs debugging later
 
 
+def _argv_repo_dir(args: list[str]) -> str | None:
+    """The explicit repo dir from dashboard.py's own argv (port and flags already stripped), or
+    None when the caller didn't pass one. See manager_session.resolve_repo_root() for how this
+    combines with PWT_REPO_ROOT and cwd — the same precedence manager_daemon.py's main() uses."""
+    repo_args = [a for a in args if not a.isdigit()]
+    return os.path.abspath(repo_args[0]) if repo_args else None
+
+
 def main():
     global REPO_DIR
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     port = int(args[0]) if args and args[0].isdigit() else 4400
-    repo_args = [a for a in args if not a.isdigit()]
-    REPO_DIR = os.path.abspath(repo_args[0]) if repo_args else os.getcwd()
-    # The manager's `claude` subprocess must run in the same repo this dashboard serves —
-    # that's where Claude Code resolves its permission settings from (see manager_session.REPO_ROOT).
+    # PWT_REPO_ROOT first, then this argv, then cwd — manager_daemon.py's main() uses the same
+    # precedence (it just has no argv tier of its own). Both feed the SAME manager session, so the
+    # manager's `claude` subprocess (and the Claude Code permissions it resolves from cwd) must
+    # land in the same place regardless of which entry point last woke it.
+    REPO_DIR = manager_session.resolve_repo_root(_argv_repo_dir(args))
     manager_session.REPO_ROOT = REPO_DIR
 
     # Fail loudly at startup rather than serving 500s: a wrong repo dir is the

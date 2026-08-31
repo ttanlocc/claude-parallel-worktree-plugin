@@ -29,11 +29,25 @@ CHARTER_PATH = os.path.join(
 MANAGER_MODEL = os.environ.get("PWT_MANAGER_MODEL", "claude-opus-5")
 MANAGER_EFFORT = os.environ.get("PWT_MANAGER_EFFORT", "max")
 
+
+def resolve_repo_root(argv_repo: str | None = None, env=None, cwd_fn=os.getcwd) -> str:
+    """PWT_REPO_ROOT (from `env`) first, then an explicit repo dir an entry point resolved from
+    its own argv, then `cwd_fn()`.
+
+    dashboard.py and manager_daemon.py both feed the SAME manager session — if they used
+    different precedence here, the manager's `claude` subprocess (and the Claude Code permissions
+    it resolves from cwd) would depend on which of the two last woke it, not on anything the
+    operator configured. The daemon takes no repo argument of its own, so calling this with
+    argv_repo=None there collapses it to PWT_REPO_ROOT-or-cwd.
+    """
+    env = env if env is not None else os.environ
+    return env.get("PWT_REPO_ROOT") or argv_repo or cwd_fn()
+
+
 # Claude Code resolves permission settings from the subprocess's cwd, so the manager's tool
 # access silently depends on where it runs, not on anything in this file. dashboard.py and
-# manager_daemon.py both set this from the repo they're serving; PWT_REPO_ROOT overrides
-# directly for anything that doesn't.
-REPO_ROOT = os.environ.get("PWT_REPO_ROOT") or os.getcwd()
+# manager_daemon.py both resolve this the same way, by calling resolve_repo_root() above.
+REPO_ROOT = resolve_repo_root()
 
 # ponytail: global lock, per-account locks if throughput matters. 300s = background threads never
 # starve while an HTTP request waits; a short timeout drops daemon wakes with no UI retry surface.
