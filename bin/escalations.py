@@ -127,6 +127,24 @@ def _sensitive(changed_files) -> str | None:
     return None
 
 
+def normalize_options(raw) -> list[str]:
+    """Coerce a record's `options` field to a list of strings, tolerating on-disk drift.
+
+    `options` is worker-authored against a prose schema, not a validated contract — the same
+    tolerance _as_text/_sensitive give evidence's fields above. A list keeps only its string
+    items (a stray non-string entry is dropped, not stringified — it is not a label any worker
+    actually offered). A bare string is one option, not a sequence of characters to iterate
+    one-by-one, so it becomes a single-item list. Anything else yields no options rather than
+    raising — a caller that does `for opt in options` must never receive something it cannot
+    safely walk.
+    """
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, str)]
+    if isinstance(raw, str):
+        return [raw]
+    return []
+
+
 def classify(record: dict) -> tuple[str, str]:
     """Route one record: ("tier2", reason) the manager may decide, or ("tier3", reason) for a human.
 
@@ -175,6 +193,25 @@ def classify(record: dict) -> tuple[str, str]:
     return "tier3", f"unknown kind {kind!r} — defaulting to a human"
 
 
+def is_undeliverable(record: dict) -> bool:
+    """True for a `needs_human` record that already carries a decided answer nobody could
+    deliver — not a genuine open question still waiting on human judgement.
+
+    manager_daemon.py's `_try_deliver` is the only place that ever stamps `delivery_attempts`
+    onto a record, and it flips `status` to `needs_human` only once attempts are exhausted — so
+    this trio (status, a non-null answer, a non-null delivery_attempts) co-occurs only on a
+    record that failed delivery, whether the answer came from the manager or a human. A record
+    that reaches needs_human via process_open's other branch (the manager punting on an open
+    question) carries neither field: new_record() never sets them, and that branch never touches
+    them either.
+    """
+    return (
+        record.get("status") == "needs_human"
+        and record.get("answer") is not None
+        and record.get("delivery_attempts") is not None
+    )
+
+
 def current_state(path: str) -> list[dict]:
     """Fold the append-only log into the latest state of each record, in first-seen order."""
     latest: dict[str, dict] = {}
@@ -197,6 +234,25 @@ def record_answer(path: str, record_id: str, answer: str, decided_by: str) -> di
             updated["answer"] = answer
             updated["decided_by"] = decided_by
             updated["status"] = "answered"
+            updated["answered_at"] = time.time()
+            append(path, updated)
+            return updated
+    return None
+
+
+def record_dismiss(path: str, record_id: str, decided_by: str) -> dict | None:
+    """Retire a record by appending an updated copy with a terminal status. Returns the update,
+    or None if unknown id.
+
+    Append-only, like record_answer: the prior needs_human line is never edited, only
+    superseded — current_state() folds to this newer copy, so get_escalations() stops offering
+    it under needs_human without needing any filtering logic of its own.
+    """
+    for rec in current_state(path):
+        if rec.get("id") == record_id:
+            updated = dict(rec)
+            updated["status"] = "dismissed"
+            updated["decided_by"] = decided_by
             updated["answered_at"] = time.time()
             append(path, updated)
             return updated

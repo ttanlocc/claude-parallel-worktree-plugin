@@ -1,119 +1,38 @@
 #!/usr/bin/env python3
 """Live status/log dashboard for parallel-task.sh copies."""
 
-import html
-import json
-import re
-
-
-def _flatten_tool_result(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-        return " ".join(parts)
-    return ""
-
-
-def render_transcript_line(obj: dict) -> list[dict]:
-    """Return zero or more renderable records for one transcript JSON record.
-
-    Each record is {"kind": "text"|"call"|"result", "role", "tool", "text"}. "call" records also
-    carry "call_id" and "result" records carry "result_for" (both from the tool_use/tool_result
-    id pairing) — render_task_log uses those to redact a credential-looking call's own result,
-    then strips them before returning.
-    """
-    if obj.get("type") not in ("user", "assistant"):
-        return []
-    message = obj.get("message")
-    if not isinstance(message, dict):
-        return []
-    role = message.get("role") or obj.get("type")
-    content = message.get("content")
-    if isinstance(content, str):
-        return [{"kind": "text", "role": role, "tool": None, "text": content}]
-    if not isinstance(content, list):
-        return []
-    lines = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type == "text":
-            text = item.get("text", "")
-            if text:
-                lines.append({"kind": "text", "role": role, "tool": None, "text": text})
-        elif item_type == "tool_use":
-            name = item.get("name", "?")
-            args = item.get("input") or {}
-            preview = args.get("command") or args.get("file_path") or json.dumps(args)
-            lines.append({"kind": "call", "role": role, "tool": name, "text": str(preview), "call_id": item.get("id")})
-        elif item_type == "tool_result":
-            lines.append(
-                {
-                    "kind": "result",
-                    "role": role,
-                    "tool": None,
-                    "text": _flatten_tool_result(item.get("content")),
-                    "result_for": item.get("tool_use_id"),
-                }
-            )
-    return lines
-
-
-# Heuristic, not a secret scanner: catches a command that NAMES what it's after (grep for
-# "personal access token", reading a .pem, etc). It cannot catch a bare secret value with no
-# label, so it works by redacting the credential-looking CALL and, via call_id/result_for,
-# that same call's result — not by scanning result text for secret-shaped content.
-# ponytail: keyword heuristic: misses secrets with no label in the command; upgrade to a real
-# secret-scanner (e.g. detect-secrets) if this misses cases in practice.
-_SENSITIVE_RE = re.compile(r"(?i)personal access token|api[_ -]?key|password|private key|-----BEGIN|secret")
-_REDACTED = "[redacted — this call touches a credential]"
-_MAX_LINE_CHARS = 400
-
-
-def render_task_log(transcript_path: str, limit: int = 200) -> list[dict]:
-    """Read a session transcript JSONL file and return the last `limit` rendered records,
-    with credential-looking tool calls (and their matching results) redacted."""
-    records: list[dict] = []
-    sensitive_ids: set[str] = set()
-    with open(transcript_path, encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            for rec in render_transcript_line(obj):
-                call_id = rec.pop("call_id", None)
-                result_for = rec.pop("result_for", None)
-                if rec["kind"] == "call" and _SENSITIVE_RE.search(rec["text"]):
-                    if call_id:
-                        sensitive_ids.add(call_id)
-                    rec["text"] = _REDACTED
-                elif rec["kind"] == "result" and result_for in sensitive_ids:
-                    rec["text"] = _REDACTED
-                if len(rec["text"]) > _MAX_LINE_CHARS:
-                    rec["text"] = rec["text"][:_MAX_LINE_CHARS] + "…"
-                records.append(rec)
-    return records[-limit:]
-
-
 import http.server
+import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 from urllib.parse import urlparse
 
-from escalations import QUEUE_PATH, classify, current_state, record_answer
+import assignments as ledger
+import manager_session
+from escalations import (
+    QUEUE_PATH,
+    classify,
+    current_state,
+    is_undeliverable,
+    normalize_options,
+    record_answer,
+    record_dismiss,
+)
 
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
 MAX_BODY_BYTES = 64 * 1024
+
+
+class _BodyTooLarge(ValueError):
+    """Raised by Handler._read_json_body() when Content-Length exceeds MAX_BODY_BYTES, so callers
+    can map it to 413 — the one status code that must survive that refactor unchanged, since every
+    other bad-body error there gets 400."""
+
 
 # Every subprocess-wrapping function below degrades silently on failure. TimeoutExpired
 # subclasses SubprocessError, not OSError, so it must be listed via SubprocessError (its actual
@@ -121,9 +40,15 @@ MAX_BODY_BYTES = 64 * 1024
 _SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
 
 
-def get_escalations() -> dict:
+def get_escalations(path: str = None) -> dict:
     """What the human still has to answer, and what the manager already decided for them."""
-    state = current_state(QUEUE_PATH)
+    path = path or QUEUE_PATH
+    state = current_state(path)
+    # options is worker-authored against a prose schema (same tolerance assignments.py gives
+    # `plan`) — normalize the in-memory copy so every consumer downstream gets a real list, no
+    # matter what shape actually landed on disk. Never rewritten to the queue file itself.
+    for r in state:
+        r["options"] = normalize_options(r.get("options"))
     needs_human = [r for r in state if r.get("status") == "needs_human"]
     for r in state:
         if r.get("status") == "open":
@@ -136,6 +61,23 @@ def get_escalations() -> dict:
     decisions = [r for r in state if r.get("decided_by") == "manager"]
     decisions.sort(key=lambda r: r.get("answered_at") or 0, reverse=True)
     return {"needs_human": needs_human, "recent_decisions": decisions[:20]}
+
+
+def get_assignments(path: str = None, now: float = None) -> list[dict]:
+    """Every assignment, each decorated with the three derived values the UI needs."""
+    path = path or ledger.LEDGER_PATH
+    now = now if now is not None else time.time()
+    rows = []
+    for rec in current_state(path):
+        rows.append(
+            {
+                **rec,
+                "at_risk": ledger.at_risk(rec, now),
+                "stalled": ledger.stalled(rec, now),
+                "progress": ledger.progress(rec),
+            }
+        )
+    return rows
 
 
 # The repo whose copies we report on. Set once in main(); `parallel-task.sh` finds
@@ -319,100 +261,6 @@ def _shape_ado_ticket(raw: dict) -> dict:
     }
 
 
-_TAG_RE = re.compile(r"<[^>]+>")
-_SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
-
-
-def _ticket_task_slug(title: str) -> str:
-    ascii_title = title.encode("ascii", "ignore").decode("ascii")
-    slug = _SLUG_STRIP_RE.sub("-", ascii_title.lower()).strip("-")
-    return slug[:40].strip("-") or "ticket"
-
-
-def _build_dispatch_prompt(tickets: list[dict], instructions: str) -> str:
-    sections = []
-    for t in tickets:
-        sections.append(f"AB#{t['id']}: {t['title']}\n{t['description']}")
-    body = "\n\n".join(sections)
-    parts = [
-        "You've been assigned the following ticket(s):",
-        body,
-    ]
-    if instructions.strip():
-        parts.append(f"Extra instructions from the manager:\n{instructions.strip()}")
-    parts.append(
-        "Follow this repo's CLAUDE.md conventions. Before reporting done: run the relevant "
-        "tests and confirm they're green, and verify the actual behavior — don't mark this "
-        "complete on a self-report alone."
-    )
-    return "\n\n".join(parts)
-
-
-def _build_dispatch_argv(slug: str, mode: str, ticket_ids: list[str]) -> list[str]:
-    argv = [PARALLEL_TASK_SH, "start", slug, mode]
-    for tid in ticket_ids:
-        argv += ["--ticket", tid]
-    return argv
-
-
-def _parse_ticket_ids(raw) -> list[str]:
-    """raw is body.get('ticket_ids'): absent/empty (None, [], "", 0, False) means no tickets
-    requested, same as before. Anything else must be a list — a bare string would otherwise pass
-    the caller's `if not ticket_ids` check by iterating into its own characters, and a bare number
-    would raise an uncaught TypeError when iterated. Raises ValueError, caught by do_POST's
-    existing body-parsing except block."""
-    if not raw:
-        return []
-    if not isinstance(raw, list):
-        raise ValueError("ticket_ids must be a list")
-    return [str(i) for i in raw]
-
-
-def _run_dispatch(start_argv: list[str], slug: str, prompt: str) -> tuple[int, dict]:
-    """Runs `parallel-task.sh start` then `dispatch` for an already-validated request. Returns
-    (http_status, body) instead of letting a subprocess failure (timeout, or the script missing/
-    non-executable) cross into do_POST uncaught and drop the connection with no response."""
-    try:
-        start_result = subprocess.run(start_argv, capture_output=True, text=True, cwd=REPO_DIR, timeout=180)
-    except (subprocess.SubprocessError, OSError) as e:
-        return 500, {"error": f"start failed: {e}"}
-    if start_result.returncode != 0:
-        return 500, {"error": f"start failed: {start_result.stderr[-2000:]}"}
-
-    try:
-        dispatch_result = subprocess.run(
-            [PARALLEL_TASK_SH, "dispatch", slug, prompt], capture_output=True, text=True, cwd=REPO_DIR, timeout=60
-        )
-    except (subprocess.SubprocessError, OSError) as e:
-        return 500, {"error": f"dispatch failed: {e}"}
-    if dispatch_result.returncode != 0:
-        return 500, {"error": f"dispatch failed: {dispatch_result.stderr[-2000:]}"}
-
-    return 200, {"ok": True, "task": slug}
-
-
-def _strip_html(raw: str) -> str:
-    text = _TAG_RE.sub(" ", raw)
-    text = html.unescape(text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _fetch_ado_description(ticket_id: str) -> str:
-    try:
-        result = subprocess.run(
-            ["az", "boards", "work-item", "show", "--id", ticket_id, "--org", _ADO_ORG, "-o", "json"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0:
-            return ""
-        fields = json.loads(result.stdout).get("fields") or {}
-        return _strip_html(fields.get("System.Description") or "")
-    except _SUBPROC_ERRORS:
-        return ""
-
-
 def get_ado_backlog() -> list[dict]:
     """Tickets assigned to you, not closed — the manager's read-only view into ADO. Any
     failure (az not authenticated, network down) degrades to an empty backlog, same as every
@@ -495,17 +343,155 @@ def get_tasks() -> list[dict]:
     return rows
 
 
-def _slugify_cwd(path: str) -> str:
-    return path.replace("/", "-").replace(".", "-")
+def start_manager_turn(text: str, source: str, ask=None) -> threading.Thread:
+    """Run one manager turn off the request thread.
+
+    A manager call takes tens of seconds and may take ten minutes; holding an HTTP request open for
+    it would stall the browser and time out the fetch. The turn is already recorded in the chat log
+    by ask(), so the UI learns the answer by polling GET /api/manager/chat.
+
+    The target is a wrapper, not ask() itself: ask() can still raise ManagerBusy if the lock wait
+    times out (a second turn arriving while this one already holds the lock past LOCK_TIMEOUT), and
+    manager_session logs that to the chat before re-raising — so all that's left to do here is stop
+    it (or anything else ask() raises) from escaping as an unhandled-thread traceback.
+    """
+    ask = ask or manager_session.ask
+
+    def _run() -> None:
+        try:
+            ask(text, source)
+        except Exception as e:
+            print(f"manager turn failed: {e}", file=sys.stderr)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread
 
 
-def transcript_path_for(task: dict) -> str | None:
-    session_id = task.get("session_id")
-    wt_path = task.get("path")
-    if not session_id or not wt_path:
-        return None
-    home = os.path.expanduser("~")
-    return os.path.join(home, ".claude", "projects", _slugify_cwd(wt_path), f"{session_id}.jsonl")
+def manager_chat_payload(history=None, busy=None) -> dict:
+    """Chat entries plus whether a turn is in flight. Degrades to empty, never raises."""
+    history = history or manager_session.history
+    busy = busy or manager_session.busy
+    try:
+        entries = history()
+    except (OSError, ValueError):
+        entries = []
+    try:
+        in_flight = busy()
+    except OSError:
+        in_flight = False
+    return {"entries": entries, "busy": in_flight}
+
+
+# Serialises the busy-check-and-spawn pair so a burst of requests cannot each spawn a paid
+# manager turn in the window before the first one acquires the session lock.
+# ponytail: process-local only — a second dashboard process, or the daemon, can still race
+# this; manager_session's own flock is what keeps that safe, at the cost of a redundant call.
+_MANAGER_SPAWN_LOCK = threading.Lock()
+
+
+def _manager_chat_post(text: str, busy=None, start=None) -> tuple[int, dict]:
+    """(status, body) for a manager/chat POST.
+
+    The busy check happens here, on the request thread, before anything is spawned:
+    start_manager_turn returns as soon as its thread is launched, so the ManagerBusy that thread's
+    ask() can raise happens inside it, never on the thread that's still holding this request — a
+    `try/except ManagerBusy` wrapped around start_manager_turn would never see it. Checking busy()
+    first gives the caller the same 503 signal from a place that can actually return it.
+
+    busy() and start() are serialised by _MANAGER_SPAWN_LOCK: without it, a burst of concurrent
+    requests can each observe busy()==False in the window before the first one's spawned thread
+    reaches manager_session's own flock, and each would spawn its own paid manager call. The lock
+    covers only this fast check-then-spawn pair, never the model call itself, so no request is held
+    across it. start() can also raise RuntimeError (thread.start() under OS thread exhaustion) —
+    caught here so this route returns 503 instead of dropping the connection.
+    """
+    busy = busy or manager_session.busy
+    start = start or start_manager_turn
+    with _MANAGER_SPAWN_LOCK:
+        if busy():
+            return 503, {"error": "manager busy"}
+        try:
+            start(text, "cto")
+        except RuntimeError as e:
+            return 503, {"error": f"could not start manager turn: {e}"}
+    return 202, {"ok": True}
+
+
+_SAFE_URL_SCHEMES = ("http://", "https://")
+
+
+def _parse_ado_refs(raw):
+    """Normalise the ado_refs field, raising ValueError with a caller-facing message.
+
+    A list of bare id strings is the shape the retired ticket-dispatch route used, so it is the
+    mistake a caller is most likely to make. It must produce a 400, not a dropped connection.
+
+    `url` ends up in an `<a href>` in dashboard.html with no CSP on the page — the manager also
+    writes ledger records straight through `assignments.append(rec)` with no validation at all, so
+    this is the only check some of these values ever see. Anything other than http(s)
+    (`javascript:`, `data:`, a scheme-relative `//host`) becomes "" rather than reaching the page,
+    the same default-to-safe treatment a non-string url already got.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("ado_refs must be a list")
+    refs = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("each ado_refs entry must be an object with id and url")
+        rid = item.get("id")
+        if not isinstance(rid, str) or not rid.strip():
+            raise ValueError("each ado_refs entry needs a non-empty string id")
+        url = item.get("url")
+        if not (isinstance(url, str) and url.lower().startswith(_SAFE_URL_SCHEMES)):
+            url = ""
+        refs.append({"id": rid, "url": url})
+    return refs
+
+
+def _assignments_post(body, append_fn=None, start=None):
+    """Record one assignment and tell the manager. Returns (status, payload); never raises.
+
+    The ledger write is what must not be lost — it is the durable commitment. Failing to notify
+    the manager is reported but does not fail the request, because the daemon's tick walks open
+    assignments and will rediscover it.
+    """
+    append_fn = append_fn or ledger.append
+    start = start or start_manager_turn
+    try:
+        refs = _parse_ado_refs(body.get("ado_refs"))
+        title = body.get("title") or ""
+        if not isinstance(title, str):
+            raise ValueError("title must be a string")
+        record = ledger.new_assignment(
+            title,
+            priority=body.get("priority") or "P1",
+            deadline=body.get("deadline"),
+            ado_refs=refs,
+        )
+    except (ValueError, AttributeError, TypeError) as e:
+        # Broad on purpose: this is a request boundary, and every JSON type a caller can send must
+        # become a 400. Dropping the connection with no response is strictly worse than a 400 that
+        # names the wrong cause.
+        return 400, {"error": str(e)}
+    try:
+        append_fn(record)
+    except OSError as e:
+        return 500, {"error": f"could not write the ledger: {e}"}
+    names = ", ".join(f"AB#{r['id']}" for r in record["ado_refs"]) or "none"
+    try:
+        start(
+            f"New assignment {record['id']}: {record['title']}\n"
+            f"Priority {record['priority']}, deadline {record['deadline'] or 'none'}, "
+            f"ADO refs: {names}.\n"
+            "It is already in the ledger. Plan it, size each step, dispatch, and confirm in one line.",
+            "cto",
+        )
+    except Exception as e:
+        return 202, {"ok": True, "record": record, "warning": f"manager not notified: {e}"}
+    return 202, {"ok": True, "record": record}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -517,6 +503,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _read_json_body(self) -> dict:
+        """Parse the POST body as a JSON object, enforcing MAX_BODY_BYTES. Raises ValueError with
+        the message to show the client — _BodyTooLarge (a ValueError subclass) for an oversized
+        body so callers can still give it its own status code, plain ValueError for anything else
+        wrong with the body."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError as e:
+            raise ValueError(f"bad request body: {e}") from e
+        if length > MAX_BODY_BYTES:
+            raise _BodyTooLarge("request body too large")
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"bad request body: {e}") from e
+        if not isinstance(body, dict):
+            raise ValueError("bad request body: body must be a JSON object")
+        return body
+
+    def _body_error(self, e: ValueError) -> None:
+        """The response for a _read_json_body() failure — 413 for an oversized body, 400 for
+        everything else _read_json_body() (or a route's own body-shape validation) raises."""
+        self._json({"error": str(e)}, status=413 if isinstance(e, _BodyTooLarge) else 400)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/tasks":
@@ -525,27 +535,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except (*_SUBPROC_ERRORS, subprocess.CalledProcessError) as e:
                 self._json({"error": str(e)}, status=500)
             return
-        if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/log"):
-            name = parsed.path[len("/api/tasks/") : -len("/log")]
-            try:
-                tasks = {t["task"]: t for t in get_tasks()}
-            except (*_SUBPROC_ERRORS, subprocess.CalledProcessError) as e:
-                self._json({"error": str(e)}, status=500)
-                return
-            task = tasks.get(name)
-            path = transcript_path_for(task) if task else None
-            if not path or not os.path.exists(path):
-                self._json({"status": "not-available"})
-                return
-            try:
-                self._json({"lines": render_task_log(path)})
-            except Exception as e:
-                self._json({"error": str(e)}, status=500)
-            return
         if parsed.path == "/api/escalations":
             try:
                 self._json(get_escalations())
             except Exception as e:
+                self._json({"error": str(e)}, status=500)
+            return
+        if parsed.path == "/api/assignments":
+            try:
+                self._json(get_assignments())
+            except (OSError, ValueError) as e:
                 self._json({"error": str(e)}, status=500)
             return
         if parsed.path == "/api/ado-tickets":
@@ -553,6 +552,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(get_ado_backlog())
             except Exception as e:
                 self._json({"error": str(e)}, status=500)
+            return
+        if parsed.path == "/api/manager/chat":
+            self._json(manager_chat_payload())
             return
         if parsed.path == "/":
             html_path = os.path.join(PLUGIN_BIN, "dashboard.html")
@@ -584,17 +586,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/escalations/") and parsed.path.endswith("/answer"):
             rid = parsed.path[len("/api/escalations/") : -len("/answer")]
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > MAX_BODY_BYTES:
-                    self._json({"error": "request body too large"}, status=413)
-                    return
-                body = json.loads(self.rfile.read(length) or b"{}")
-                if not isinstance(body, dict):
-                    raise ValueError("body must be a JSON object")
-                answer = (body.get("answer") or "").strip()
-            except (ValueError, json.JSONDecodeError) as e:
-                self._json({"error": f"bad request body: {e}"}, status=400)
+                body = self._read_json_body()
+            except ValueError as e:
+                self._body_error(e)
                 return
+            answer = (body.get("answer") or "").strip()
             if not answer:
                 self._json({"error": "answer is required"}, status=400)
                 return
@@ -625,36 +621,60 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self._json({"ok": True, "record": updated})
             return
-        if parsed.path == "/api/tickets/dispatch":
+        if parsed.path.startswith("/api/escalations/") and parsed.path.endswith("/dismiss"):
+            rid = parsed.path[len("/api/escalations/") : -len("/dismiss")]
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > MAX_BODY_BYTES:
-                    self._json({"error": "request body too large"}, status=413)
-                    return
-                body = json.loads(self.rfile.read(length) or b"{}")
-                if not isinstance(body, dict):
-                    raise ValueError("body must be a JSON object")
-                ticket_ids = _parse_ticket_ids(body.get("ticket_ids"))
-                instructions = str(body.get("instructions") or "")
-            except (ValueError, json.JSONDecodeError) as e:
-                self._json({"error": f"bad request body: {e}"}, status=400)
+                state = {r["id"]: r for r in current_state(QUEUE_PATH) if r.get("id")}
+            except OSError as e:
+                self._json({"error": str(e)}, status=500)
                 return
-            if not ticket_ids:
-                self._json({"error": "ticket_ids is required and must be non-empty"}, status=400)
+            existing = state.get(rid)
+            if existing is None:
+                self._json({"error": f"no escalation {rid}"}, status=404)
                 return
-
-            backlog_by_id = {t["id"]: t for t in get_ado_backlog()}
-            tickets = []
-            for tid in ticket_ids:
-                title = backlog_by_id.get(tid, {}).get("title", f"ticket {tid}")
-                tickets.append({"id": tid, "title": title, "description": _fetch_ado_description(tid)})
-
-            slug = _ticket_task_slug(tickets[0]["title"])
-            prompt = _build_dispatch_prompt(tickets, instructions)
-            start_argv = _build_dispatch_argv(slug, "native", ticket_ids)
-
-            status, resp = _run_dispatch(start_argv, slug, prompt)
+            # Scoped to the undeliverable shape on purpose, not every needs_human record: a
+            # genuine open escalation still wants a real answer, not a silent close.
+            if not is_undeliverable(existing):
+                self._json(
+                    {"error": f"escalation {rid} is not an undeliverable record", "record": existing},
+                    status=409,
+                )
+                return
+            try:
+                updated = record_dismiss(QUEUE_PATH, rid, "cto")
+            except OSError as e:
+                self._json({"error": str(e)}, status=500)
+                return
+            if updated is None:
+                self._json({"error": f"no escalation {rid}"}, status=404)
+                return
+            self._json({"ok": True, "record": updated})
+            return
+        if parsed.path == "/api/assignments":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._body_error(e)
+                return
+            status, resp = _assignments_post(body)
             self._json(resp, status=status)
+            return
+        if parsed.path == "/api/manager/chat":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._body_error(e)
+                return
+            text = (body.get("text") or "").strip()
+            if not text:
+                self._json({"error": "text is required"}, status=400)
+                return
+            status, resp = _manager_chat_post(text)
+            self._json(resp, status=status)
+            return
+        if parsed.path == "/api/manager/reset":
+            manager_session.reset()
+            self._json({"ok": True})
             return
         self.send_response(404)
         self.end_headers()
@@ -663,12 +683,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass  # ponytail: quiet by default; add real logging if this needs debugging later
 
 
+def _argv_repo_dir(args: list[str]) -> str | None:
+    """The explicit repo dir from dashboard.py's own argv (port and flags already stripped), or
+    None when the caller didn't pass one. See manager_session.resolve_repo_root() for how this
+    combines with PWT_REPO_ROOT and cwd — the same precedence manager_daemon.py's main() uses."""
+    repo_args = [a for a in args if not a.isdigit()]
+    return os.path.abspath(repo_args[0]) if repo_args else None
+
+
 def main():
     global REPO_DIR
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     port = int(args[0]) if args and args[0].isdigit() else 4400
-    repo_args = [a for a in args if not a.isdigit()]
-    REPO_DIR = os.path.abspath(repo_args[0]) if repo_args else os.getcwd()
+    # PWT_REPO_ROOT first, then this argv, then cwd — manager_daemon.py's main() uses the same
+    # precedence (it just has no argv tier of its own). Both feed the SAME manager session, so the
+    # manager's `claude` subprocess (and the Claude Code permissions it resolves from cwd) must
+    # land in the same place regardless of which entry point last woke it.
+    REPO_DIR = manager_session.resolve_repo_root(_argv_repo_dir(args))
+    manager_session.REPO_ROOT = REPO_DIR
 
     # Fail loudly at startup rather than serving 500s: a wrong repo dir is the
     # difference between "no copies running" and "you're looking at the wrong repo".

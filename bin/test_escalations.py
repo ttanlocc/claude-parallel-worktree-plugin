@@ -5,7 +5,17 @@ import json
 import os
 import tempfile
 
-from escalations import append, classify, current_state, new_record, read_all, record_answer
+from escalations import (
+    append,
+    classify,
+    current_state,
+    is_undeliverable,
+    new_record,
+    normalize_options,
+    read_all,
+    record_answer,
+    record_dismiss,
+)
 
 
 def _tmp():
@@ -44,6 +54,28 @@ def test_new_record_ids_are_unique():
     a = new_record("s", "k", "q")
     b = new_record("s", "k", "q")
     assert a["id"] != b["id"]
+
+
+def test_normalize_options_keeps_a_list_of_strings():
+    assert normalize_options(["Approve", "Reject"]) == ["Approve", "Reject"]
+
+
+def test_normalize_options_wraps_a_bare_string():
+    # The live bug: a record authored with options="Approve" instead of ["Approve"]. Must
+    # become a one-element list, never iterated character by character.
+    assert normalize_options("Approve") == ["Approve"]
+
+
+def test_normalize_options_drops_non_string_items_from_a_list():
+    assert normalize_options(["Approve", None, 3, {"x": 1}, "Reject"]) == ["Approve", "Reject"]
+
+
+def test_normalize_options_empty_for_a_dict():
+    assert normalize_options({"Approve": True}) == []
+
+
+def test_normalize_options_empty_for_none():
+    assert normalize_options(None) == []
 
 
 def test_append_then_read_all_roundtrips():
@@ -418,6 +450,106 @@ def test_current_state_preserves_first_seen_order():
             append(path, r)
         record_answer(path, ids[0], "done", "manager")
         assert [r["id"] for r in current_state(path)] == ids
+    finally:
+        os.unlink(path)
+
+
+def test_is_undeliverable_true_for_the_delivery_failure_trio():
+    r = new_record("s", "push_or_pr", "push?")
+    r["status"] = "needs_human"
+    r["answer"] = "yes"
+    r["delivery_attempts"] = 3
+    assert is_undeliverable(r) is True
+
+
+def test_is_undeliverable_false_for_a_genuine_open_question_flipped_to_needs_human():
+    # process_open's other branch: the manager punts on an open record with no answer of its own.
+    r = new_record("s", "push_or_pr", "push?")
+    r["status"] = "needs_human"
+    assert r["answer"] is None
+    assert is_undeliverable(r) is False
+
+
+def test_is_undeliverable_false_without_delivery_attempts():
+    r = new_record("s", "push_or_pr", "push?")
+    r["status"] = "needs_human"
+    r["answer"] = "yes"
+    assert is_undeliverable(r) is False
+
+
+def test_is_undeliverable_false_while_still_open():
+    r = new_record("s", "push_or_pr", "push?")
+    r["answer"] = "yes"
+    r["delivery_attempts"] = 3
+    assert is_undeliverable(r) is False  # status hasn't flipped to needs_human
+
+
+def test_is_undeliverable_false_mid_retry_before_status_flips():
+    # Delivery has failed once, not yet exhausted — status is still "answered", per _try_deliver.
+    r = new_record("s", "push_or_pr", "push?")
+    r["status"] = "answered"
+    r["answer"] = "yes"
+    r["delivery_attempts"] = 1
+    assert is_undeliverable(r) is False
+
+
+def test_record_dismiss_appends_and_marks_dismissed():
+    path = _tmp()
+    try:
+        r = new_record("s1", "push_or_pr", "push?")
+        append(path, r)
+        updated = record_dismiss(path, r["id"], "cto")
+        assert updated is not None
+        assert updated["status"] == "dismissed"
+        assert updated["decided_by"] == "cto"
+        assert updated["answered_at"] is not None
+        # append-only: the original line is still there, the update is a second line
+        assert len(read_all(path)) == 2
+    finally:
+        os.unlink(path)
+
+
+def test_record_dismiss_unknown_id_returns_none():
+    path = _tmp()
+    try:
+        append(path, new_record("s", "k", "q"))
+        assert record_dismiss(path, "nope", "cto") is None
+        assert len(read_all(path)) == 1
+    finally:
+        os.unlink(path)
+
+
+def test_record_dismiss_preserves_the_decided_answer():
+    # Retiring a record is not un-deciding it — the answer stays on the record as history.
+    path = _tmp()
+    try:
+        r = new_record("s1", "push_or_pr", "push?")
+        append(path, r)
+        record_answer(path, r["id"], "yes", "manager")
+        updated = record_dismiss(path, r["id"], "cto")
+        assert updated["answer"] == "yes"
+    finally:
+        os.unlink(path)
+
+
+def test_record_dismiss_no_longer_reads_as_undeliverable():
+    # Once dismissed, get_escalations()'s needs_human filter (status == "needs_human") and
+    # is_undeliverable() both stop matching — the record is off the panel, not just relabelled.
+    path = _tmp()
+    try:
+        r = new_record("s1", "push_or_pr", "push?")
+        append(path, r)
+        record_answer(path, r["id"], "yes", "manager")
+        undelivered = dict(current_state(path)[0])
+        undelivered["status"] = "needs_human"
+        undelivered["delivery_attempts"] = 3
+        append(path, undelivered)
+        assert is_undeliverable(current_state(path)[0]) is True
+
+        record_dismiss(path, r["id"], "cto")
+        final = current_state(path)[0]
+        assert final["status"] == "dismissed"
+        assert is_undeliverable(final) is False
     finally:
         os.unlink(path)
 
