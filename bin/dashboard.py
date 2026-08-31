@@ -13,7 +13,15 @@ from urllib.parse import urlparse
 
 import assignments as ledger
 import manager_session
-from escalations import QUEUE_PATH, classify, current_state, normalize_options, record_answer
+from escalations import (
+    QUEUE_PATH,
+    classify,
+    current_state,
+    is_undeliverable,
+    normalize_options,
+    record_answer,
+    record_dismiss,
+)
 
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
@@ -605,6 +613,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             try:
                 updated = record_answer(QUEUE_PATH, rid, answer, "human")
+            except OSError as e:
+                self._json({"error": str(e)}, status=500)
+                return
+            if updated is None:
+                self._json({"error": f"no escalation {rid}"}, status=404)
+                return
+            self._json({"ok": True, "record": updated})
+            return
+        if parsed.path.startswith("/api/escalations/") and parsed.path.endswith("/dismiss"):
+            rid = parsed.path[len("/api/escalations/") : -len("/dismiss")]
+            try:
+                state = {r["id"]: r for r in current_state(QUEUE_PATH) if r.get("id")}
+            except OSError as e:
+                self._json({"error": str(e)}, status=500)
+                return
+            existing = state.get(rid)
+            if existing is None:
+                self._json({"error": f"no escalation {rid}"}, status=404)
+                return
+            # Scoped to the undeliverable shape on purpose, not every needs_human record: a
+            # genuine open escalation still wants a real answer, not a silent close.
+            if not is_undeliverable(existing):
+                self._json(
+                    {"error": f"escalation {rid} is not an undeliverable record", "record": existing},
+                    status=409,
+                )
+                return
+            try:
+                updated = record_dismiss(QUEUE_PATH, rid, "cto")
             except OSError as e:
                 self._json({"error": str(e)}, status=500)
                 return

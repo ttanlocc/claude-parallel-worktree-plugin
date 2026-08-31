@@ -191,6 +191,11 @@
   .decision-actions { display: flex; gap: 8px; margin-top: 13px; flex-wrap: wrap; }
   .decision-actions .btn { border-color: var(--red); color: var(--red); font-weight: 600; }
   .decision-actions .btn:hover { background: var(--red); color: var(--leaf); }
+  /* The bulk-dismiss action lives in the zone header, not on a card — same --red as the
+     per-card actions above (still a CTO decision, just made once for the whole group), no
+     third colour. margin-left pins it to the end of the header row. */
+  #decisions .zone-head .btn { border-color: var(--red); color: var(--red); font-weight: 600; margin-left: auto; }
+  #decisions .zone-head .btn:hover { background: var(--red); color: var(--leaf); }
 
   /* ---------- assignments ---------- */
   .assign { padding: 16px var(--pad) 18px; border-top: 1px solid var(--rule-soft); }
@@ -344,6 +349,9 @@
 <script>
 let lastData = [];
 let lastEscalations = { needs_human: [], recent_decisions: [] };
+let lastUndeliverableIds = [];  // recomputed every renderDecisions() call; the bulk-dismiss
+                                 // button reads it fresh at click time, never more than one
+                                 // poll tick stale.
 let lastAdoTickets = [];
 let lastAssignments = [];
 let pollFailures = { assignments: false, escalations: false, chat: false }; // which source is
@@ -622,8 +630,31 @@ function zoneHead(title, hint) {
   return head;
 }
 
+// Mirrors escalations.py's is_undeliverable(): a needs_human record that already carries a
+// decided answer manager_daemon.py's _try_deliver could never carry back to its worker — not a
+// genuine open question. Kept in lockstep with the Python predicate; see its docstring for why
+// this exact trio is safe to trust without re-deriving anything server-side.
+function isUndeliverable(rec) {
+  return rec.status === "needs_human" && rec.answer != null && rec.delivery_attempts != null;
+}
+
 function decisionCard(rec) {
   const card = el("div", "decision");
+  if (isUndeliverable(rec)) {
+    // The real situation, not the stale question: what was decided, and who never got it.
+    card.append(el("div", "decision-q", `Trả lời "${rec.answer}" chưa tới được ${rec.session_id || "?"}`));
+    card.append(el("div", "decision-why", rec.reason || ""));
+    if (rec.question) {
+      // Context, not a live choice — no options rendered as buttons below.
+      card.append(el("div", "decision-why", `Câu hỏi gốc: ${rec.question}`));
+    }
+    const actions = el("div", "decision-actions");
+    const btn = el("button", "btn", "Đóng");
+    btn.onclick = () => dismissEscalation(rec.id);
+    actions.append(btn);
+    card.append(actions);
+    return card;
+  }
   card.append(el("div", "decision-q", rec.question || ""));
   card.append(el("div", "decision-why", rec.reason || ""));
   const actions = el("div", "decision-actions");
@@ -651,6 +682,16 @@ function renderDecisions(escalations) {
   // rule so the eye lands here first, before it ever reaches the counters above.
   panel.classList.toggle("has-signal", escalations.length > 0);
   const head = zoneHead("Cần bạn quyết");
+  // Every undeliverable record shares one cause (its worker session is gone) and one fix
+  // (close it) — a group action beats N per-card clicks. Recomputed every render, so the count
+  // in the label can never go stale by more than one poll tick; dismissAllUndeliverable() reads
+  // this same array at click time rather than re-deriving it.
+  lastUndeliverableIds = escalations.filter(isUndeliverable).map(r => r.id);
+  if (lastUndeliverableIds.length) {
+    const bulk = el("button", "btn", `Đóng ${lastUndeliverableIds.length} mục không gửi được`);
+    bulk.onclick = dismissAllUndeliverable;
+    head.append(bulk);
+  }
   if (!escalations.length) {
     panel.replaceChildren(head, el("p", null, "Không có gì chờ bạn."));
     return;
@@ -670,6 +711,31 @@ async function answerEscalation(id, answer) {
   } catch (e) {
     alert("Không gửi được: " + (e.message || e));
   }
+}
+
+// No "retry delivery" action here on purpose: the worker session behind an undeliverable record
+// is gone, the daemon already gave it 3 tries (DELIVERY_ATTEMPTS in manager_daemon.py), and a
+// retry button would just fail the same way. Closing it is the only action that makes sense today.
+async function dismissEscalation(id) {
+  try {
+    const res = await fetch(`/api/escalations/${encodeURIComponent(id)}/dismiss`, { method: "POST" });
+    if (!res.ok) { alert(`Không đóng được: ${res.status}`); return; }
+    pollEscalations();
+  } catch (e) {
+    alert("Không đóng được: " + (e.message || e));
+  }
+}
+
+async function dismissAllUndeliverable() {
+  const ids = lastUndeliverableIds;
+  if (!ids.length || !confirm(`Đóng ${ids.length} mục không gửi được?`)) return;
+  let failed = 0;
+  for (const id of ids) {
+    const res = await fetch(`/api/escalations/${encodeURIComponent(id)}/dismiss`, { method: "POST" }).catch(() => null);
+    if (!res || !res.ok) failed++;
+  }
+  if (failed) alert(`${failed}/${ids.length} không đóng được — thử lại.`);
+  pollEscalations();
 }
 
 const PRIORITY_TONE = { P0: "on-ink", P1: "on-line" };

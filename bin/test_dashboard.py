@@ -534,6 +534,40 @@ def test_get_escalations_normalizes_a_bare_string_options_field():
         _os.unlink(path)
 
 
+def test_get_escalations_includes_an_undeliverable_record_until_dismissed():
+    """An undeliverable record (answer + delivery_attempts stamped, status needs_human) is a
+    real occupant of needs_human like any other — the panel must still surface it, just not as
+    a live question (that's dashboard.html's job). Once record_dismiss() appends a newer,
+    terminal-status copy, get_escalations() must stop offering it: no filtering code of its own
+    is needed for this — current_state()'s fold-to-latest already drops anything whose newest
+    status isn't "needs_human" or tier3-"open"."""
+    import os as _os
+
+    import dashboard
+    from escalations import append, is_undeliverable, new_record, record_dismiss
+
+    fd, path = tempfile.mkstemp()
+    _os.close(fd)
+    try:
+        r = new_record("s1", "push_or_pr", "Push the branch?")
+        r["status"] = "needs_human"
+        r["answer"] = "yes"
+        r["delivery_attempts"] = 3
+        r["session_id"] = "task7-smoke"
+        r["reason"] = "could not deliver to task7-smoke after 3 tries: exit status 1."
+        append(path, r)
+
+        before = dashboard.get_escalations(path=path)
+        assert len(before["needs_human"]) == 1
+        assert is_undeliverable(before["needs_human"][0])
+
+        record_dismiss(path, r["id"], "cto")
+        after = dashboard.get_escalations(path=path)
+        assert after["needs_human"] == []
+    finally:
+        _os.unlink(path)
+
+
 def test_argv_repo_dir_extracts_the_non_numeric_arg():
     import dashboard
 

@@ -464,6 +464,10 @@ def test_process_open_leaves_tier3_for_the_human():
         state = {x["id"]: x for x in _current_state(path)}
         assert state[r["id"]]["status"] == "needs_human"
         assert delivered == [], "nothing is delivered until a human answers"
+
+        from escalations import is_undeliverable as _is_undeliverable
+
+        assert not _is_undeliverable(state[r["id"]]), "a genuine open question is not an undeliverable answer"
     finally:
         _os.unlink(path)
 
@@ -543,6 +547,10 @@ def test_an_undeliverable_answer_reaches_a_human():
         state = {x["id"]: x for x in _current_state(path)}
         assert state[r["id"]]["status"] == "needs_human", "an undeliverable answer must surface"
         assert "could not deliver" in state[r["id"]]["reason"]
+
+        from escalations import is_undeliverable as _is_undeliverable
+
+        assert _is_undeliverable(state[r["id"]]), "the exact shape process_open produces must read as undeliverable"
     finally:
         _os.unlink(path)
 
