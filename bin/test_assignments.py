@@ -168,6 +168,15 @@ def test_stalled_false_without_a_usable_timestamp():
     assert stalled(a, NOW) is False
 
 
+def test_stalled_false_when_ts_is_a_bool():
+    """bool is an int subclass, so True would otherwise pass isinstance(ts, (int, float)) and
+    read as ts=1 — an ancient timestamp that manufactures a false alarm, exactly what
+    _date_passed's own docstring forbids for an unparseable value."""
+    a = new_assignment("bool ts")
+    a["ts"] = True
+    assert stalled(a, NOW) is False
+
+
 def test_ledger_folds_to_the_latest_state():
     fd, path = tempfile.mkstemp()
     _os.close(fd)

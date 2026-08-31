@@ -124,7 +124,7 @@ def stalled(rec: dict, now: float) -> bool:
     if progress(rec) is not None:
         return False
     ts = rec.get("ts")
-    if not isinstance(ts, (int, float)):
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
         return False
     return (now - ts) > STALLED_AFTER_SECONDS
 
