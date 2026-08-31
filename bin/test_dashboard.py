@@ -2,7 +2,6 @@
 """assert-based checks for dashboard.py's transcript rendering. Run: python3 bin/test_dashboard.py"""
 
 import json
-import os
 import subprocess
 import tempfile
 
@@ -11,158 +10,7 @@ from dashboard import (
     _find_ado_links,
     _shape_ado_ticket,
     get_ado_backlog,
-    render_task_log,
-    render_transcript_line,
 )
-
-
-def test_skips_non_conversation_lines():
-    assert render_transcript_line({"type": "custom-title", "customTitle": "x"}) == []
-    assert render_transcript_line({"type": "last-prompt", "lastPrompt": "x"}) == []
-    assert render_transcript_line({"type": "attachment", "attachment": {}}) == []
-    assert render_transcript_line({"type": "mode", "mode": "normal"}) == []
-
-
-def test_renders_plain_string_user_content():
-    obj = {"type": "user", "message": {"role": "user", "content": "hello"}}
-    assert render_transcript_line(obj) == [{"kind": "text", "role": "user", "tool": None, "text": "hello"}]
-
-
-def test_renders_assistant_text():
-    obj = {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "DONE"}]}}
-    assert render_transcript_line(obj) == [{"kind": "text", "role": "assistant", "tool": None, "text": "DONE"}]
-
-
-def test_renders_tool_use_prefers_command_arg():
-    obj = {
-        "type": "assistant",
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "echo hi"}}],
-        },
-    }
-    assert render_transcript_line(obj) == [
-        {"kind": "call", "role": "assistant", "tool": "Bash", "text": "echo hi", "call_id": "t1"}
-    ]
-
-
-def test_renders_tool_use_falls_back_to_json_input():
-    obj = {
-        "type": "assistant",
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "tool_use", "id": "t2", "name": "Grep", "input": {"pattern": "x"}}],
-        },
-    }
-    lines = render_transcript_line(obj)
-    assert lines[0]["tool"] == "Grep"
-    assert lines[0]["text"] == '{"pattern": "x"}'
-
-
-def test_renders_tool_result_string_content():
-    obj = {
-        "type": "user",
-        "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "hi"}]},
-    }
-    assert render_transcript_line(obj) == [
-        {"kind": "result", "role": "user", "tool": None, "text": "hi", "result_for": "t1"}
-    ]
-
-
-def test_renders_tool_result_block_content():
-    obj = {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": [{"type": "tool_result", "content": [{"type": "text", "text": "block result"}]}],
-        },
-    }
-    assert render_transcript_line(obj) == [
-        {"kind": "result", "role": "user", "tool": None, "text": "block result", "result_for": None}
-    ]
-
-
-def test_render_task_log_reads_file_and_applies_limit():
-    records = [{"type": "custom-title"}] + [
-        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"line{i}"}]}}
-        for i in range(5)
-    ]
-    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r) + "\n")
-        path = f.name
-    try:
-        result = render_task_log(path, limit=3)
-        assert [r["text"] for r in result] == ["line2", "line3", "line4"]
-    finally:
-        os.unlink(path)
-
-
-def test_render_task_log_skips_malformed_lines():
-    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
-        f.write(
-            '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}}\n'
-        )
-        f.write("not json at all\n")
-        f.write("\n")
-        path = f.name
-    try:
-        assert [r["text"] for r in render_task_log(path)] == ["ok"]
-    finally:
-        os.unlink(path)
-
-
-def test_redacts_credential_looking_call_and_its_result():
-    records = [
-        {
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "t9",
-                        "name": "Bash",
-                        "input": {"command": "grep -oP '(?<=personal access token = ).*' creds.txt"},
-                    }
-                ],
-            },
-        },
-        {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": "t9", "content": "ghp_supersecrettoken"}],
-            },
-        },
-    ]
-    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r) + "\n")
-        path = f.name
-    try:
-        result = render_task_log(path)
-        assert result[0]["text"] == "[redacted — this call touches a credential]"
-        assert result[1]["text"] == "[redacted — this call touches a credential]"
-        assert "call_id" not in result[0] and "result_for" not in result[1]
-    finally:
-        os.unlink(path)
-
-
-def test_truncates_long_lines():
-    records = [
-        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "x" * 500}]}}
-    ]
-    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r) + "\n")
-        path = f.name
-    try:
-        result = render_task_log(path)
-        assert len(result[0]["text"]) == 401  # 400 chars + ellipsis
-        assert result[0]["text"].endswith("…")
-    finally:
-        os.unlink(path)
 
 
 def test_find_ado_links_returns_all_matches_deduplicated():
@@ -625,7 +473,6 @@ def test_assignments_post_returns_202_with_warning_when_notify_fails():
 
 def test_get_assignments_decorates_with_at_risk_and_progress():
     import os as _os
-    import tempfile
 
     import dashboard
     from assignments import new_assignment
@@ -647,7 +494,6 @@ def test_get_assignments_decorates_with_at_risk_and_progress():
 
 def test_get_assignments_decorates_with_stalled():
     import os as _os
-    import tempfile
     import time
 
     import dashboard
@@ -671,7 +517,6 @@ def test_get_escalations_normalizes_a_bare_string_options_field():
     get_escalations() must hand back a real list so no consumer's forEach/`for o in x` walks
     the string's individual characters or throws outright."""
     import os as _os
-    import tempfile
 
     import dashboard
     from escalations import append, new_record

@@ -1,107 +1,10 @@
 #!/usr/bin/env python3
 """Live status/log dashboard for parallel-task.sh copies."""
 
-import json
-import re
-
-
-def _flatten_tool_result(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-        return " ".join(parts)
-    return ""
-
-
-def render_transcript_line(obj: dict) -> list[dict]:
-    """Return zero or more renderable records for one transcript JSON record.
-
-    Each record is {"kind": "text"|"call"|"result", "role", "tool", "text"}. "call" records also
-    carry "call_id" and "result" records carry "result_for" (both from the tool_use/tool_result
-    id pairing) — render_task_log uses those to redact a credential-looking call's own result,
-    then strips them before returning.
-    """
-    if obj.get("type") not in ("user", "assistant"):
-        return []
-    message = obj.get("message")
-    if not isinstance(message, dict):
-        return []
-    role = message.get("role") or obj.get("type")
-    content = message.get("content")
-    if isinstance(content, str):
-        return [{"kind": "text", "role": role, "tool": None, "text": content}]
-    if not isinstance(content, list):
-        return []
-    lines = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type == "text":
-            text = item.get("text", "")
-            if text:
-                lines.append({"kind": "text", "role": role, "tool": None, "text": text})
-        elif item_type == "tool_use":
-            name = item.get("name", "?")
-            args = item.get("input") or {}
-            preview = args.get("command") or args.get("file_path") or json.dumps(args)
-            lines.append({"kind": "call", "role": role, "tool": name, "text": str(preview), "call_id": item.get("id")})
-        elif item_type == "tool_result":
-            lines.append(
-                {
-                    "kind": "result",
-                    "role": role,
-                    "tool": None,
-                    "text": _flatten_tool_result(item.get("content")),
-                    "result_for": item.get("tool_use_id"),
-                }
-            )
-    return lines
-
-
-# Heuristic, not a secret scanner: catches a command that NAMES what it's after (grep for
-# "personal access token", reading a .pem, etc). It cannot catch a bare secret value with no
-# label, so it works by redacting the credential-looking CALL and, via call_id/result_for,
-# that same call's result — not by scanning result text for secret-shaped content.
-# ponytail: keyword heuristic: misses secrets with no label in the command; upgrade to a real
-# secret-scanner (e.g. detect-secrets) if this misses cases in practice.
-_SENSITIVE_RE = re.compile(r"(?i)personal access token|api[_ -]?key|password|private key|-----BEGIN|secret")
-_REDACTED = "[redacted — this call touches a credential]"
-_MAX_LINE_CHARS = 400
-
-
-def render_task_log(transcript_path: str, limit: int = 200) -> list[dict]:
-    """Read a session transcript JSONL file and return the last `limit` rendered records,
-    with credential-looking tool calls (and their matching results) redacted."""
-    records: list[dict] = []
-    sensitive_ids: set[str] = set()
-    with open(transcript_path, encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            for rec in render_transcript_line(obj):
-                call_id = rec.pop("call_id", None)
-                result_for = rec.pop("result_for", None)
-                if rec["kind"] == "call" and _SENSITIVE_RE.search(rec["text"]):
-                    if call_id:
-                        sensitive_ids.add(call_id)
-                    rec["text"] = _REDACTED
-                elif rec["kind"] == "result" and result_for in sensitive_ids:
-                    rec["text"] = _REDACTED
-                if len(rec["text"]) > _MAX_LINE_CHARS:
-                    rec["text"] = rec["text"][:_MAX_LINE_CHARS] + "…"
-                records.append(rec)
-    return records[-limit:]
-
-
 import http.server
+import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -432,19 +335,6 @@ def get_tasks() -> list[dict]:
     return rows
 
 
-def _slugify_cwd(path: str) -> str:
-    return path.replace("/", "-").replace(".", "-")
-
-
-def transcript_path_for(task: dict) -> str | None:
-    session_id = task.get("session_id")
-    wt_path = task.get("path")
-    if not session_id or not wt_path:
-        return None
-    home = os.path.expanduser("~")
-    return os.path.join(home, ".claude", "projects", _slugify_cwd(wt_path), f"{session_id}.jsonl")
-
-
 def start_manager_turn(text: str, source: str, ask=None) -> threading.Thread:
     """Run one manager turn off the request thread.
 
@@ -635,23 +525,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 self._json(get_tasks())
             except (*_SUBPROC_ERRORS, subprocess.CalledProcessError) as e:
-                self._json({"error": str(e)}, status=500)
-            return
-        if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/log"):
-            name = parsed.path[len("/api/tasks/") : -len("/log")]
-            try:
-                tasks = {t["task"]: t for t in get_tasks()}
-            except (*_SUBPROC_ERRORS, subprocess.CalledProcessError) as e:
-                self._json({"error": str(e)}, status=500)
-                return
-            task = tasks.get(name)
-            path = transcript_path_for(task) if task else None
-            if not path or not os.path.exists(path):
-                self._json({"status": "not-available"})
-                return
-            try:
-                self._json({"lines": render_task_log(path)})
-            except Exception as e:
                 self._json({"error": str(e)}, status=500)
             return
         if parsed.path == "/api/escalations":
