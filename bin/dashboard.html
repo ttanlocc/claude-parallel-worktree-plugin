@@ -297,6 +297,10 @@
 
   .empty { padding: 28px var(--pad); text-align: center; color: var(--faint); font-size: 13px; }
   .empty.err { color: var(--red); font-weight: 500; }
+  /* One malformed record inside an otherwise-good list — cardOrError()'s fallback row. Same
+     ".err" meaning as .empty.err above, just on a card that keeps its own box (padding/rule)
+     instead of the centred full-panel layout. No new colour: reuses --red. */
+  .decision.err, .assign.err { color: var(--red); font-weight: 500; }
   svg { display: block; }
 </style>
 </head>
@@ -365,6 +369,20 @@ function pill(tone, label) {
   const p = el("span", "pill" + (tone ? " " + tone : ""));
   p.append(document.createTextNode(label));
   return p;
+}
+
+// Every row in a map()-into-replaceChildren list is built from model/worker-authored data —
+// one record with an unexpected shape must yield one honest row, never blank every row after
+// it. `cls` is the caller's card class (e.g. "decision", "assign") so the error row still picks
+// up that card's own box rhythm (padding, top rule); ".err" is the same modifier `.empty.err`
+// already uses for "this failed" text, so no new colour is introduced.
+function cardOrError(rec, build, cls) {
+  try {
+    return build(rec);
+  } catch (e) {
+    const id = (rec && rec.id) || "?";
+    return el("div", cls + " err", `Không hiển thị được bản ghi ${id}: ${e.message || e}`);
+  }
 }
 
 // One row per ticket in the manager's ADO backlog, not per session — a ticket with no
@@ -601,7 +619,7 @@ function decisionCard(rec) {
   card.append(el("div", "decision-q", rec.question || ""));
   card.append(el("div", "decision-why", rec.reason || ""));
   const actions = el("div", "decision-actions");
-  (rec.options || []).forEach(opt => {
+  (Array.isArray(rec.options) ? rec.options : []).forEach(opt => {
     const btn = el("button", "btn", opt);
     btn.onclick = () => answerEscalation(rec.id, opt);
     actions.append(btn);
@@ -629,7 +647,7 @@ function renderDecisions(escalations) {
     panel.replaceChildren(head, el("p", null, "Không có gì chờ bạn."));
     return;
   }
-  panel.replaceChildren(head, ...escalations.map(decisionCard));
+  panel.replaceChildren(head, ...escalations.map(rec => cardOrError(rec, decisionCard, "decision")));
 }
 
 async function answerEscalation(id, answer) {
@@ -725,7 +743,7 @@ function renderAssignments(rows) {
   }
   const byTicket = {};
   computeTickets(lastAdoTickets, lastData, lastEscalations).forEach(r => { byTicket[String(r.id)] = r; });
-  panel.replaceChildren(head, ...open.map(a => assignCard(a, byTicket)));
+  panel.replaceChildren(head, ...open.map(a => cardOrError(a, x => assignCard(x, byTicket), "assign")));
 }
 
 async function pollEscalations() {

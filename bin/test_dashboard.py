@@ -666,6 +666,29 @@ def test_get_assignments_decorates_with_stalled():
         _os.unlink(path)
 
 
+def test_get_escalations_normalizes_a_bare_string_options_field():
+    """The live bug: one on-disk record has options="Approve" (a bare string, not a list) —
+    get_escalations() must hand back a real list so no consumer's forEach/`for o in x` walks
+    the string's individual characters or throws outright."""
+    import os as _os
+    import tempfile
+
+    import dashboard
+    from escalations import append, new_record
+
+    fd, path = tempfile.mkstemp()
+    _os.close(fd)
+    try:
+        r = new_record("s1", "diff_review", "Ship it?")
+        r["options"] = "Approve"  # the malformed shape found live
+        r["status"] = "needs_human"
+        append(path, r)
+        result = dashboard.get_escalations(path=path)
+        assert result["needs_human"][0]["options"] == ["Approve"]
+    finally:
+        _os.unlink(path)
+
+
 def test_ticket_dispatch_helpers_are_gone():
     import dashboard
 

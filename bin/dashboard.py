@@ -110,7 +110,7 @@ from urllib.parse import urlparse
 
 import assignments as ledger
 import manager_session
-from escalations import QUEUE_PATH, classify, current_state, record_answer
+from escalations import QUEUE_PATH, classify, current_state, normalize_options, record_answer
 
 PLUGIN_BIN = os.path.dirname(os.path.abspath(__file__))
 PARALLEL_TASK_SH = os.path.join(PLUGIN_BIN, "parallel-task.sh")
@@ -129,9 +129,15 @@ class _BodyTooLarge(ValueError):
 _SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
 
 
-def get_escalations() -> dict:
+def get_escalations(path: str = None) -> dict:
     """What the human still has to answer, and what the manager already decided for them."""
-    state = current_state(QUEUE_PATH)
+    path = path or QUEUE_PATH
+    state = current_state(path)
+    # options is worker-authored against a prose schema (same tolerance assignments.py gives
+    # `plan`) — normalize the in-memory copy so every consumer downstream gets a real list, no
+    # matter what shape actually landed on disk. Never rewritten to the queue file itself.
+    for r in state:
+        r["options"] = normalize_options(r.get("options"))
     needs_human = [r for r in state if r.get("status") == "needs_human"]
     for r in state:
         if r.get("status") == "open":

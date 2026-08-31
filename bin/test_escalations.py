@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 
-from escalations import append, classify, current_state, new_record, read_all, record_answer
+from escalations import append, classify, current_state, new_record, normalize_options, read_all, record_answer
 
 
 def _tmp():
@@ -44,6 +44,28 @@ def test_new_record_ids_are_unique():
     a = new_record("s", "k", "q")
     b = new_record("s", "k", "q")
     assert a["id"] != b["id"]
+
+
+def test_normalize_options_keeps_a_list_of_strings():
+    assert normalize_options(["Approve", "Reject"]) == ["Approve", "Reject"]
+
+
+def test_normalize_options_wraps_a_bare_string():
+    # The live bug: a record authored with options="Approve" instead of ["Approve"]. Must
+    # become a one-element list, never iterated character by character.
+    assert normalize_options("Approve") == ["Approve"]
+
+
+def test_normalize_options_drops_non_string_items_from_a_list():
+    assert normalize_options(["Approve", None, 3, {"x": 1}, "Reject"]) == ["Approve", "Reject"]
+
+
+def test_normalize_options_empty_for_a_dict():
+    assert normalize_options({"Approve": True}) == []
+
+
+def test_normalize_options_empty_for_none():
+    assert normalize_options(None) == []
 
 
 def test_append_then_read_all_roundtrips():

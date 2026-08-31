@@ -127,6 +127,24 @@ def _sensitive(changed_files) -> str | None:
     return None
 
 
+def normalize_options(raw) -> list[str]:
+    """Coerce a record's `options` field to a list of strings, tolerating on-disk drift.
+
+    `options` is worker-authored against a prose schema, not a validated contract — the same
+    tolerance _as_text/_sensitive give evidence's fields above. A list keeps only its string
+    items (a stray non-string entry is dropped, not stringified — it is not a label any worker
+    actually offered). A bare string is one option, not a sequence of characters to iterate
+    one-by-one, so it becomes a single-item list. Anything else yields no options rather than
+    raising — a caller that does `for opt in options` must never receive something it cannot
+    safely walk.
+    """
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, str)]
+    if isinstance(raw, str):
+        return [raw]
+    return []
+
+
 def classify(record: dict) -> tuple[str, str]:
     """Route one record: ("tier2", reason) the manager may decide, or ("tier3", reason) for a human.
 
