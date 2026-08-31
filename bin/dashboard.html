@@ -608,7 +608,7 @@ function renderCounters(assignments, escalations, failures) {
   const items = [
     ["chờ bạn", E ? "—" : String(escalations.length), "on-red"],
     ["đang giao", A ? "—" : String(open.length), null],
-    ["trễ hạn", A ? "—" : String(open.filter(a => a.at_risk).length), "on-blue"],
+    ["trễ / đứng im", A ? "—" : String(open.filter(a => a.at_risk || a.stalled).length), "on-blue"],
     ["xong tuần này", A ? "—" : String(assignments.filter(a => a.status === "done" && (a.ts || 0) >= weekAgo).length), null],
   ];
   document.getElementById("counters").replaceChildren(...items.map(([label, n, tone]) => stripItem(label, n, tone)));
