@@ -208,7 +208,8 @@
   .assign-refs a { color: var(--ink-soft); text-decoration: underline;
                    text-decoration-color: var(--rule); text-underline-offset: 3px; }
   .assign-refs a:hover { color: var(--ink); text-decoration-color: var(--ink); }
-  .assign-refs .ref-none { color: var(--faint); }
+  .assign-refs .ref-none, .assign-refs .ref-state { color: var(--faint); }
+  .assign-refs .ref-state.on-red { color: var(--red); font-weight: 700; }
   .assign-progress { display: flex; align-items: center; gap: 10px; margin-top: 11px; }
   .bar { width: 150px; height: 3px; background: var(--rule); overflow: hidden; border-radius: 2px; flex-shrink: 0; }
   .bar-fill { height: 100%; background: var(--ink); }
@@ -756,6 +757,10 @@ function assignRefs(a, byTicket) {
     const id = el("a", null, "AB#" + ref.id);
     id.href = (row && row.href) || safeHref(ref.url) || "#"; id.target = "_blank"; id.rel = "noopener";
     pair.append(id);
+    if (row && TICKET_STATUS_LABEL[row.status]) {
+      pair.append(el("span", "ref-state" + (row.status === "decision" ? " on-red" : ""),
+                     `(${TICKET_STATUS_LABEL[row.status]})`));
+    }
     if (row && row.prLabel) {
       const state = PR_STATE_LABEL[row.prState] || (row.prState || "").toLowerCase();
       const pr = el("a", null, row.prLabel + (state ? ` (${state})` : ""));
