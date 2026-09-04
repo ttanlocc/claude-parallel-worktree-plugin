@@ -154,9 +154,20 @@
   #content { flex: 1; overflow-y: auto; padding: 20px 26px 32px; }
 
   /* ---------- the ledger ---------- */
-  .manager-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(330px, 400px); gap: 18px; align-items: start; }
+  /* The middle track is the drag handle: one hairline drawn inside the same 18px the gap used to
+     be, so nothing moves until the CTO drags. Their chosen width lives in --side-w; until then
+     the original minmax() stands as the fallback. */
+  .manager-grid { display: grid; grid-template-columns: minmax(0, 1fr) 18px var(--side-w, minmax(330px, 400px)); align-items: start; }
   .manager-col-side { position: sticky; top: 0; max-height: calc(100dvh - 92px); display: flex; flex-direction: column; }
-  @media (max-width: 1080px) { .manager-grid { grid-template-columns: minmax(0, 1fr); } .manager-col-side { position: static; max-height: 70dvh; } }
+  .manager-splitter { align-self: stretch; position: relative; cursor: col-resize; touch-action: none; }
+  .manager-splitter::before { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; margin-left: -.5px; background: var(--rule); }
+  .manager-splitter:hover::before, .manager-splitter:focus-visible::before, .manager-splitter.dragging::before {
+    width: 3px; margin-left: -1.5px; background: var(--ink-soft); }
+  .manager-splitter:focus { outline: none; }
+  /* One column: there is no gutter left to drag, so the handle goes away and the gap is a gap again. */
+  @media (max-width: 1080px) { .manager-grid { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+                               .manager-splitter { display: none; }
+                               .manager-col-side { position: static; max-height: 70dvh; } }
 
   .panel { background: var(--leaf); border: 1px solid var(--rule); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
 
@@ -301,6 +312,23 @@
   .msg-thinking { color: var(--faint); font-style: italic; font-size: 12.5px; }
   .msg-error .msg-text { color: var(--red); font-weight: 500; }
 
+  /* Manager replies arrive as markdown; mdBlocks() turns it into real elements (see the security
+     note above chatRow). Tight rhythm and no new colours — this is a narrow ledger column, not an
+     article. Headings step down in size only; a code block keeps the drafting stock of the page. */
+  .msg-text > * { margin: 0; }
+  .msg-text > * + * { margin-top: 9px; }
+  .md-h { font-weight: 700; line-height: 1.35; }
+  .md-h1 { font-size: 14.5px; }
+  .md-h2 { font-size: 13.5px; }
+  .md-h3 { font-size: 13px; color: var(--ink-soft); }
+  .md-list { padding-left: 20px; }
+  .md-list li + li { margin-top: 4px; }
+  .md-code-inline { font-family: var(--mono); font-size: 11.5px; background: var(--paper);
+                    border: 1px solid var(--rule-soft); border-radius: 4px; padding: 1px 4px; }
+  .md-code { font-family: var(--mono); font-size: 11.5px; line-height: 1.5; background: var(--paper);
+             border: 1px solid var(--rule); border-radius: 6px; padding: 9px 11px;
+             white-space: pre; overflow-x: auto; }
+
   .empty { padding: 28px var(--pad); text-align: center; color: var(--faint); font-size: 13px; }
   .empty.err { color: var(--red); font-weight: 500; }
   /* One malformed record inside an otherwise-good list — cardOrError()'s fallback row. Same
@@ -341,6 +369,8 @@
           </section>
         </div>
       </div>
+      <div id="manager-splitter" class="manager-splitter" role="separator" aria-orientation="vertical"
+           tabindex="0" aria-label="Kéo để chỉnh độ rộng cột chat"></div>
       <aside id="manager-chat" class="panel manager-col-side"></aside>
     </div>
 
@@ -928,12 +958,91 @@ function sourceLabel(source) {
 // output — textContent only, never innerHTML.
 const SPEAKER = { cto: "CTO", manager: "Manager", system: "Hệ thống" };
 
+// --- markdown, the little of it a manager actually writes ---------------------------------
+// The manager answers in markdown, so the raw asterisks and hashes used to land on the page as
+// characters. This renders them, and the same untrusted-text rule as above still holds: every
+// node comes from createElement/createTextNode, so there is no parse step an <img onerror> or a
+// javascript: url could ride in on. Markdown links are deliberately NOT handled — an href built
+// from model output is exactly the sink we refuse to open — so [text](url) stays literal text.
+const MD_LIST = /^\s*(?:[-*+]|\d+[.)])\s+/;
+const MD_OL = /^\s*\d+[.)]\s+/;
+const MD_HEAD = /^(#{1,3})\s+(.*)$/;
+const MD_FENCE = /^\s*```/;
+// One pass, longest markers first: `code` wins over emphasis so ** inside a code span stays
+// literal. Emphasis must hug non-space on both sides or "2 * 3 * 4" quietly loses its operators.
+// No nesting — bold-inside-italic is rarer than the confusion a greedy parser causes — and no
+// underscore emphasis at all: agent_run_service.py and feature/ado_sync turn up on this page far
+// more often than _nghiêng_ ever does.
+const MD_INLINE = /`([^`\n]+)`|\*\*(\S[^*\n]*\S|\S)\*\*|\*(\S[^*\n]*\S|\S)\*/g;
+
+function mdInline(parent, text) {
+  let last = 0, m;
+  MD_INLINE.lastIndex = 0;
+  while ((m = MD_INLINE.exec(text))) {
+    if (m.index > last) parent.append(document.createTextNode(text.slice(last, m.index)));
+    if (m[1] != null) parent.append(el("code", "md-code-inline", m[1]));
+    else if (m[2] != null) parent.append(el("strong", null, m[2]));
+    else parent.append(el("em", null, m[3]));
+    last = MD_INLINE.lastIndex;
+  }
+  if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+  return parent;
+}
+
+function mdBlocks(text) {
+  const lines = String(text == null ? "" : text).split("\n");
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (MD_FENCE.test(line)) {           // ``` … ``` — an unclosed fence just runs to the end
+      const body = [];
+      for (i++; i < lines.length && !MD_FENCE.test(lines[i]); i++) body.push(lines[i]);
+      i++;
+      const pre = el("pre", "md-code");
+      pre.append(el("code", null, body.join("\n")));
+      out.push(pre);
+      continue;
+    }
+
+    const head = MD_HEAD.exec(line);
+    if (head) {
+      out.push(mdInline(el("div", "md-h md-h" + head[1].length), head[2]));
+      i++;
+      continue;
+    }
+
+    if (MD_LIST.test(line)) {
+      const ordered = MD_OL.test(line);
+      const list = el(ordered ? "ol" : "ul", "md-list");
+      while (i < lines.length && MD_LIST.test(lines[i]) && MD_OL.test(lines[i]) === ordered) {
+        list.append(mdInline(el("li"), lines[i].replace(MD_LIST, "")));
+        i++;
+      }
+      out.push(list);
+      continue;
+    }
+
+    if (!line.trim()) { i++; continue; }   // blank lines are the paragraph break, nothing to draw
+
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !MD_FENCE.test(lines[i])
+           && !MD_HEAD.test(lines[i]) && !MD_LIST.test(lines[i])) buf.push(lines[i++]);
+    // .msg-text is pre-wrap, so single newlines inside a paragraph still break where written.
+    out.push(mdInline(el("p"), buf.join("\n")));
+  }
+  return out;
+}
+
 function chatRow(e) {
   const auto = e.source !== "cto";
   const row = el("div", `msg msg-${e.role}` + (auto ? " msg-auto" : ""));
   const who = SPEAKER[e.role] || e.role;
   row.append(el("div", "msg-who", auto ? `${who} · ${sourceLabel(e.source)}` : who));
-  row.append(el("div", "msg-text", e.text || ""));
+  const body = el("div", "msg-text");
+  body.append(...mdBlocks(e.text));
+  row.append(body);
   return row;
 }
 
@@ -1001,6 +1110,64 @@ async function pollChat() {
   }
   renderChat(data);
 }
+
+// --- the splitter --------------------------------------------------------------------------
+// Width is the CTO's own choice, so it outlives the tab; a browser that blocks site data just
+// falls back to the grid's own minmax() default rather than breaking the page.
+const SIDE_W_KEY = "pwt.manager.side-width";
+const SIDE_W_MIN = 280;    // narrower than this and the transcript stops being readable
+const MAIN_W_MIN = 420;    // ...and the ledger itself must keep this much
+
+function applySideWidth(grid, px) {
+  const max = Math.max(SIDE_W_MIN, Math.min(760, grid.clientWidth - MAIN_W_MIN));
+  const w = Math.round(Math.min(max, Math.max(SIDE_W_MIN, px)));
+  grid.style.setProperty("--side-w", w + "px");
+  return w;
+}
+
+function saveSideWidth(w) {
+  try { localStorage.setItem(SIDE_W_KEY, String(w)); } catch (e) { /* site data blocked — fine */ }
+}
+
+function initSplitter() {
+  const grid = document.getElementById("manager-grid");
+  const splitter = document.getElementById("manager-splitter");
+  const side = document.getElementById("manager-chat");
+
+  let stored = NaN;
+  try { stored = parseInt(localStorage.getItem(SIDE_W_KEY), 10); } catch (e) { /* same */ }
+  if (stored > 0) applySideWidth(grid, stored);
+
+  // Below 1080px the grid is one column and the handle is display:none — no drag can start,
+  // so the stored width sits unused until the window is wide again.
+  splitter.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    splitter.setPointerCapture(ev.pointerId);
+    splitter.classList.add("dragging");
+    document.body.style.userSelect = "none";
+  });
+  splitter.addEventListener("pointermove", (ev) => {
+    if (!splitter.hasPointerCapture(ev.pointerId)) return;
+    applySideWidth(grid, grid.getBoundingClientRect().right - ev.clientX);
+  });
+  const stop = () => {
+    if (!splitter.classList.contains("dragging")) return;
+    splitter.classList.remove("dragging");
+    document.body.style.userSelect = "";
+    saveSideWidth(applySideWidth(grid, side.getBoundingClientRect().width));   // persist once, at rest
+  };
+  splitter.addEventListener("pointerup", stop);
+  splitter.addEventListener("pointercancel", stop);
+
+  splitter.addEventListener("keydown", (ev) => {
+    const step = ev.key === "ArrowLeft" ? 24 : ev.key === "ArrowRight" ? -24 : 0;
+    if (!step) return;
+    ev.preventDefault();
+    saveSideWidth(applySideWidth(grid, side.getBoundingClientRect().width + step));
+  });
+}
+
+initSplitter();
 
 pollEscalations();
 setInterval(pollEscalations, 2000);
