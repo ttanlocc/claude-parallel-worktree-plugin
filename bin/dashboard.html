@@ -235,9 +235,28 @@
 
   /* ---------- backlog: reference weight. It is not the CTO's queue, so it never competes
      with the two zones above it. ---------- */
-  .ticket-row { display: grid; grid-template-columns: minmax(0, 1fr) 118px 136px; align-items: baseline;
+  .ticket-row { display: grid; grid-template-columns: minmax(0, 1fr) 168px 136px; align-items: baseline;
                 gap: 12px; padding: 10px var(--pad); border-top: 1px solid var(--rule-soft); }
-  .ticket-row > .pill { justify-self: start; }
+  .ticket-states { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; justify-self: start; }
+  /* The PR chip carries its own state, so it is a chip and not another bare id link. Merged
+     and closed are past tense and stay quiet; only a PR still waiting on someone is outlined. */
+  .ticket-pr { font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: .04em;
+               padding: 2px 7px; border-radius: 5px; text-decoration: none; white-space: nowrap;
+               flex-shrink: 0; background: var(--rule-soft); color: var(--ink-soft);
+               border: 1px solid transparent; }
+  .ticket-pr:hover { color: var(--ink); }
+  .ticket-pr.pr-open { background: transparent; border-color: var(--rule); color: var(--ink); font-weight: 700; }
+  .ticket-done { border-top: 1px solid var(--rule-soft); }
+  .ticket-done > summary { display: flex; align-items: center; gap: 9px; cursor: pointer;
+                           padding: 10px var(--pad); list-style: none; }
+  .ticket-done > summary::-webkit-details-marker { display: none; }
+  .ticket-done > summary::after { content: ""; width: 6px; height: 6px; margin-left: auto;
+                                  border-right: 1.5px solid var(--faint); border-bottom: 1.5px solid var(--faint);
+                                  transform: rotate(45deg); transition: transform .15s ease; }
+  .ticket-done[open] > summary::after { transform: rotate(-135deg); }
+  .ticket-done > summary:hover { background: var(--rule-soft); }
+  .ticket-done .done-hint { font-size: 12px; color: var(--faint); }
+  @media (prefers-reduced-motion: reduce) { .ticket-done > summary::after { transition: none; } }
   .zone-head + .ticket-row, #tickets > .ticket-row:first-child { border-top: 0; }
   .ticket-left { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
   .ticket-id { font-family: var(--mono); font-size: 11.5px; font-weight: 500; color: var(--ink-soft); text-decoration: none; flex-shrink: 0; }
@@ -412,6 +431,15 @@ const TICKET_STATUS_LABEL = {
 const TICKET_STATUS_TONE = {
   decision: "on-red", blocked: "on-ink", stalled: "on-ink", progress: "on-line",
 };
+// ADO's own state, in ADO's own words. Only a state that still owes someone work gets a
+// pencil: Resolved is outlined because it is waiting on QC, Active because it is waiting on
+// a review. New and Closed owe nobody anything right now and stay grey.
+const ADO_STATE_TONE = { Resolved: "on-line", Active: "on-ink", Blocked: "on-red" };
+const PR_STATE_LABEL = { OPEN: "PR mở", MERGED: "PR đã merge", CLOSED: "PR đã đóng" };
+const PR_STATE_TONE = { OPEN: "on-line", MERGED: "", CLOSED: "" };
+// A ticket is "not done" while ADO still has it open, whatever the session layer thinks.
+const TICKET_DONE_STATES = ["Closed", "Removed", "Done"];
+function ticketIsDone(r) { return TICKET_DONE_STATES.indexOf(r.adoState) > -1; }
 
 function computeTickets(adoTickets, tasks, esc) {
   const escBySession = {};
@@ -445,6 +473,11 @@ function computeTickets(adoTickets, tasks, esc) {
       label: "AB#" + ticket.id,
       href: ticket.url,
       title: ticket.title,
+      // The board's OWN word for this ticket. Everything else on the row is derived from
+      // sessions and PRs; this is what a manager sees in ADO, so it must survive unedited —
+      // a derived "xong" over a ticket ADO still calls Resolved is the disagreement worth
+      // showing, not hiding.
+      adoState: ticket.state || "",
       prLabel: withPr && withPr.pr_number ? "PR #" + withPr.pr_number : null,
       prHref: withPr ? withPr.pr_url : null,
       prState: withPr ? withPr.pr_state : null,
@@ -476,34 +509,57 @@ function renderTickets(rows) {
     return;
   }
   const frag = document.createDocumentFragment();
-  rows.forEach(r => {
-    const row = el("div", "ticket-row");
-    const left = el("div", "ticket-left");
-    const idLink = el("a", "ticket-id", r.label);
-    idLink.href = r.href; idLink.target = "_blank"; idLink.rel = "noopener";
-    left.append(idLink);
-    if (r.prLabel) {
-      const prLink = el("a", "ticket-id", r.prLabel);
-      prLink.href = r.prHref; prLink.target = "_blank"; prLink.rel = "noopener";
-      left.append(prLink);
-    }
-    left.append(el("span", "ticket-title", r.title || ""));
-    row.append(left, pill(TICKET_STATUS_TONE[r.status] || "", TICKET_STATUS_LABEL[r.status] || r.status));
+  const open = rows.filter(r => !ticketIsDone(r));
+  const done = rows.filter(ticketIsDone);
 
-    if (r.status === "not-started" || r.status === "stalled") {
-      const btn = el("button", "ticket-action", r.status === "stalled" ? "Giao lại ›" : "Giao việc ›");
-      btn.onclick = () => openDispatchForm(row, r);
-      row.append(btn);
-    } else if (r.actionHref) {
-      const a = el("a", "ticket-action", r.action);
-      a.href = r.actionHref; a.target = "_blank"; a.rel = "noopener";
-      row.append(a);
-    } else {
-      row.append(el("span", "ticket-action" + (r.action === "—" ? " muted" : ""), r.action));
-    }
-    frag.append(row);
-  });
+  open.forEach(r => frag.append(ticketRow(r)));
+  if (!open.length) frag.append(el("div", "empty", "Không còn ticket nào đang mở."));
+
+  if (done.length) {
+    const box2 = el("details", "ticket-done");
+    const sum = el("summary");
+    sum.append(pill("", "xong · " + done.length),
+               el("span", "done-hint", "đóng trong 14 ngày qua"));
+    box2.append(sum);
+    done.forEach(r => box2.append(ticketRow(r)));
+    frag.append(box2);
+  }
   box.replaceChildren(frag);
+}
+
+// One backlog row. Reads left to right the way the question is actually asked: which ticket,
+// where does it live, what does ADO call it, what happened to its PR, what do I do next.
+function ticketRow(r) {
+  const row = el("div", "ticket-row");
+  const left = el("div", "ticket-left");
+  const idLink = el("a", "ticket-id", r.label);
+  idLink.href = safeHref(r.href) || "#"; idLink.target = "_blank"; idLink.rel = "noopener";
+  left.append(idLink);
+  if (r.prLabel) {
+    const prLink = el("a", "ticket-pr" + (r.prState ? " pr-" + r.prState.toLowerCase() : ""),
+                      PR_STATE_LABEL[r.prState] ? r.prLabel + " · " + PR_STATE_LABEL[r.prState] : r.prLabel);
+    prLink.href = safeHref(r.prHref) || "#"; prLink.target = "_blank"; prLink.rel = "noopener";
+    left.append(prLink);
+  }
+  left.append(el("span", "ticket-title", r.title || ""));
+
+  const states = el("div", "ticket-states");
+  if (r.adoState) states.append(pill(ADO_STATE_TONE[r.adoState] || "", r.adoState));
+  states.append(pill(TICKET_STATUS_TONE[r.status] || "", TICKET_STATUS_LABEL[r.status] || r.status));
+  row.append(left, states);
+
+  if (r.status === "not-started" || r.status === "stalled") {
+    const btn = el("button", "ticket-action", r.status === "stalled" ? "Giao lại ›" : "Giao việc ›");
+    btn.onclick = () => openDispatchForm(row, r);
+    row.append(btn);
+  } else if (r.actionHref) {
+    const a = el("a", "ticket-action", r.action);
+    a.href = safeHref(r.actionHref) || "#"; a.target = "_blank"; a.rel = "noopener";
+    row.append(a);
+  } else {
+    row.append(el("span", "ticket-action" + (r.action === "—" ? " muted" : ""), r.action));
+  }
+  return row;
 }
 
 function openDispatchForm(rowEl, ticket) {

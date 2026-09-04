@@ -243,11 +243,39 @@ def get_sessions() -> list[dict]:
 
 _ADO_ORG = "https://dev.azure.com/agentiqai"
 _ADO_PROJECT = "AgentIQ"
-_ADO_BACKLOG_WIQL = (
-    "SELECT [System.Id], [System.Title], [System.State] FROM WorkItems "
-    f"WHERE [System.TeamProject] = '{_ADO_PROJECT}' AND [System.AssignedTo] = @Me "
-    "AND [System.State] NOT IN ('Closed', 'Removed')"
-)
+# Done work stays on the board so a manager can see it was finished, not just that it
+# vanished — but only while it is still recent. An unbounded Closed set is a year of history
+# that buries the handful of tickets still needing a decision.
+_ADO_DONE_WINDOW_DAYS = 14
+
+
+def _ado_assignee_clause() -> str:
+    """Who counts as "me" on this board.
+
+    Defaults to WIQL's own @Me, which resolves to the identity `az` is logged in as. That is
+    wrong wherever one person holds two ADO identities (a company UPN and a client-tenant one):
+    @Me then matches whichever one `az` authenticated, and the other's tickets never appear —
+    a silently half-empty board, not an error. PWR_ADO_ASSIGNED_TO takes a comma-separated
+    list of identities to union instead.
+    """
+    raw = os.environ.get("PWR_ADO_ASSIGNED_TO", "").strip()
+    if not raw:
+        return "[System.AssignedTo] = @Me"
+    people = [p.strip().replace("'", "''") for p in raw.split(",") if p.strip()]
+    if not people:
+        return "[System.AssignedTo] = @Me"
+    joined = ", ".join(f"'{p}'" for p in people)
+    return f"[System.AssignedTo] IN ({joined})"
+
+
+def _ado_backlog_wiql() -> str:
+    return (
+        "SELECT [System.Id], [System.Title], [System.State] FROM WorkItems "
+        f"WHERE [System.TeamProject] = '{_ADO_PROJECT}' AND {_ado_assignee_clause()} "
+        "AND [System.State] <> 'Removed' "
+        "AND ([System.State] <> 'Closed' "
+        f"OR [System.ChangedDate] >= @Today - {_ADO_DONE_WINDOW_DAYS})"
+    )
 
 
 def _shape_ado_ticket(raw: dict) -> dict:
@@ -269,7 +297,7 @@ def get_ado_backlog() -> list[dict]:
 
     def run():
         result = subprocess.run(
-            ["az", "boards", "query", "--org", _ADO_ORG, "--wiql", _ADO_BACKLOG_WIQL, "-o", "json"],
+            ["az", "boards", "query", "--org", _ADO_ORG, "--wiql", _ado_backlog_wiql(), "-o", "json"],
             capture_output=True,
             text=True,
             timeout=20,
