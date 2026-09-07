@@ -21,6 +21,40 @@ DELIVERY_ATTEMPTS = 3
 SEEN_PATH = os.path.expanduser("~/.claude/hermes/manager-seen-sessions.json")
 TICK_SECONDS = int(os.environ.get("PWT_MANAGER_TICK_SECONDS", "1800"))
 TICK_RETRY_SECONDS = 60
+# A failing tick is retried sooner than a full interval, but a tick that keeps failing is not a
+# blip — the live case was an expired OAuth session, which no amount of retrying fixes. At a flat
+# 60s that burned a call (and wrote a failure line into the CTO's chat panel) every minute until
+# a human logged in, thirty times the normal rate, which is how a broken manager ends up looking
+# like a spamming one. Back off to the normal interval and no further: still self-healing the
+# moment credentials come back, without hammering in the meantime.
+TICK_RETRY_MAX_SECONDS = TICK_SECONDS
+
+_consecutive_tick_failures = 0
+
+
+def tick_retry_delay(failures: int) -> float:
+    """Seconds to wait before retrying, after `failures` consecutive failed ticks."""
+    if failures <= 1:
+        return TICK_RETRY_SECONDS
+    return min(TICK_RETRY_SECONDS * 2 ** (failures - 1), TICK_RETRY_MAX_SECONDS)
+
+
+def reset_tick_failures() -> None:
+    """Forget the failure streak. Called on every success, and by tests between cases."""
+    global _consecutive_tick_failures
+    _consecutive_tick_failures = 0
+
+
+def _note_tick_failure(now: float, detail: str) -> float:
+    """Record one failed tick and return the `last_tick` that schedules its retry."""
+    global _consecutive_tick_failures
+    _consecutive_tick_failures += 1
+    delay = tick_retry_delay(_consecutive_tick_failures)
+    print(
+        f"  tick failed {_consecutive_tick_failures}x, retrying in {delay:.0f}s: {detail}",
+        file=sys.stderr,
+    )
+    return now - TICK_SECONDS + delay
 DONE_STATUSES = ("idle", "done", "stopped")
 
 SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
@@ -187,11 +221,10 @@ def wake_pass(
             "daemon:tick",
         )
     except Exception as e:
-        print(f"  tick failed, retrying sooner: {e}", file=sys.stderr)
-        return now - TICK_SECONDS + TICK_RETRY_SECONDS
+        return _note_tick_failure(now, str(e))
     if not ok:
-        print(f"  tick failed, retrying sooner: {text}", file=sys.stderr)
-        return now - TICK_SECONDS + TICK_RETRY_SECONDS
+        return _note_tick_failure(now, text)
+    reset_tick_failures()
     return now
 
 

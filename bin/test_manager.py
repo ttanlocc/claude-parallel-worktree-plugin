@@ -1020,3 +1020,98 @@ if __name__ == "__main__":
         t()
         print(f"PASS {t.__name__}")
     print(f"{len(tests)} passed")
+
+
+def test_cli_error_detail_reads_the_reason_the_cli_put_on_stdout():
+    """`claude -p --output-format json` reports failure by exiting non-zero with an EMPTY
+    stderr and its reason in stdout's JSON `result`. Reading stderr alone reported
+    "không có stderr" — true, useless, and it hid a plain "OAuth session expired"."""
+    import subprocess
+
+    import manager_session as ms
+
+    e = subprocess.CalledProcessError(
+        1,
+        ["claude"],
+        output='{"is_error": true, "result": "Failed to authenticate: OAuth session expired"}',
+        stderr="",
+    )
+    assert ms._cli_error_detail(e) == "Failed to authenticate: OAuth session expired"
+    assert "OAuth session expired" in ms._failure_note(e)
+
+
+def test_cli_error_detail_falls_back_to_stderr_then_to_a_named_absence():
+    import subprocess
+
+    import manager_session as ms
+
+    assert ms._cli_error_detail(
+        subprocess.CalledProcessError(1, ["claude"], output="", stderr="boom\nlast line")
+    ) == "last line"
+    assert ms._cli_error_detail(
+        subprocess.CalledProcessError(1, ["claude"], output="not json at all", stderr="")
+    ) == "not json at all"
+    assert ms._cli_error_detail(
+        subprocess.CalledProcessError(1, ["claude"], output="", stderr="")
+    ) == "không có stderr"
+
+
+def test_cli_error_detail_never_leaks_the_prompt():
+    """The whole reason _failure_note exists: argv carries the charter, so the note must be
+    built from output, never from str(e)."""
+    import subprocess
+
+    import manager_session as ms
+
+    e = subprocess.CalledProcessError(1, ["claude", "-p", "--", "SECRET CHARTER TEXT"], output="", stderr="nope")
+    assert "SECRET CHARTER TEXT" not in ms._failure_note(e)
+
+
+def test_tick_retry_backs_off_and_stops_at_the_normal_interval():
+    """A tick that keeps failing is not a blip. At a flat 60s an expired OAuth session burned a
+    call a minute, forever, each one writing a failure line into the CTO's chat panel."""
+    import manager_daemon as md
+
+    assert md.tick_retry_delay(1) == md.TICK_RETRY_SECONDS
+    assert md.tick_retry_delay(2) == md.TICK_RETRY_SECONDS * 2
+    assert md.tick_retry_delay(3) == md.TICK_RETRY_SECONDS * 4
+    assert md.tick_retry_delay(99) == md.TICK_RETRY_MAX_SECONDS
+    # never slower than a healthy tick, so recovery is never delayed past the normal cadence
+    assert md.tick_retry_delay(99) <= md.TICK_SECONDS
+
+
+def test_repeated_tick_failures_widen_the_gap_and_a_success_clears_it():
+    import manager_daemon as md
+
+    md.reset_tick_failures()
+
+    def failing_ask(text, source):
+        raise RuntimeError("manager busy")
+
+    def run(ask, now):
+        return md.wake_pass(
+            0,
+            ask=ask,
+            agents_fn=list,
+            known_fn=set,
+            open_fn=lambda: [{"id": "a1"}],
+            now_fn=lambda: now,
+            read_seen=dict,
+            write_seen=lambda seen: None,
+        )
+
+    now = 10_000.0
+    first = run(failing_ask, now)
+    second = run(failing_ask, now)
+    # the second failure must not be retried as eagerly as the first
+    assert md.should_tick(second, now + md.TICK_RETRY_SECONDS, open_count=1, running_count=0) is False
+    assert md.should_tick(first, now + md.TICK_RETRY_SECONDS, open_count=1, running_count=0) is True
+
+    def ok_ask(text, source):
+        return True, "done"
+
+    run(ok_ask, now)
+    after = run(failing_ask, now)
+    # a success clears the streak, so the next failure is back to the eager retry
+    assert md.should_tick(after, now + md.TICK_RETRY_SECONDS, open_count=1, running_count=0) is True
+    md.reset_tick_failures()

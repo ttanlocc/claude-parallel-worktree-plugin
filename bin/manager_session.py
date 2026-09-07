@@ -173,6 +173,34 @@ def _log_quietly(role: str, source: str, text: str) -> None:
         print(f"_log_quietly: could not append to chat log: {e}", file=sys.stderr)
 
 
+def _cli_error_detail(e: subprocess.CalledProcessError) -> str:
+    """The reason the CLI actually gave, wherever it put it.
+
+    `claude -p --output-format json` reports a failed run by exiting non-zero with an EMPTY
+    stderr and a well-formed JSON object on stdout carrying `is_error` and a human-readable
+    `result` — "Failed to authenticate: OAuth session expired and could not be refreshed" was
+    the live case. Reading only stderr therefore threw away the one actionable sentence and
+    left the operator with "không có stderr", which says nothing and cannot be acted on.
+
+    stdout first, then stderr, because stdout is where this CLI puts it; unparseable output
+    falls back to its last line rather than being dropped.
+    """
+    raw = (e.stdout or "").strip()
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            detail = payload.get("result") or payload.get("error")
+            if isinstance(detail, str) and detail.strip():
+                return detail.strip()[:200]
+        # Not JSON, or JSON without a message: the last line is still better than nothing.
+        return raw.splitlines()[-1][:200]
+    tail = (e.stderr or "").strip().splitlines()
+    return tail[-1][:200] if tail else "không có stderr"
+
+
 def _failure_note(e: Exception) -> str:
     """A failure note the CTO can act on, with no prompt in it.
 
@@ -182,9 +210,7 @@ def _failure_note(e: Exception) -> str:
     stderr instead; the prompt is never the operator's problem.
     """
     if isinstance(e, subprocess.CalledProcessError):
-        tail = (e.stderr or "").strip().splitlines()
-        detail = tail[-1][:200] if tail else "không có stderr"
-        return f"manager call failed: claude thoát với mã {e.returncode} — {detail}"
+        return f"manager call failed: claude thoát với mã {e.returncode} — {_cli_error_detail(e)}"
     if isinstance(e, subprocess.TimeoutExpired):
         return f"manager call failed: không có phản hồi trong {e.timeout:.0f}s"
     return f"manager call failed: {type(e).__name__}: {e}"
