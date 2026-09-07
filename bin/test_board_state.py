@@ -145,3 +145,64 @@ def test_escalation_docs_default_status_to_open_when_status_is_absent():
     docs = escalation_docs([{"id": "e6", "kind": "looping", "question": "?"}])
 
     assert docs["e6"]["status"] == "open"
+
+
+from board_state import ticket_docs
+
+
+def test_ticket_docs_key_on_ado_id_and_attach_a_known_pr():
+    docs = ticket_docs(
+        [
+            {
+                "id": "8311",
+                "title": "Stabilise tool order",
+                "state": "Active",
+                "sprint": "Sprint 57",
+                "url": "https://dev.azure.com/x/_workitems/edit/8311",
+            }
+        ],
+        {"8311": {"number": 698, "state": "OPEN", "url": "https://github.com/o/r/pull/698"}},
+    )
+
+    doc = docs["8311"]
+    assert doc["id"] == "8311"
+    assert doc["title"] == "Stabilise tool order"
+    assert doc["state"] == "Active"
+    assert doc["sprint"] == "Sprint 57"
+    assert doc["url"] == "https://dev.azure.com/x/_workitems/edit/8311"
+    assert doc["pr"] == {"number": 698, "state": "OPEN", "url": "https://github.com/o/r/pull/698"}
+
+
+def test_ticket_docs_leave_pr_null_when_no_pr_references_the_ticket():
+    docs = ticket_docs(
+        [{"id": "5061", "title": "F1 nondeterminism", "state": "New", "sprint": "Sprint 57", "url": "u"}], {}
+    )
+
+    assert docs["5061"]["pr"] is None
+
+
+def test_ticket_docs_keep_an_empty_sprint_rather_than_inventing_one():
+    """Work items parked at the project root genuinely have no sprint; the board filters on
+    this field and a made-up value would mis-file them."""
+    docs = ticket_docs([{"id": "1", "title": "t", "state": "New", "sprint": "", "url": "u"}], {})
+
+    assert docs["1"]["sprint"] == ""
+
+
+def test_ticket_docs_skip_a_ticket_with_no_id():
+    assert ticket_docs([{"title": "orphan", "state": "New"}], {}) == {}
+
+
+def test_ticket_docs_carry_type_and_default_it_to_empty_when_absent():
+    """`type` distinguishes a Bug from a User Story on the board; a ticket with no type on the
+    ADO side must render as unknown, not silently inherit some other ticket's type."""
+    docs = ticket_docs(
+        [
+            {"id": "1", "title": "t1", "state": "New", "sprint": "S", "type": "Bug", "url": "u1"},
+            {"id": "2", "title": "t2", "state": "New", "sprint": "S", "url": "u2"},
+        ],
+        {},
+    )
+
+    assert docs["1"]["type"] == "Bug"
+    assert docs["2"]["type"] == ""

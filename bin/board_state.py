@@ -74,3 +74,26 @@ def escalation_docs(records: list[dict]) -> dict[str, dict]:
             "answered_at": rec.get("answered_at"),
         }
     return docs
+
+
+def ticket_docs(tickets: list[dict], pr_by_ticket: dict) -> dict[str, dict]:
+    """One document per ADO work item, keyed by its id.
+
+    "Not started", "in flight" and "done this sprint" are filters over `state` + `sprint` on
+    the page, not three collections here.
+    """
+    docs = {}
+    for ticket in tickets or []:
+        ticket_id = ticket.get("id")
+        if not ticket_id:
+            continue
+        docs[str(ticket_id)] = {
+            "id": str(ticket_id),
+            "title": ticket.get("title") or "",
+            "state": ticket.get("state") or "",
+            "sprint": ticket.get("sprint") or "",
+            "type": ticket.get("type") or "",
+            "url": ticket.get("url") or "",
+            "pr": (pr_by_ticket or {}).get(str(ticket_id)),
+        }
+    return docs
