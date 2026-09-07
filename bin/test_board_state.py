@@ -828,3 +828,61 @@ def test_registry_path_joins_the_repo_root_with_the_known_registry_location():
     wrong repo root, not because this join itself was wrong — but pin the join's own shape too,
     now that it is a named, reusable seam instead of an inline string buried in a closure."""
     assert _registry_path("/repo") == "/repo/.claude/worktrees/.parallel-registry.json"
+
+
+def test_collect_wires_the_manager_reader_into_meta_status():
+    """`collect()` used to have no `manager` parameter at all, so `build_writes` was always
+    called without one and meta/status.manager_session_id stayed null forever — even while a
+    real manager session was running. Prove the injected reader's value reaches the meta doc."""
+    writes = collect(
+        read_agents=list,
+        read_registry=dict,
+        read_escalations=list,
+        read_tickets=list,
+        read_prs=dict,
+        now=lambda: 500.0,
+        read_manager=lambda: {"session_id": "m1", "started_at": 100.0},
+    )
+
+    meta = writes[-1]["data"]
+    assert meta["manager_session_id"] == "m1"
+    assert meta["manager_started_at"] == 100.0
+
+
+def test_collect_defaults_manager_fields_to_null_when_no_reader_is_given():
+    """Every `collect()` call in this file predating this parameter omits `read_manager` — the
+    default must keep producing the same null fields those tests were already written against."""
+    writes = collect(
+        read_agents=list,
+        read_registry=dict,
+        read_escalations=list,
+        read_tickets=list,
+        read_prs=dict,
+        now=lambda: 500.0,
+    )
+
+    meta = writes[-1]["data"]
+    assert meta["manager_session_id"] is None
+    assert meta["manager_started_at"] is None
+
+
+def test_collect_degrades_manager_to_empty_without_blanking_other_sources():
+    """A broken manager-session read (no session has ever run yet, or the state file is
+    corrupt) must not blank the sessions collection — only leave the manager chip null, same as
+    when no manager reader is given at all."""
+
+    def boom():
+        raise OSError("manager-session.json missing")
+
+    writes = collect(
+        read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "running"}],
+        read_registry=dict,
+        read_escalations=list,
+        read_tickets=list,
+        read_prs=dict,
+        now=lambda: 500.0,
+        read_manager=boom,
+    )
+
+    assert [w for w in writes if w["collection"] == "sessions"]
+    assert writes[-1]["data"]["manager_session_id"] is None

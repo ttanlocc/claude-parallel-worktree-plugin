@@ -239,9 +239,14 @@ def _safe(reader, fallback, name):
         return fallback
 
 
-def collect(read_agents, read_registry, read_escalations, read_tickets, read_prs, now) -> list[dict]:
+def collect(read_agents, read_registry, read_escalations, read_tickets, read_prs, now, read_manager=dict) -> list[dict]:
     """Gather every source and return the write set. Readers are injected so this is testable
-    without `az`, `gh`, or a live session."""
+    without `az`, `gh`, or a live session.
+
+    `read_manager` defaults to `dict` (a zero-arg callable returning `{}`, the same idiom
+    `read_prs=dict` already uses elsewhere) so every existing caller that has no manager reader
+    to give keeps getting the same null manager fields as before this parameter existed.
+    """
     tickets = _safe(read_tickets, None, "tickets")
     stamp = now()
     return build_writes(
@@ -253,6 +258,7 @@ def collect(read_agents, read_registry, read_escalations, read_tickets, read_prs
         now=stamp,
         # None, not `stamp`: a sweep that failed must not claim to have just run.
         ado_swept_at=stamp if tickets is not None else None,
+        manager=_safe(read_manager, {}, "manager"),
     )
 
 
@@ -303,6 +309,11 @@ def main() -> int:
         read_tickets=dashboard.get_ado_backlog,
         read_prs=dict,
         now=time.time,
+        # _read_state() returns {"session_id", "started_at"} — exactly the shape
+        # meta_status(manager=...) reads. Without this, `collect()` had no way at all to pass a
+        # manager through, so meta/status.manager_session_id stayed null forever and the board
+        # showed "Manager: chưa có phiên nào nhận việc" even while the daemon was running.
+        read_manager=manager_session._read_state,
     )
     json.dump(writes, sys.stdout, ensure_ascii=False)
     return 0
