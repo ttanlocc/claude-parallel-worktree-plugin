@@ -235,7 +235,20 @@
 
   /* ---------- backlog: reference weight. It is not the CTO's queue, so it never competes
      with the two zones above it. ---------- */
-  .ticket-row { display: grid; grid-template-columns: minmax(0, 1fr) 168px 136px; align-items: baseline;
+  .ticket-filters { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+                    padding: 0 var(--pad) 12px; }
+  .ticket-filters label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--faint);
+                          font-family: var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+  .ticket-filters select, .ticket-filters button {
+    font-family: var(--sans); font-size: 12.5px; color: var(--ink); background: var(--leaf);
+    border: 1px solid var(--rule); border-radius: 5px; padding: 4px 8px; text-transform: none;
+    letter-spacing: normal; }
+  .ticket-filters button { cursor: pointer; }
+  .ticket-filters button:hover, .ticket-filters select:hover { border-color: var(--ink-soft); }
+  .ticket-count { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--faint);
+                  font-variant-numeric: tabular-nums; }
+  .ticket-sprint { font-family: var(--mono); font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+  .ticket-row { display: grid; grid-template-columns: minmax(0, 1fr) 210px 136px; align-items: baseline;
                 gap: 12px; padding: 10px var(--pad); border-top: 1px solid var(--rule-soft); }
   .ticket-states { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; justify-self: start; }
   /* The PR chip carries its own state, so it is a chip and not another bare id link. Merged
@@ -355,6 +368,16 @@
             <div class="zone-head">
               <h2>Backlog ADO</h2>
               <span class="hint">chỉ để tham khảo — giao một kết quả, không phải một vé</span>
+            </div>
+            <div class="ticket-filters">
+              <label>Sprint
+                <select id="f-sprint"><option value="">tất cả</option></select>
+              </label>
+              <label>Trạng thái
+                <select id="f-state"><option value="">tất cả</option></select>
+              </label>
+              <button type="button" id="f-sort" data-sort="status">Sắp theo: việc cần làm trước</button>
+              <span class="ticket-count" id="f-count"></span>
             </div>
             <div id="tickets"></div>
           </section>
@@ -476,6 +499,7 @@ function computeTickets(adoTickets, tasks, esc) {
       // a derived "xong" over a ticket ADO still calls Resolved is the disagreement worth
       // showing, not hiding.
       adoState: ticket.state || "",
+      sprint: ticket.sprint || "",
       prLabel: withPr && withPr.pr_number ? "PR #" + withPr.pr_number : null,
       prHref: withPr ? withPr.pr_url : null,
       prState: withPr ? withPr.pr_state : null,
@@ -485,6 +509,94 @@ function computeTickets(adoTickets, tasks, esc) {
   const rank = { decision: 0, blocked: 1, stalled: 2, "not-started": 3, progress: 4, done: 5 };
   rows.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9));
   return rows;
+}
+
+// Filter + sort state. Held here, not read off the DOM, so a poll tick that rebuilds the rows
+// cannot silently drop what the user picked.
+const ticketView = { sprint: "", state: "", sort: "status" };
+const TICKET_SORTS = {
+  status: "việc cần làm trước",
+  "id-desc": "số ticket, mới nhất",
+  "id-asc": "số ticket, cũ nhất",
+};
+
+function applyTicketView(rows) {
+  let out = rows.filter(r =>
+    (!ticketView.sprint || r.sprint === ticketView.sprint) &&
+    (!ticketView.state || r.adoState === ticketView.state));
+  if (ticketView.sort !== "status") {
+    // Numeric, not lexicographic: as strings "AB#900" sorts after "AB#8311".
+    const dir = ticketView.sort === "id-asc" ? 1 : -1;
+    out = out.slice().sort((a, b) => (Number(a.id) - Number(b.id)) * dir);
+  }
+  return out;
+}
+
+// Options come from the rows themselves, so a sprint nobody has a ticket in never appears.
+// Newest sprint first, by the trailing number — "Sprint 58" above "Sprint 9", which plain
+// string order gets backwards. Buckets with no number (Backlog, AgentIQ, Project-202610) are
+// not sprints at all and sit together at the end, alphabetically.
+function sprintOrder(name) {
+  // The number must be its own word — "Sprint 57" and "Iteration 3" are numbered, while
+  // "Project-202610" is a bucket whose name merely ends in digits and belongs with Backlog.
+  const m = /(?:^|\s)(\d+)\s*$/.exec(name);
+  return m ? Number(m[1]) : null;
+}
+
+function compareSprints(a, b) {
+  const oa = sprintOrder(a);
+  const ob = sprintOrder(b);
+  if (oa === null && ob === null) return a.localeCompare(b);
+  if (oa === null) return 1;
+  if (ob === null) return -1;
+  return ob - oa;
+}
+
+function syncTicketFilters(rows) {
+  fillSelect("f-sprint", [...new Set(rows.map(r => r.sprint).filter(Boolean))].sort(compareSprints),
+    ticketView.sprint);
+  fillSelect("f-state", [...new Set(rows.map(r => r.adoState).filter(Boolean))].sort(),
+    ticketView.state);
+  const btn = document.getElementById("f-sort");
+  if (btn) btn.textContent = "Sắp theo: " + TICKET_SORTS[ticketView.sort];
+}
+
+function fillSelect(id, values, current) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  const wanted = ["", ...values];
+  const have = [...sel.options].map(o => o.value);
+  if (have.length !== wanted.length || have.some((v, i) => v !== wanted[i])) {
+    sel.replaceChildren(...wanted.map(v => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v || "tất cả";
+      return o;
+    }));
+  }
+  // A value that vanished from the data (last ticket in that sprint closed) must not leave the
+  // list silently filtered to nothing — fall back to "tất cả" and clear the stored choice.
+  if (current && !wanted.includes(current)) {
+    sel.value = "";
+    if (id === "f-sprint") ticketView.sprint = "";
+    if (id === "f-state") ticketView.state = "";
+  } else {
+    sel.value = current;
+  }
+}
+
+function wireTicketFilters() {
+  const rerender = () => renderTickets(computeTickets(lastAdoTickets, lastData, lastEscalations));
+  const sprint = document.getElementById("f-sprint");
+  const state = document.getElementById("f-state");
+  const sort = document.getElementById("f-sort");
+  if (sprint) sprint.addEventListener("change", () => { ticketView.sprint = sprint.value; rerender(); });
+  if (state) state.addEventListener("change", () => { ticketView.state = state.value; rerender(); });
+  if (sort) sort.addEventListener("click", () => {
+    const keys = Object.keys(TICKET_SORTS);
+    ticketView.sort = keys[(keys.indexOf(ticketView.sort) + 1) % keys.length];
+    rerender();
+  });
 }
 
 function renderTickets(rows) {
@@ -506,12 +618,25 @@ function renderTickets(rows) {
     box.replaceChildren(el("div", "empty", "Chưa có ticket nào."));
     return;
   }
+  syncTicketFilters(rows);
+  const visible = applyTicketView(rows);
+  const count = document.getElementById("f-count");
+  if (count) {
+    count.textContent = visible.length === rows.length
+      ? `${rows.length} ticket`
+      : `${visible.length} / ${rows.length} ticket`;
+  }
+
   const frag = document.createDocumentFragment();
-  const open = rows.filter(r => !ticketIsDone(r));
-  const done = rows.filter(ticketIsDone);
+  const open = visible.filter(r => !ticketIsDone(r));
+  const done = visible.filter(ticketIsDone);
 
   open.forEach(r => frag.append(ticketRow(r)));
-  if (!open.length) frag.append(el("div", "empty", "Không còn ticket nào đang mở."));
+  if (!open.length) {
+    frag.append(el("div", "empty", done.length
+      ? "Không còn ticket nào đang mở."
+      : "Không có ticket nào khớp bộ lọc."));
+  }
 
   if (done.length) {
     const box2 = el("details", "ticket-done");
@@ -542,6 +667,7 @@ function ticketRow(r) {
   left.append(el("span", "ticket-title", r.title || ""));
 
   const states = el("div", "ticket-states");
+  if (r.sprint) states.append(el("span", "ticket-sprint", r.sprint));
   if (r.adoState) states.append(pill(ADO_STATE_TONE[r.adoState] || "", r.adoState));
   states.append(pill(TICKET_STATUS_TONE[r.status] || "", TICKET_STATUS_LABEL[r.status] || r.status));
   row.append(left, states);
@@ -1055,6 +1181,8 @@ async function pollChat() {
   }
   renderChat(data);
 }
+
+wireTicketFilters();
 
 pollEscalations();
 setInterval(pollEscalations, 2000);

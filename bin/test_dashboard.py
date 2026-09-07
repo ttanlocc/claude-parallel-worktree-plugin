@@ -94,12 +94,14 @@ def test_shape_ado_ticket_extracts_known_fields():
             "System.Id": 8148,
             "System.State": "New",
             "System.Title": "Confirm agent run/trace tracked fields",
+            "System.IterationPath": "AgentIQ\\Sprint 57",
         },
     }
     assert _shape_ado_ticket(raw) == {
         "id": "8148",
         "title": "Confirm agent run/trace tracked fields",
         "state": "New",
+        "sprint": "Sprint 57",
         "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/8148",
     }
 
@@ -109,6 +111,7 @@ def test_shape_ado_ticket_handles_missing_fields():
         "id": "1",
         "title": "",
         "state": "",
+        "sprint": "",
         "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/1",
     }
 
@@ -659,3 +662,11 @@ def test_dashboard_script_declares_each_top_level_name_once():
 
     duplicates = sorted({n for n in names if names.count(n) > 1})
     assert not duplicates, f"declared more than once at script top level: {duplicates}"
+
+
+def test_ado_backlog_wiql_selects_the_iteration_path():
+    """The sprint filter in dashboard.html reads `ticket.sprint`, which only exists because
+    the WIQL asks for IterationPath. Dropping the column would empty the filter's option list
+    with no error anywhere — the board would just look like nothing has a sprint."""
+    wiql = dashboard._ado_backlog_wiql()
+    assert "[System.IterationPath]" in wiql

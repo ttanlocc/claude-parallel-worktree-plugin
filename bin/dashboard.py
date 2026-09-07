@@ -270,7 +270,7 @@ def _ado_assignee_clause() -> str:
 
 def _ado_backlog_wiql() -> str:
     return (
-        "SELECT [System.Id], [System.Title], [System.State] FROM WorkItems "
+        "SELECT [System.Id], [System.Title], [System.State], [System.IterationPath] FROM WorkItems "
         f"WHERE [System.TeamProject] = '{_ADO_PROJECT}' AND {_ado_assignee_clause()} "
         "AND [System.State] <> 'Removed' "
         "AND ([System.State] <> 'Closed' "
@@ -285,6 +285,10 @@ def _shape_ado_ticket(raw: dict) -> dict:
         "id": ticket_id,
         "title": fields.get("System.Title") or "",
         "state": fields.get("System.State") or "",
+        # Only the leaf of the iteration path — "AgentIQ\\Sprint 57" is how ADO stores it and
+        # "Sprint 57" is the only part anyone filters by. Tickets parked at the project root
+        # have no sprint leaf to speak of and come back "".
+        "sprint": (fields.get("System.IterationPath") or "").split("\\")[-1],
         "url": _ADO_DEFAULT_BASE + ticket_id,
     }
 
