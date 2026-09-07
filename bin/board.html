@@ -582,10 +582,23 @@ function sessionTile(s) {
   );
 }
 
+// One collapsible group of the sessions grouping below: its own count (in the summary text,
+// same "N label" idiom the done-tickets/resolved-escalations subgroups already use) and its own
+// "nothing here" note rather than vanishing when empty — so an operator sees "0 cần bạn xử lý"
+// as a real, checked-and-clear state, not a group that silently failed to render.
+function sessionGroup(label, sessions, emptyText, emptyIsGood, openByDefault) {
+  const body = sessions.length
+    ? h("div", { class: "session-grid" }, sessions.map(sessionTile))
+    : (emptyIsGood ? goodNote(emptyText) : loadingNote(emptyText));
+  return collapsedGroup(sessions.length + " " + label, [body], openByDefault);
+}
+
 function renderSessions() {
   const section = h("section", { class: "board-section" });
   const loaded = view.loaded.sessions;
-  const count = loaded ? view.sessions.filter((s) => s.state !== "done").length : null;
+  // "Live" here means not yet filed under Đã xong — idle joins done in that group below, so the
+  // header count (still "what's not settled yet") follows the same split.
+  const count = loaded ? view.sessions.filter((s) => s.state !== "idle" && s.state !== "done").length : null;
   section.append(sectionHead("Phiên làm việc",
     "“Đang chờ duyệt” trông giống đang chạy nhưng thực ra đã đứng lại — cần bạn mở khoá.", count));
 
@@ -593,19 +606,23 @@ function renderSessions() {
   if (!loaded) { section.append(loadingNote("Đang tải phiên làm việc…")); return section; }
   if (view.errors.sessions) { section.append(errorNote("Không đọc được sessions — kiểm tra console.")); return section; }
 
-  const all = view.sessions;
-  const active = all.filter((s) => s.state !== "done").sort((a, b) =>
-    (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9) || String(a.task).localeCompare(String(b.task)));
-  const done = all.filter((s) => s.state === "done");
+  const byStateThenTask = (a, b) =>
+    (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9) || String(a.task).localeCompare(String(b.task));
+  const waiting = view.sessions.filter((s) => s.state === "waiting").sort(byStateThenTask);
+  const running = view.sessions.filter((s) => s.state === "running").sort(byStateThenTask);
+  const finished = view.sessions.filter((s) => s.state === "idle" || s.state === "done").sort(byStateThenTask);
 
-  if (!active.length && !done.length) section.append(loadingNote("Chưa có phiên nào."));
-  else if (!active.length) section.append(goodNote("Không có phiên nào đang chạy hoặc chờ duyệt."));
-  else section.append(h("div", { class: "session-grid" }, active.map(sessionTile)));
-
-  if (done.length) {
-    section.append(collapsedGroup(done.length + " đã xong",
-      [h("div", { class: "session-grid" }, done.map(sessionTile))]));
-  }
+  // Order is the point: the group that needs a human comes first so it is never below the fold,
+  // then what is actively running, then what needs nobody. Waiting and running default OPEN —
+  // both are "happening right now" and were always visible pre-grouping; Đã xong defaults
+  // collapsed, same as the old done-only subgroup, now also absorbing idle (nothing to act on in
+  // either state). An operator can still collapse "đang chạy" or expand "đã xong" by hand — the
+  // default only controls what greets them on load.
+  section.append(
+    sessionGroup("cần bạn xử lý", waiting, "Không có phiên nào đang chờ duyệt.", true, true),
+    sessionGroup("đang chạy", running, "Không có phiên nào đang chạy.", false, true),
+    sessionGroup("đã xong", finished, "Chưa có phiên nào đã xong.", false, false),
+  );
   return section;
 }
 
