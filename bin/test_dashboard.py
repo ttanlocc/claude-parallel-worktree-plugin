@@ -635,3 +635,27 @@ if __name__ == "__main__":
         t()
         print(f"PASS {t.__name__}")
     print(f"{len(tests)} passed")
+
+
+def test_dashboard_script_declares_each_top_level_name_once():
+    """A second `const X` at script top level is a SyntaxError, and a SyntaxError in the one
+    inline <script> means NOTHING renders — no zones, no rows, just the static shell. That
+    shipped once (a duplicate PR_STATE_LABEL) and looked like an empty board, not a crash,
+    because the failure is at parse time and never reaches a try/except. Every other test here
+    exercises Python; nothing reads the script, so a name collision was invisible until a
+    human opened the page."""
+    import pathlib
+    import re
+
+    html = (pathlib.Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+    blocks = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
+    assert blocks, "dashboard.html has no <script> block — did the file move?"
+
+    names = []
+    for block in blocks:
+        # Column 0 only: anything indented is inside a function or object literal, where
+        # re-using a name is legal and common.
+        names += re.findall(r"^(?:const|let|var|function)\s+([A-Za-z_$][\w$]*)", block, re.M)
+
+    duplicates = sorted({n for n in names if names.count(n) > 1})
+    assert not duplicates, f"declared more than once at script top level: {duplicates}"
