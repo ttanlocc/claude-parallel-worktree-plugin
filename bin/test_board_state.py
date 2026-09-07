@@ -235,3 +235,156 @@ def test_meta_status_reports_a_source_that_has_never_run_as_null_not_as_now():
     assert doc["manager_session_id"] is None
     assert doc["manager_started_at"] is None
     assert doc["written_at"] == 1000.0
+
+
+from board_state import build_writes
+
+
+def _writes_for(writes, collection):
+    return [w for w in writes if w["collection"] == collection]
+
+
+def test_build_writes_emits_one_set_per_document_across_all_four_collections():
+    writes = build_writes(
+        agents=[{"name": "t1", "sessionId": "s1", "state": "running"}],
+        registry={},
+        escalations=[{"id": "e1", "kind": "credentials", "question": "?"}],
+        tickets=[{"id": "8311", "title": "x", "state": "Active", "sprint": "Sprint 57", "url": "u"}],
+        pr_by_ticket={},
+        now=1000.0,
+    )
+
+    assert {w["collection"] for w in writes} == {"sessions", "escalations", "tickets", "meta"}
+    assert all(w["op"] == "set" for w in writes)
+    assert _writes_for(writes, "sessions")[0]["doc_id"] == "t1"
+    assert _writes_for(writes, "escalations")[0]["doc_id"] == "e1"
+    assert _writes_for(writes, "tickets")[0]["doc_id"] == "8311"
+    assert _writes_for(writes, "meta")[0]["doc_id"] == "status"
+
+
+def test_build_writes_puts_meta_status_last():
+    """`meta/status` claims the data alongside it is current. Written first, a batch that dies
+    halfway would advertise a sweep whose rows never landed."""
+    writes = build_writes(
+        agents=[{"name": "t1", "sessionId": "s1", "state": "idle"}],
+        registry={},
+        escalations=[],
+        tickets=[],
+        pr_by_ticket={},
+        now=1000.0,
+    )
+
+    assert writes[-1]["collection"] == "meta"
+    assert writes[-1]["doc_id"] == "status"
+
+
+def test_build_writes_stamps_the_session_scan_time_from_now():
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1234.0, ado_swept_at=999.0
+    )
+
+    meta = writes[-1]["data"]
+    assert meta["last_session_scan"] == 1234.0
+    assert meta["last_ado_sweep"] == 999.0
+
+
+def test_build_writes_on_empty_sources_still_writes_meta():
+    """An empty board is a real state — no workers, no escalations. It must be distinguishable
+    from a sweep that never ran, and only meta/status can say which."""
+    writes = build_writes(agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1000.0)
+
+    assert len(writes) == 1
+    assert writes[0]["doc_id"] == "status"
+
+
+# --- Coverage added beyond the brief -----------------------------------------------------
+#
+# The four tests above are the brief's own, added verbatim. Everything below closes gaps the
+# brief's tests leave open: none of them check the `data` body's provenance for any collection,
+# whether `manager` or `written_at` actually reach `meta_status`, whether a never-run
+# `ado_swept_at` survives as null rather than defaulting to `now`, or whether entry counts match
+# document counts (a duplicate or a drop is invisible to a set-membership or first-element check).
+
+
+def test_build_writes_on_empty_sources_the_sole_entry_has_meta_collection_and_set_op():
+    """The brief's empty-sources test pins doc_id and count but not collection or op — a stray
+    write with doc_id "status" filed under the wrong collection, or with the wrong op, would
+    still pass it silently."""
+    writes = build_writes(agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1000.0)
+
+    assert writes[0]["collection"] == "meta"
+    assert writes[0]["op"] == "set"
+
+
+def test_build_writes_data_matches_the_underlying_transform_for_each_collection():
+    """No brief test compares `data` against its source transform's own output — only doc_id is
+    checked. A dropped `registry`/`pr_by_ticket`/`manager` argument, or `data` replaced by `{}`,
+    would pass every existing assertion. Registry/pr_by_ticket/manager/ado_swept_at are all
+    non-empty here so a dropped argument changes the result instead of coincidentally matching a
+    default."""
+    agents = [{"name": "t1", "sessionId": "s1", "state": "running"}]
+    registry = {"t1": {"branch": "feature/x", "path": "/repo/wt", "short_id": "abc123", "ado_ids": ["9"]}}
+    escalations = [{"id": "e1", "kind": "credentials", "question": "?"}]
+    tickets = [{"id": "8311", "title": "x", "state": "Active", "sprint": "Sprint 57", "url": "u"}]
+    pr_by_ticket = {"8311": {"number": 42, "state": "OPEN", "url": "https://example/42"}}
+    manager = {"session_id": "m1", "started_at": 100.0}
+
+    writes = build_writes(
+        agents=agents,
+        registry=registry,
+        escalations=escalations,
+        tickets=tickets,
+        pr_by_ticket=pr_by_ticket,
+        now=1234.0,
+        ado_swept_at=999.0,
+        manager=manager,
+    )
+
+    assert _writes_for(writes, "sessions")[0]["data"] == session_docs(agents, registry)["t1"]
+    assert _writes_for(writes, "escalations")[0]["data"] == escalation_docs(escalations)["e1"]
+    assert _writes_for(writes, "tickets")[0]["data"] == ticket_docs(tickets, pr_by_ticket)["8311"]
+    assert _writes_for(writes, "meta")[0]["data"] == meta_status(
+        now=1234.0, ado_swept_at=999.0, sessions_scanned_at=1234.0, manager=manager
+    )
+
+
+def test_build_writes_leaves_ado_swept_at_null_when_never_swept():
+    """`ado_swept_at` defaults to None — a sweep that has never run. A default of `now` here
+    would make a sweep that never ran look as fresh as the session scan happening in the same
+    call, which is exactly the false freshness `meta_status` exists to prevent."""
+    writes = build_writes(agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1234.0)
+
+    assert writes[-1]["data"]["last_ado_sweep"] is None
+
+
+def test_build_writes_emits_exactly_one_entry_per_document_with_no_duplicates_or_drops():
+    """The brief's test name claims "one set per document" but only checks set membership and
+    the first entry per collection — a duplicated or a dropped write would still pass. Two
+    documents per collection means a duplicate-without-drop (caught by the length check) and a
+    drop-with-substitution (caught by the doc_id-set check) are both visible."""
+    writes = build_writes(
+        agents=[
+            {"name": "t1", "sessionId": "s1", "state": "running"},
+            {"name": "t2", "sessionId": "s2", "state": "idle"},
+        ],
+        registry={},
+        escalations=[
+            {"id": "e1", "kind": "credentials", "question": "?"},
+            {"id": "e2", "kind": "scope_question", "question": "?"},
+        ],
+        tickets=[
+            {"id": "1", "title": "a", "state": "New", "sprint": "S", "url": "u1"},
+            {"id": "2", "title": "b", "state": "New", "sprint": "S", "url": "u2"},
+        ],
+        pr_by_ticket={},
+        now=1000.0,
+    )
+
+    assert len(writes) == 7
+    assert len(_writes_for(writes, "sessions")) == 2
+    assert len(_writes_for(writes, "escalations")) == 2
+    assert len(_writes_for(writes, "tickets")) == 2
+    assert len(_writes_for(writes, "meta")) == 1
+    assert {w["doc_id"] for w in _writes_for(writes, "sessions")} == {"t1", "t2"}
+    assert {w["doc_id"] for w in _writes_for(writes, "escalations")} == {"e1", "e2"}
+    assert {w["doc_id"] for w in _writes_for(writes, "tickets")} == {"1", "2"}

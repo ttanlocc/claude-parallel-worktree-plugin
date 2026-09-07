@@ -114,3 +114,45 @@ def meta_status(now: float, ado_swept_at=None, sessions_scanned_at=None, manager
         "manager_session_id": manager.get("session_id"),
         "manager_started_at": manager.get("started_at"),
     }
+
+
+def build_writes(
+    agents,
+    registry,
+    escalations,
+    tickets,
+    pr_by_ticket,
+    now: float,
+    ado_swept_at=None,
+    manager=None,
+) -> list[dict]:
+    """Every document to write, in the order to write it.
+
+    Shaped as the Artifact tool's `write_db` batch entries so the calling session passes this
+    straight through without reshaping — the transform is testable here, and the session stays
+    a thin courier.
+    """
+    writes = []
+    for collection, docs in (
+        ("sessions", session_docs(agents, registry)),
+        ("escalations", escalation_docs(escalations)),
+        ("tickets", ticket_docs(tickets, pr_by_ticket)),
+    ):
+        for doc_id, data in docs.items():
+            writes.append({"op": "set", "collection": collection, "doc_id": doc_id, "data": data})
+    # Last, always: this document asserts the rows above it are current, so a batch that dies
+    # halfway must not have already claimed a sweep that did not land.
+    writes.append(
+        {
+            "op": "set",
+            "collection": "meta",
+            "doc_id": "status",
+            "data": meta_status(
+                now=now,
+                ado_swept_at=ado_swept_at,
+                sessions_scanned_at=now,
+                manager=manager,
+            ),
+        }
+    )
+    return writes
