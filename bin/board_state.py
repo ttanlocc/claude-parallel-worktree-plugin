@@ -5,6 +5,8 @@ No I/O, no subprocess, no session: every function here takes already-read data a
 plain dicts. That is what makes the board's data model testable without publishing anything.
 """
 
+import os
+
 from escalations import classify, normalize_kind, normalize_options
 
 # Kinds that mean production is already hurting. Scored off the CANONICAL name, never the raw
@@ -156,3 +158,71 @@ def build_writes(
         }
     )
     return writes
+
+
+import json
+import subprocess
+import sys
+
+_SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
+
+
+def _safe(reader, fallback):
+    """Read one source, or fall back. A source that cannot be read must not blank the board —
+    every other source is still worth publishing, and meta/status shows the missing one aging."""
+    try:
+        return reader()
+    except Exception:
+        return fallback
+
+
+def collect(read_agents, read_registry, read_escalations, read_tickets, read_prs, now) -> list[dict]:
+    """Gather every source and return the write set. Readers are injected so this is testable
+    without `az`, `gh`, or a live session."""
+    tickets = _safe(read_tickets, None)
+    stamp = now()
+    return build_writes(
+        agents=_safe(read_agents, []),
+        registry=_safe(read_registry, {}),
+        escalations=_safe(read_escalations, []),
+        tickets=tickets or [],
+        pr_by_ticket=_safe(read_prs, {}),
+        now=stamp,
+        # None, not `stamp`: a sweep that failed must not claim to have just run.
+        ado_swept_at=stamp if tickets is not None else None,
+    )
+
+
+def main() -> int:
+    """Print the write set as JSON. The scheduled session pipes this into `write_db`."""
+    import time
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import dashboard
+    import manager_daemon
+
+    def read_registry():
+        # The registry FILE is already keyed by task name, which is the shape session_docs
+        # wants. `dashboard.get_registry()` shells out to parallel-task.sh and returns a list;
+        # reading the file skips a subprocess and a reshape.
+        path = os.path.join(dashboard.REPO_DIR, ".claude", "worktrees", ".parallel-registry.json")
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    writes = collect(
+        # list_agents lives in manager_daemon, not dashboard.
+        read_agents=manager_daemon.list_agents,
+        read_registry=read_registry,
+        read_escalations=lambda: dashboard.get_escalations()["needs_human"],
+        # No `or None`: an empty backlog is a successful sweep that found nothing, and must
+        # stamp last_ado_sweep. Only an exception (caught by _safe) means "did not run".
+        read_tickets=dashboard.get_ado_backlog,
+        read_prs=dict,
+        now=time.time,
+    )
+    json.dump(writes, sys.stdout, ensure_ascii=False)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

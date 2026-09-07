@@ -392,3 +392,262 @@ def test_build_writes_emits_exactly_one_entry_per_document_with_no_duplicates_or
     assert {w["doc_id"] for w in _writes_for(writes, "sessions")} == {"t1", "t2"}
     assert {w["doc_id"] for w in _writes_for(writes, "escalations")} == {"e1", "e2"}
     assert {w["doc_id"] for w in _writes_for(writes, "tickets")} == {"1", "2"}
+
+
+def test_collect_uses_injected_readers_and_never_touches_the_network():
+    """The readers are injected so the collection step is testable without `az`, `gh` or a live
+    session — the same shape `test_dashboard.py` already uses for `ask`."""
+    from board_state import collect
+
+    writes = collect(
+        read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "waiting"}],
+        read_registry=lambda: {"t1": {"branch": "feature/x", "short_id": "ab12"}},
+        read_escalations=lambda: [{"id": "e1", "kind": "credentials", "question": "?"}],
+        read_tickets=lambda: [{"id": "1", "title": "t", "state": "New", "sprint": "S1", "url": "u"}],
+        read_prs=lambda: {},
+        now=lambda: 500.0,
+    )
+
+    sessions = [w for w in writes if w["collection"] == "sessions"]
+    assert sessions[0]["data"]["state"] == "waiting"
+    assert writes[-1]["data"]["written_at"] == 500.0
+
+
+def test_collect_degrades_to_an_empty_source_when_one_reader_fails():
+    """`az` not being authenticated must not blank the whole board — every other source is
+    still worth publishing, and meta/status will show the ADO age going stale."""
+    from board_state import collect
+
+    def boom():
+        raise OSError("az not logged in")
+
+    writes = collect(
+        read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "idle"}],
+        read_registry=lambda: {},
+        read_escalations=lambda: [],
+        read_tickets=boom,
+        read_prs=lambda: {},
+        now=lambda: 500.0,
+    )
+
+    assert [w for w in writes if w["collection"] == "sessions"]
+    assert not [w for w in writes if w["collection"] == "tickets"]
+    assert writes[-1]["data"]["last_ado_sweep"] is None
+
+
+from board_state import collect
+
+# --- Coverage added beyond the brief -----------------------------------------------------
+#
+# The brief's two tests above wire non-trivial data into all five readers but only ever assert
+# two facts: the `state` field session_docs derives from `read_agents`, and `written_at` from
+# `now`. registry/escalations/tickets/prs data sits in every fixture unchecked; only
+# `read_tickets`'s failure path is exercised, never the other four readers'; and the plan's own
+# most-important rule — an empty-but-successful ticket sweep must still stamp `last_ado_sweep` —
+# is asserted by neither test (test 1's ticket list is non-empty, test 2's reader raises instead
+# of returning empty). Closing those gaps below, one behaviour per test so a mutation names
+# exactly which reader or which path broke.
+
+
+def test_collect_stamps_last_ado_sweep_normally_when_the_sweep_finds_nothing():
+    """The plan's central freshness rule: a ticket read that SUCCEEDS with an empty list is a
+    real sweep that found nothing, not a failed one — `last_ado_sweep` must stamp the same as
+    any other successful pass. `tickets or []` normalises the value for build_writes but must
+    not also flip `ado_swept_at` to None; only `_safe` catching an exception may do that."""
+    writes = collect(
+        read_agents=lambda: [],
+        read_registry=lambda: {},
+        read_escalations=lambda: [],
+        read_tickets=lambda: [],
+        read_prs=lambda: {},
+        now=lambda: 500.0,
+    )
+
+    assert not [w for w in writes if w["collection"] == "tickets"]
+    assert writes[-1]["data"]["last_ado_sweep"] == 500.0
+
+
+def test_collect_carries_registry_fields_into_the_session_doc():
+    """Proves `_safe(read_registry, {})`'s SUCCESS value — not just its `{}` fallback — reaches
+    `session_docs`. The brief's own test 1 supplies this same registry fixture and never checks
+    it; a `collect` that silently dropped the registry reader's return value would still pass
+    every brief assertion because they only ever look at `state`."""
+    writes = collect(
+        read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "running"}],
+        read_registry=lambda: {"t1": {"branch": "feature/x", "short_id": "ab12"}},
+        read_escalations=lambda: [],
+        read_tickets=lambda: [],
+        read_prs=lambda: {},
+        now=lambda: 500.0,
+    )
+
+    sessions = [w for w in writes if w["collection"] == "sessions"]
+    assert sessions[0]["data"]["branch"] == "feature/x"
+    assert sessions[0]["data"]["short_id"] == "ab12"
+
+
+def test_collect_writes_escalations_from_the_injected_reader():
+    """No brief test ever inspects the escalations collection — a `collect` that always passed
+    `escalations=[]` to `build_writes`, ignoring `read_escalations` entirely, would still pass
+    both brief tests."""
+    writes = collect(
+        read_agents=lambda: [],
+        read_registry=lambda: {},
+        read_escalations=lambda: [{"id": "e1", "kind": "credentials", "question": "?"}],
+        read_tickets=lambda: [],
+        read_prs=lambda: {},
+        now=lambda: 500.0,
+    )
+
+    escalations = [w for w in writes if w["collection"] == "escalations"]
+    assert escalations[0]["doc_id"] == "e1"
+    assert escalations[0]["data"]["severity"] == "P0"
+
+
+def test_collect_writes_tickets_and_attaches_pr_data_from_the_injected_readers():
+    """Neither brief test inspects the tickets collection (test 1's ticket list is non-empty but
+    unchecked; test 2's is empty because the reader raises). Also proves `_safe(read_prs, {})`'s
+    success value reaches `ticket_docs` — the brief's own `read_prs=lambda: {}` fixture is too
+    trivial to tell a dropped argument from a working one."""
+    writes = collect(
+        read_agents=lambda: [],
+        read_registry=lambda: {},
+        read_escalations=lambda: [],
+        read_tickets=lambda: [{"id": "8311", "title": "t", "state": "Active", "sprint": "S", "url": "u"}],
+        read_prs=lambda: {"8311": {"number": 42, "state": "OPEN", "url": "https://example/42"}},
+        now=lambda: 500.0,
+    )
+
+    tickets = [w for w in writes if w["collection"] == "tickets"]
+    assert tickets[0]["doc_id"] == "8311"
+    assert tickets[0]["data"]["pr"] == {"number": 42, "state": "OPEN", "url": "https://example/42"}
+
+
+def test_collect_degrades_agents_to_empty_without_blanking_other_sources():
+    """The brief only ever makes `read_tickets` fail. A broken `claude agents --json` call must
+    not blank escalations/tickets too — and raising RuntimeError (not one of the subprocess-
+    shaped exceptions dashboard.py narrowly catches) proves `_safe` catches broadly rather than
+    only OSError/SubprocessError/JSONDecodeError."""
+
+    def boom():
+        raise RuntimeError("claude cli not found")
+
+    writes = collect(
+        read_agents=boom,
+        read_registry=lambda: {},
+        read_escalations=lambda: [{"id": "e1", "kind": "credentials", "question": "?"}],
+        read_tickets=lambda: [{"id": "1", "title": "t", "state": "New", "sprint": "S", "url": "u"}],
+        read_prs=lambda: {},
+        now=lambda: 500.0,
+    )
+
+    assert not [w for w in writes if w["collection"] == "sessions"]
+    assert [w for w in writes if w["collection"] == "escalations"]
+    assert [w for w in writes if w["collection"] == "tickets"]
+
+
+def test_collect_degrades_registry_to_empty_without_blanking_sessions():
+    """Agent-first, not registry-first — the same rule `session_docs` itself enforces: a broken
+    registry read must not blank sessions, only strip the enrichment it would have added."""
+
+    def boom():
+        raise KeyError("registry file missing a key")
+
+    writes = collect(
+        read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "running"}],
+        read_registry=boom,
+        read_escalations=lambda: [],
+        read_tickets=lambda: [],
+        read_prs=lambda: {},
+        now=lambda: 500.0,
+    )
+
+    sessions = [w for w in writes if w["collection"] == "sessions"]
+    assert sessions[0]["data"]["state"] == "running"
+    assert sessions[0]["data"]["branch"] is None
+
+
+def test_collect_degrades_escalations_to_empty_without_blanking_other_sources():
+    def boom():
+        raise ValueError("queue file corrupt")
+
+    writes = collect(
+        read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "running"}],
+        read_registry=lambda: {},
+        read_escalations=boom,
+        read_tickets=lambda: [{"id": "1", "title": "t", "state": "New", "sprint": "S", "url": "u"}],
+        read_prs=lambda: {},
+        now=lambda: 500.0,
+    )
+
+    assert not [w for w in writes if w["collection"] == "escalations"]
+    assert [w for w in writes if w["collection"] == "sessions"]
+    assert [w for w in writes if w["collection"] == "tickets"]
+
+
+def test_collect_degrades_prs_to_empty_without_blanking_tickets():
+    """A broken PR lookup must not blank the tickets collection — it must only leave `pr` null
+    on every ticket, same as when no PR references it at all."""
+
+    def boom():
+        raise TypeError("gh output not JSON")
+
+    writes = collect(
+        read_agents=lambda: [],
+        read_registry=lambda: {},
+        read_escalations=lambda: [],
+        read_tickets=lambda: [{"id": "1", "title": "t", "state": "New", "sprint": "S", "url": "u"}],
+        read_prs=boom,
+        now=lambda: 500.0,
+    )
+
+    tickets = [w for w in writes if w["collection"] == "tickets"]
+    assert tickets[0]["data"]["pr"] is None
+
+
+def test_collect_calls_now_exactly_once_so_every_stamp_in_one_call_agrees():
+    """`stamp = now()` is captured once and reused for `written_at`, `last_session_scan` AND
+    `last_ado_sweep`. A `now` called more than once would be invisible to every other test here,
+    since all of them pass a constant lambda that returns the same value regardless of call
+    count."""
+    calls = []
+
+    def counting_now():
+        calls.append(len(calls))
+        return 100.0 + len(calls)
+
+    writes = collect(
+        read_agents=lambda: [],
+        read_registry=lambda: {},
+        read_escalations=lambda: [],
+        read_tickets=lambda: [],
+        read_prs=lambda: {},
+        now=counting_now,
+    )
+
+    assert len(calls) == 1
+    meta = writes[-1]["data"]
+    assert meta["written_at"] == meta["last_session_scan"] == meta["last_ado_sweep"]
+
+
+def test_collect_lets_a_broken_clock_propagate_instead_of_writing_a_bogus_timestamp():
+    """Unlike the five source readers, `now` is not wrapped in `_safe` — every document's
+    freshness depends on it, so a broken clock must fail loudly rather than silently write a
+    fabricated timestamp the board would present as real."""
+
+    def boom():
+        raise RuntimeError("clock broken")
+
+    threw = False
+    try:
+        collect(
+            read_agents=lambda: [],
+            read_registry=lambda: {},
+            read_escalations=lambda: [],
+            read_tickets=lambda: [],
+            read_prs=lambda: {},
+            now=boom,
+        )
+    except RuntimeError:
+        threw = True
+    assert threw
