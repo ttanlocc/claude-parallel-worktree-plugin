@@ -52,12 +52,13 @@ def session_docs(agents: list[dict], registry: dict) -> dict[str, dict]:
     once parallel-task.sh has provisioned it.
     """
     docs = {}
+    registry = registry or {}
     for agent in agents or []:
         name = agent.get("name")
         if not name:
             # A document id cannot be empty; an unnamed agent has no addressable key.
             continue
-        reg = (registry or {}).get(name) or {}
+        reg = registry.get(name) or {}
         docs[name] = {
             "task": name,
             "session_id": agent.get("sessionId"),
@@ -69,6 +70,14 @@ def session_docs(agents: list[dict], registry: dict) -> dict[str, dict]:
             "worktree": reg.get("path"),
             "started_at": agent.get("startedAt"),
             "ado_refs": list(reg.get("ado_ids") or []),
+            # True iff parallel-task.sh actually dispatched this task — an entry EXISTS in the
+            # registry, not "branch happens to be truthy". A registry row with a blank branch
+            # field is still work the manager provisioned; `bool(reg)` or `bool(branch)` would
+            # both misclassify it as ad-hoc the same way dashboard.py's `managed` signal does not
+            # (that one gets away with `bool(reg)` only because it is keyed off session_id lookups
+            # that never store an empty dict — this dict is keyed by task name straight off the
+            # registry file, so existence has to be checked explicitly).
+            "managed": name in registry,
         }
     return docs
 

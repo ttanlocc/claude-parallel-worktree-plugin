@@ -46,6 +46,28 @@ def test_session_docs_survive_an_agent_the_registry_never_heard_of():
     assert docs["ad-hoc"]["ado_refs"] == []
 
 
+def test_session_docs_mark_a_registered_task_as_managed_even_with_no_branch_field():
+    """`managed` must come from the registry ENTRY EXISTING, not from any field on it happening
+    to be non-empty. parallel-task.sh can record a row before branch resolution lands in it, and
+    that row is still work the manager dispatched — `bool(branch)` (or `bool(reg)`, which is
+    false too for an entry with no fields yet) would both wrongly call it ad-hoc."""
+    agents = [{"name": "t1", "sessionId": "s1", "state": "running"}]
+    registry = {"t1": {}}  # entry exists, but carries no fields at all yet
+
+    doc = session_docs(agents, registry)["t1"]
+
+    assert doc["managed"] is True
+    assert doc["branch"] is None
+
+
+def test_session_docs_mark_an_unregistered_task_as_not_managed():
+    """A session dispatched by any other means — a spike, a smoke test, someone's terminal — has
+    no registry row and must not be counted as work the manager dispatched."""
+    doc = session_docs([{"name": "ad-hoc", "sessionId": "s1", "state": "idle"}], {})["ad-hoc"]
+
+    assert doc["managed"] is False
+
+
 def test_session_docs_read_state_from_either_field_name():
     """`claude agents --json` has used both `state` and `status`; the dashboard already reads
     whichever is present and this must not disagree with it."""
