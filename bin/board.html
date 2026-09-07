@@ -218,21 +218,12 @@
   .esc-card.sev-P0 { border-left-color: var(--bad); background: var(--bad-soft); }
   .esc-card.sev-P1 { border-left-color: var(--warn); background: var(--warn-soft); }
   .esc-card.sev-P2 { border-left-color: var(--accent); background: var(--surface); }
-  .esc-card.is-pending { opacity: .6; }
 
   .esc-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .esc-wait { margin-left: auto; font-size: var(--fs-sm); color: var(--ink-soft); }
   .esc-question { font-size: var(--fs-md); font-weight: 600; }
   .esc-session { font-size: var(--fs-sm); color: var(--faint); }
   .esc-options { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
-
-  .btn-option {
-    background: var(--surface); border: 1px solid var(--border); color: var(--ink);
-    padding: 6px 12px; border-radius: var(--radius-s); cursor: pointer; font-size: var(--fs-sm); font-weight: 600;
-  }
-  .btn-option:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
-  .btn-option:disabled { cursor: not-allowed; opacity: .55; }
-  .esc-pending-note { font-size: var(--fs-sm); color: var(--ink-soft); font-style: italic; }
   .esc-no-options { font-size: var(--fs-sm); color: var(--faint); font-style: italic; }
   /* Supporting detail (reason/evidence/tier), always last in the card, set off from the
      question+options above it by a thin rule so the card stays scannable at a glance. */
@@ -295,16 +286,6 @@
   details.collapsed-group[open] > summary::before { content: "▾"; }
   details.collapsed-group > summary:hover { color: var(--ink); }
 
-  /* ============ Toast ============ */
-  .toast {
-    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(0);
-    background: var(--ink); color: var(--bg); font-size: var(--fs-sm); font-weight: 600;
-    padding: 10px 18px; border-radius: 999px; box-shadow: var(--shadow);
-    opacity: 0; transition: opacity .18s ease, transform .18s ease; pointer-events: none; z-index: 50;
-    max-width: 90vw; text-align: center;
-  }
-  .toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
-
   @media (max-width: 640px) {
     .app { padding: 14px 14px 44px; }
     .freshness-strip { margin-left: 0; }
@@ -335,8 +316,6 @@
   <main class="board" id="board">
     <section class="board-section"><p class="state-note is-loading">Đang kết nối tới dữ liệu bảng…</p></section>
   </main>
-
-  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </div>
 
 <script>
@@ -453,7 +432,6 @@ view.loaded = { sessions: false, escalations: false, tickets: false, meta: false
 view.errors = { sessions: false, escalations: false, tickets: false, meta: false };
 
 const ticketFilters = { sprint: "", state: "" };
-const pendingAnswers = new Set(); // escalation ids with an in-flight write, for optimistic disabling
 
 /* ---------- small state-note builders ---------- */
 function loadingNote(text) { return h("p", { class: "state-note is-loading" }, text); }
@@ -479,7 +457,6 @@ function escalationCard(esc) {
   const drift = esc.kind !== esc.kind_raw;
   const kindText = esc.kind == null ? "không rõ" : esc.kind;
   const gloss = esc.kind ? KIND_GLOSS[esc.kind] : null;
-  const pending = pendingAnswers.has(esc.id);
   const options = Array.isArray(esc.options) ? esc.options : [];
   const evidence = esc.evidence && typeof esc.evidence === "object" ? esc.evidence : {};
   const evidenceRows = Object.entries(evidence);
@@ -491,7 +468,7 @@ function escalationCard(esc) {
   const impliedTier = sev === "P2" ? "tier2" : "tier3";
   const tierDrift = esc.tier && esc.tier !== impliedTier ? esc.tier : null;
 
-  return h("div", { class: "esc-card sev-" + sev + (pending ? " is-pending" : "") },
+  return h("div", { class: "esc-card sev-" + sev },
     h("div", { class: "esc-top" },
       pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
       h("span", { class: "chip", title: gloss || null }, kindText),
@@ -503,12 +480,13 @@ function escalationCard(esc) {
     ),
     h("div", { class: "esc-question" }, esc.question || "(không có nội dung câu hỏi)"),
     h("div", { class: "esc-session" }, "phiên: " + sessionLabel(esc.session)),
-    pending
-      ? h("div", { class: "esc-pending-note" }, "Đang gửi…")
-      : options.length
-        ? h("div", { class: "esc-options" }, options.map((opt) =>
-            h("button", { class: "btn-option", type: "button", onclick: () => submitAnswer(esc.id, opt) }, opt)))
-        : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
+    // Read-only mirror (step 1 of the migration): these are the options the worker offered, not
+    // buttons — nothing here can deliver an answer to the worker yet, so a clickable-looking
+    // button would be a dead end. The line below says where answering actually still works.
+    options.length
+      ? h("div", { class: "esc-options" }, options.map((opt) => h("span", { class: "chip" }, opt)))
+      : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
+    h("div", { class: "esc-session" }, "chỉ xem ở đây — trả lời tại dashboard cục bộ (cổng 4400)."),
     // Supporting detail — why this reached a human, and what it touches — always last so the
     // question and options above stay the first thing scanned.
     esc.reason ? h("div", { class: "esc-session" }, "vì sao: " + esc.reason) : null,
@@ -541,7 +519,6 @@ function renderEscalations() {
   const open = all.filter((e) => !RESOLVED_STATUSES.has(e.status)).sort((a, b) =>
     (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9) || (a.ts ?? 0) - (b.ts ?? 0));
   const resolved = all.filter((e) => RESOLVED_STATUSES.has(e.status));
-  for (const e of resolved) pendingAnswers.delete(e.id); // confirmed by a real snapshot now
 
   if (!open.length) section.append(goodNote("Không có escalation nào đang chờ."));
   else section.append(h("div", { class: "esc-list" }, open.map(escalationCard)));
@@ -550,19 +527,6 @@ function renderEscalations() {
     section.append(collapsedGroup(resolved.length + " đã xử lý", resolved.map(resolvedEscalationRow)));
   }
   return section;
-}
-
-async function submitAnswer(id, option) {
-  pendingAnswers.add(id);
-  render();
-  try {
-    await answerEscalation(id, option);
-  } catch (e) {
-    console.error("answerEscalation", e);
-    pendingAnswers.delete(id);
-    toast("Không gửi được câu trả lời — thử lại.");
-    render();
-  }
 }
 
 /* ---------- sessions ---------- */
@@ -796,18 +760,6 @@ function renderFreshness() {
   );
 }
 
-/* ---------- toast ---------- */
-let toastTimer = null;
-function toast(message) {
-  const t = document.getElementById("toast");
-  if (!t) return;
-  t.textContent = message;
-  t.hidden = false;
-  requestAnimationFrame(() => t.classList.add("show"));
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.classList.remove("show"); t.hidden = true; }, 4000);
-}
-
 /* ---------- render ---------- */
 function render() { /* draw from `view`; called after every snapshot */
   const board = document.getElementById("board");
@@ -859,15 +811,4 @@ setInterval(() => { if (view.db) render(); }, 30000);
     (snap) => { view.meta = snap.exists ? snap.data() : null; view.loaded.meta = true; render(); },
     onErr("meta"));
 })();
-
-async function answerEscalation(id, option) {
-  if (!view.db) return;
-  await view.db.doc(`escalations/${id}`).update({
-    answer: option,
-    answered_at: Date.now() / 1000,
-    status: "answered",
-  });
-  // The manager is asleep and a db write is not a wake — say what actually happens next.
-  toast("Đã gửi — manager sẽ xử lý trong vài phút.");
-}
 </script>

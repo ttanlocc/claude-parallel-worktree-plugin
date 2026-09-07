@@ -8,7 +8,7 @@ plain dicts. That is what makes the board's data model testable without publishi
 import json
 import os
 
-from escalations import classify, normalize_kind, normalize_options
+from escalations import QUEUE_PATH, classify, current_state, normalize_kind, normalize_options
 
 # Kinds that mean production is already hurting. Scored off the CANONICAL name, never the raw
 # one: `blocked_on_credentials` is a credentials outage and must not be scored as an unknown.
@@ -268,7 +268,13 @@ def main() -> int:
         # list_agents lives in manager_daemon, not dashboard.
         read_agents=manager_daemon.list_agents,
         read_registry=read_registry,
-        read_escalations=lambda: dashboard.get_escalations()["needs_human"],
+        # current_state(), not get_escalations()["needs_human"]: the latter only ever contains
+        # records still open (or freshly needs_human) — the moment a record is answered or
+        # dismissed anywhere (this plugin's CLI dashboard, the manager) it drops out of that dict
+        # and the mirror stops writing it, freezing the board's copy open forever. current_state()
+        # folds the append-only ledger to the latest record per id regardless of status, so every
+        # escalation the ledger knows about — including one just resolved — keeps being mirrored.
+        read_escalations=lambda: current_state(QUEUE_PATH),
         # No `or None`: an empty backlog is a successful sweep that found nothing, and must
         # stamp last_ado_sweep. Only an exception (caught by _safe) means "did not run".
         read_tickets=dashboard.get_ado_backlog,
