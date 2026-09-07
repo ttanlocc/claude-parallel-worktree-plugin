@@ -670,3 +670,65 @@ def test_ado_backlog_wiql_selects_the_iteration_path():
     with no error anywhere — the board would just look like nothing has a sprint."""
     wiql = dashboard._ado_backlog_wiql()
     assert "[System.IterationPath]" in wiql
+
+
+def test_a_slow_refresh_does_not_block_an_unrelated_cache_key():
+    """The server is threaded, and `ado_backlog` shells out to `az` for tens of seconds. Under
+    one shared cache lock that refresh froze every other endpoint for its whole duration — the
+    board stopped answering because one external CLI was slow."""
+    import threading
+    import time
+
+    dashboard._CACHE.clear()
+    dashboard._CACHE_LOCKS.clear()
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow():
+        started.set()
+        release.wait(5)
+        return "slow"
+
+    slow_thread = threading.Thread(target=lambda: dashboard._cached("slow_key", slow, ttl=60))
+    slow_thread.start()
+    assert started.wait(5), "the slow refresh never started"
+
+    # While that one is mid-refresh and holding its lock, a different key must still resolve.
+    done = []
+    fast = threading.Thread(target=lambda: done.append(dashboard._cached("fast_key", lambda: "fast", ttl=60)))
+    fast.start()
+    fast.join(timeout=3)
+
+    assert not fast.is_alive(), "an unrelated key blocked behind the slow refresh"
+    assert done == ["fast"]
+
+    release.set()
+    slow_thread.join(timeout=5)
+    assert dashboard._CACHE["slow_key"][1] == "slow"
+
+
+def test_one_key_still_refreshes_only_once_under_concurrency():
+    """Per-key locking must not turn into no locking: concurrent readers of the same cold key
+    still collapse onto a single refresh, which is what the lock is for."""
+    import threading
+
+    dashboard._CACHE.clear()
+    dashboard._CACHE_LOCKS.clear()
+
+    calls = []
+    gate = threading.Event()
+
+    def once():
+        calls.append(1)
+        gate.wait(5)
+        return "value"
+
+    threads = [threading.Thread(target=lambda: dashboard._cached("same_key", once, ttl=60)) for _ in range(4)]
+    for t in threads:
+        t.start()
+    gate.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert sum(calls) == 1, f"refreshed {sum(calls)} times, expected exactly 1"

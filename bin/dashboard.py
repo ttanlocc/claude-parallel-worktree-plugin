@@ -98,14 +98,27 @@ REPO_DIR = os.getcwd()
 # here changes faster than the poll interval.
 _CACHE: dict[str, tuple[float, object]] = {}
 _CACHE_TTL = 1.5
-_CACHE_LOCK = threading.Lock()
+# One lock PER KEY, not one lock for the cache. The server is threaded, so several endpoints
+# refresh at once — and they hold their lock for as long as their source takes. `ado_backlog`
+# shells out to `az` and takes tens of seconds; under a single shared lock it froze every other
+# endpoint for that whole time, so one slow external CLI made the entire board unresponsive.
+# Per key, a slow refresh only delays readers of that same key, which is the point of the lock.
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _cache_lock(key: str) -> threading.Lock:
+    """The lock for one cache key, created on first use. The guard is held only long enough to
+    hand one back — never across the refresh itself, which is the mistake being fixed here."""
+    with _CACHE_LOCKS_GUARD:
+        return _CACHE_LOCKS.setdefault(key, threading.Lock())
 
 
 def _cached(key: str, fn, ttl: float = _CACHE_TTL):
     hit = _CACHE.get(key)
     if hit and time.monotonic() - hit[0] < ttl:
         return hit[1]
-    with _CACHE_LOCK:  # one refresh at a time; latecomers take the fresh value
+    with _cache_lock(key):  # one refresh at a time per key; latecomers take the fresh value
         hit = _CACHE.get(key)
         if hit and time.monotonic() - hit[0] < ttl:
             return hit[1]
