@@ -1,7 +1,7 @@
 <!--
   The prompt a scheduled session runs to refresh the manager board artifact.
 
-  Cron id: 0b576159 (created 2026-09-07, cadence 7,22,37,52 * * * *)
+  Cron id: 093cac6a (created 2026-09-07, cadence 7,22,37,52 * * * *)
 
   What the operator should set before scheduling, because none of it belongs in a shipped file:
     ARTIFACT_URL — the board published from bin/board.html with capabilities {db: {}}
