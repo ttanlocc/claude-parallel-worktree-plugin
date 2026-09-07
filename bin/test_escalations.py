@@ -560,3 +560,43 @@ if __name__ == "__main__":
         t()
         print(f"PASS {t.__name__}")
     print(f"{len(tests)} passed")
+
+
+def test_normalize_kind_accepts_the_canonical_vocabulary_unchanged():
+    from escalations import CANONICAL_KINDS, normalize_kind
+
+    for kind in CANONICAL_KINDS:
+        assert normalize_kind(kind) == kind
+
+
+def test_normalize_kind_maps_a_decorated_near_miss_onto_its_canonical_name():
+    """The live queue carried `blocked_on_credentials`. The tier stayed safe (unknown defaults
+    to a human) but every consumer keying off the kind read a production credentials outage as
+    unrecognised — the dashboard scored it P1 where `credentials` scores P0."""
+    from escalations import normalize_kind
+
+    assert normalize_kind("blocked_on_credentials") == "credentials"
+    assert normalize_kind("credentials_expired") == "credentials"
+    assert normalize_kind("Red Tests") == "red_tests"
+    assert normalize_kind("  PUSH_OR_PR  ") == "push_or_pr"
+
+
+def test_normalize_kind_invents_nothing_for_text_that_names_no_kind():
+    from escalations import normalize_kind
+
+    for raw in ("", "   ", "something_else", None, 7, ["credentials"]):
+        assert normalize_kind(raw) is None
+
+
+def test_classify_routes_a_decorated_kind_by_its_canonical_name():
+    tier, reason = classify(new_record("s", "blocked_on_credentials", "q"))
+    assert tier == "tier3"
+    assert "credentials" in reason
+    assert "unknown" not in reason
+
+
+def test_classify_still_defaults_an_unrecognisable_kind_to_a_human():
+    """Widening what counts as a known kind must not widen what gets auto-decided."""
+    tier, reason = classify(new_record("s", "totally_made_up", "q"))
+    assert tier == "tier3"
+    assert "unknown kind 'totally_made_up'" in reason

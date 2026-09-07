@@ -855,7 +855,9 @@ function formatAge(hours) {
 const URGENT_KINDS = new Set(["credentials", "irreversible", "cost_anomaly", "push_or_pr"]);
 
 function escalationSeverity(rec) {
-  const kind = String(rec.kind || "");
+  // kind_canonical, not kind: the raw value is whatever the worker typed, and a decorated
+  // near-miss like "blocked_on_credentials" must score as the credentials outage it is.
+  const kind = String(rec.kind_canonical || "");
   if (URGENT_KINDS.has(kind)) return { label: "P0", tone: "on-red" };
   if (rec.tier === "tier3" || !rec.tier) return { label: "P1", tone: "on-ink" };
   return { label: "P2", tone: "on-line" };
@@ -866,7 +868,13 @@ function decisionCard(rec) {
   const sev = escalationSeverity(rec);
   const meta = el("div", "decision-meta");
   meta.append(pill(sev.tone, sev.label));
-  if (rec.kind) meta.append(pill("", String(rec.kind)));
+  if (rec.kind) {
+    // Shown as written, and marked whenever it is not exactly a vocabulary name — whether it
+    // matched nothing, or matched only after normalisation ("blocked_on_credentials"). Both are
+    // drift; absorbing the second silently is how the vocabulary stops meaning anything.
+    const drifted = rec.kind !== rec.kind_canonical;
+    meta.append(pill(drifted ? "on-line" : "", String(rec.kind) + (drifted ? " ⚠" : "")));
+  }
   const hours = escalationAge(rec);
   if (hours !== null) {
     const late = hours >= ESCALATION_SLA_HOURS;

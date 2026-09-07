@@ -18,6 +18,7 @@ from escalations import (
     classify,
     current_state,
     is_undeliverable,
+    normalize_kind,
     normalize_options,
     record_answer,
     record_dismiss,
@@ -49,6 +50,10 @@ def get_escalations(path: str = None) -> dict:
     # matter what shape actually landed on disk. Never rewritten to the queue file itself.
     for r in state:
         r["options"] = normalize_options(r.get("options"))
+        # The canonical kind rides alongside the raw one rather than replacing it: the card
+        # shows what the worker actually wrote (so drift stays visible and fixable) while
+        # severity keys off the name the vocabulary recognises. None means it named no kind.
+        r["kind_canonical"] = normalize_kind(r.get("kind"))
     needs_human = [r for r in state if r.get("status") == "needs_human"]
     for r in state:
         if r.get("status") == "open":

@@ -97,6 +97,42 @@ _TIER3_KINDS = {
     "worktree_collision",
 }
 
+# The closed vocabulary. A worker picks one of these; anything else is drift.
+CANONICAL_KINDS = frozenset(_TIER2_KINDS | _TIER3_KINDS | {"diff_review"})
+
+# Longest first, so a raw kind containing two canonical names resolves to the more specific
+# one ("push_or_pr" wins over a bare "pr" were one ever added) rather than to whichever the
+# set happened to yield first.
+_KINDS_BY_LENGTH = tuple(sorted(CANONICAL_KINDS, key=len, reverse=True))
+
+
+def normalize_kind(raw) -> str | None:
+    """Map a worker-authored `kind` onto the canonical vocabulary, or None if it does not fit.
+
+    `kind` is written by a model against a prose schema, so near-misses are the norm rather
+    than the exception — the live queue carried `blocked_on_credentials` where the vocabulary
+    says `credentials`. That near-miss is not harmless: it falls through to the unknown branch,
+    and while the TIER stays safe (unknown defaults to a human), every consumer keying off the
+    kind treats a production credentials outage as an unrecognised one. The dashboard scored it
+    P1 instead of P0 for exactly this reason.
+
+    Matching is containment on a normalised form, not equality, because the drift seen in
+    practice decorates the canonical name rather than replacing it (`blocked_on_credentials`,
+    `credentials_expired`). A raw value that contains none of them returns None — this widens
+    what is recognised, and never invents a kind for text that does not name one.
+    """
+    if not isinstance(raw, str):
+        return None
+    flat = "".join(ch if ch.isalnum() else "_" for ch in raw.strip().lower())
+    if not flat:
+        return None
+    if flat in CANONICAL_KINDS:
+        return flat
+    for kind in _KINDS_BY_LENGTH:
+        if kind in flat:
+            return kind
+    return None
+
 
 def _as_text(value) -> str:
     """Render a field for a reason string whether it arrived as a str or a list."""
@@ -152,7 +188,8 @@ def classify(record: dict) -> tuple[str, str]:
     carrying an irreversible, dependency, migration, or secret-shaped change still goes to a human.
     """
     ev = record.get("evidence") or {}
-    kind = record.get("kind")
+    raw_kind = record.get("kind")
+    kind = normalize_kind(raw_kind)
 
     if ev.get("irreversible"):
         return "tier3", "evidence marks this irreversible"
@@ -190,7 +227,7 @@ def classify(record: dict) -> tuple[str, str]:
     if kind in _TIER2_KINDS:
         return "tier2", f"{kind} is a mechanical call"
 
-    return "tier3", f"unknown kind {kind!r} — defaulting to a human"
+    return "tier3", f"unknown kind {raw_kind!r} — defaulting to a human"
 
 
 def is_undeliverable(record: dict) -> bool:

@@ -133,6 +133,36 @@ failed to converge after repeated attempts, or when costs look anomalous.
 Always supply `options`: the dashboard renders one button per option, so a well-formed escalation is
 one the CTO can settle with a single click.
 
+### `kind` is a closed list
+
+Pick one of these twelve, spelled exactly. It decides who may answer and how loudly the board
+shouts, so an invented name is not a harmless label.
+
+| `kind` | Use it when |
+|---|---|
+| `credentials` | Auth, tokens, secrets — anything a worker cannot renew itself |
+| `irreversible` | Delete, drop, force-push, anything with no undo |
+| `push_or_pr` | A `git push`, a pull request, or a change landing on `main` |
+| `cost_anomaly` | Spend is off its expected shape |
+| `spec_ambiguity` | Two readings of the requirement produce two different products |
+| `no_convergence` | Repeated attempts are not getting closer |
+| `worktree_collision` | Two copies are fighting over the same branch, port or path |
+| `diff_review` | A finished diff needs sign-off (routed on its evidence, not on trust) |
+| `red_tests` | Tests fail and the fix is a judgement call |
+| `looping` | A worker is repeating itself and needs redirecting |
+| `pick_implementation` | Two workable designs, one has to be chosen |
+| `scope_question` | In or out of scope for this piece of work |
+
+The first eight always reach a human; the last four the manager may settle alone — except that
+evidence overrules the kind, so anything irreversible, dependency-adding, migration-touching,
+secret-adjacent, or aimed at `main` goes to a human whatever it calls itself.
+
+Do not decorate the name. `blocked_on_credentials` and `credentials_expired` are recognised
+(`normalize_kind` maps a decorated name back onto its canonical one), but they show on the board
+with a ⚠ so the drift gets fixed, and a name that matches nothing scores lower than the incident
+deserves — a real production credentials outage sat at P1 instead of P0 for exactly this reason.
+An unrecognised kind still reaches a human; it just arrives looking less urgent than it is.
+
 ## Hard boundaries
 
 - Never edit repository files. Dispatch a worker instead — including when the thing that needs fixing is the tooling you dispatch with. Your only writes are the ledger and the escalation queue.
