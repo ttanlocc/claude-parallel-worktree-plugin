@@ -1,7 +1,7 @@
 <!--
   The prompt a scheduled session runs to refresh the manager board artifact.
 
-  Cron id: (recorded on first schedule — see "Scheduling" at the bottom)
+  Cron id: 0b576159 (created 2026-09-07, cadence 7,22,37,52 * * * *)
 
   Two things the operator must set before scheduling, because neither belongs in a shipped file:
     ARTIFACT_URL — the board published from bin/board.html with capabilities {db: {}}
@@ -31,9 +31,16 @@ failed refresh must leave the previous rows standing rather than write partial s
 <!--
   Scheduling
 
-  Every 15 minutes, via CronCreate from a session. The cadence is set by the ADO sweep, which is
-  the only slow source; sessions and escalations reach the board through the manager on events,
-  not through this job.
+  Every 15 minutes, on the off-minutes 7/22/37/52 rather than the quarter marks — every job that
+  asks for "every 15 minutes" lands on :00/:15/:30/:45, and there is no reason to join that queue.
+  The cadence is set by the ADO sweep, which is the only slow source; sessions and escalations
+  reach the board through the manager on events, not through this job.
+
+  KNOWN LIMIT — CronCreate is session-scoped. The job lives in the Claude session that created
+  it: nothing is written to disk, it dies when that session exits, and it auto-expires after
+  seven days regardless. That is fine for trying the cadence out, and NOT enough for a board
+  meant to keep itself current unattended. For that, run the same command from a systemd user
+  timer or a real crontab entry, which survives both.
 
   What this costs: one Claude session per run, ~96 runs a day. Stop it with CronDelete and the
   id recorded at the top of this file; `CronList` finds it again if that line was lost.
