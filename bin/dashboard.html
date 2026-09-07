@@ -435,8 +435,6 @@ const TICKET_STATUS_TONE = {
 // pencil: Resolved is outlined because it is waiting on QC, Active because it is waiting on
 // a review. New and Closed owe nobody anything right now and stay grey.
 const ADO_STATE_TONE = { Resolved: "on-line", Active: "on-ink", Blocked: "on-red" };
-const PR_STATE_LABEL = { OPEN: "PR mở", MERGED: "PR đã merge", CLOSED: "PR đã đóng" };
-const PR_STATE_TONE = { OPEN: "on-line", MERGED: "", CLOSED: "" };
 // A ticket is "not done" while ADO still has it open, whatever the session layer thinks.
 const TICKET_DONE_STATES = ["Closed", "Removed", "Done"];
 function ticketIsDone(r) { return TICKET_DONE_STATES.indexOf(r.adoState) > -1; }
