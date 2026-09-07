@@ -338,8 +338,8 @@ const SEVERITY_TONE = { P0: "pill-bad", P1: "pill-warn", P2: "pill-accent" };
 // "unknown" is not a state `claude agents --json` emits — it's what board_state.py's
 // normalize_state() returns for anything IT doesn't recognise (see board_state.py). It needs a
 // rank and a label like every other state: sessionTile()'s hasOwnProperty check below falls back
-// to "idle" for anything missing from this map, and idle is exactly the wrong word for a state
-// nobody has identified yet.
+// to "unknown" — never "idle" — for anything missing from this map, so a state nobody has
+// identified yet can never render as free.
 const STATE_RANK = { waiting: 0, unknown: 1, running: 2, idle: 3, done: 4 };
 const STATE_LABEL = { waiting: "Đang chờ duyệt", running: "Đang chạy", idle: "Rảnh", done: "Đã xong", unknown: "Không rõ trạng thái" };
 
@@ -531,7 +531,7 @@ function renderEscalations() {
 
 /* ---------- sessions ---------- */
 function sessionTile(s) {
-  const state = STATE_RANK.hasOwnProperty(s.state) ? s.state : "idle";
+  const state = STATE_RANK.hasOwnProperty(s.state) ? s.state : "unknown";
   const refs = Array.isArray(s.ado_refs) ? s.ado_refs : [];
   return h("div", { class: "session-tile state-" + state },
     h("div", { class: "state-badge b-" + state },
@@ -564,6 +564,16 @@ function sessionGroup(label, sessions, emptyText, emptyIsGood, openByDefault) {
   return collapsedGroup(sessions.length + " " + label, [body], openByDefault);
 }
 
+// An "unknown" state joins "waiting" as "cần bạn xử lý" — the same fail-toward-a-human default
+// classify() already uses for a kind it cannot recognise (escalations.py). It is never "running"
+// or "idle": both would claim a certainty the mirror doesn't have. Shared by renderSessions()'s
+// section filter and renderSummary()'s topbar chip so the two counts can never drift apart again —
+// that drift (a second copy of this rule going stale) is exactly how the topbar under-counted the
+// section below it.
+function needsAttention(s) {
+  return s.state === "waiting" || s.state === "unknown";
+}
+
 function renderSessions() {
   const section = h("section", { class: "board-section" });
   const loaded = view.loaded.sessions;
@@ -579,12 +589,9 @@ function renderSessions() {
 
   const byStateThenTask = (a, b) =>
     (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9) || String(a.task).localeCompare(String(b.task));
-  // An "unknown" state joins "cần bạn xử lý", not "đã xong" — the same fail-toward-a-human
-  // default classify() already uses for a kind it cannot recognise (escalations.py). It is
-  // never "running" or "idle" either: both of those would claim a certainty the mirror doesn't
-  // have. Keeping it out of every filter here is what silently dropped 8 of 33 sessions off the
+  // Keeping "unknown" out of every filter here is what silently dropped 8 of 33 sessions off the
   // whole board (C1) — every session must land in exactly one of these three groups.
-  const waiting = view.sessions.filter((s) => s.state === "waiting" || s.state === "unknown").sort(byStateThenTask);
+  const waiting = view.sessions.filter(needsAttention).sort(byStateThenTask);
   const running = view.sessions.filter((s) => s.state === "running").sort(byStateThenTask);
   const finished = view.sessions.filter((s) => s.state === "idle" || s.state === "done").sort(byStateThenTask);
 
@@ -710,12 +717,13 @@ function renderSummary() {
 
   const p0 = view.escalations.filter((e) => e.severity === "P0" && !RESOLVED_STATUSES.has(e.status)).length;
   const p1 = view.escalations.filter((e) => e.severity === "P1" && !RESOLVED_STATUSES.has(e.status)).length;
-  const waiting = view.sessions.filter((s) => s.state === "waiting").length;
+  // Same predicate as the "cần bạn xử lý" section group — this count must never disagree with it.
+  const waiting = view.sessions.filter(needsAttention).length;
 
   const chips = [];
   if (p0) chips.push(pill("pill-bad", p0 + " × P0"));
   if (p1) chips.push(pill("pill-warn", p1 + " × P1"));
-  if (waiting) chips.push(pill("pill-warn", waiting + " phiên đang chờ duyệt"));
+  if (waiting) chips.push(pill("pill-warn", waiting + " phiên cần bạn xử lý"));
   if (!chips.length) chips.push(pill("pill-good", "Mọi thứ ổn"));
   box.replaceChildren(...chips);
 }
