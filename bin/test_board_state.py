@@ -260,6 +260,10 @@ def test_build_writes_emits_one_set_per_document_across_all_four_collections():
     assert _writes_for(writes, "escalations")[0]["doc_id"] == "e1"
     assert _writes_for(writes, "tickets")[0]["doc_id"] == "8311"
     assert _writes_for(writes, "meta")[0]["doc_id"] == "status"
+    # Sessions, escalations AND tickets are all non-empty here — unlike the dedicated
+    # "meta last" test below (which only populates sessions), this actually discriminates
+    # "last overall" from "last among the only populated collection".
+    assert writes[-1]["collection"] == "meta"
 
 
 def test_build_writes_puts_meta_status_last():
