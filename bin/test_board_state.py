@@ -147,6 +147,104 @@ def test_escalation_docs_default_status_to_open_when_status_is_absent():
     assert docs["e6"]["status"] == "open"
 
 
+def test_escalation_docs_carry_evidence_as_a_plain_string_dict():
+    """`evidence` is what tells a manager what is and is not affected — a card that drops it
+    silently is no better off than before this field existed."""
+    docs = escalation_docs(
+        [
+            {
+                "id": "e7",
+                "kind": "credentials",
+                "question": "?",
+                "evidence": {
+                    "workers_dead": "c3a98127, aa9dc7d3",
+                    "git_push": "khong anh huong - gh token rieng",
+                },
+            }
+        ]
+    )
+
+    assert docs["e7"]["evidence"] == {
+        "workers_dead": "c3a98127, aa9dc7d3",
+        "git_push": "khong anh huong - gh token rieng",
+    }
+
+
+def test_escalation_docs_default_evidence_to_an_empty_dict_when_absent():
+    docs = escalation_docs([{"id": "e8", "kind": "credentials", "question": "?"}])
+
+    assert docs["e8"]["evidence"] == {}
+
+
+def test_escalation_docs_stringify_a_non_string_evidence_value_instead_of_dropping_it():
+    """`evidence` is worker-authored against a prose schema — the same tolerance classify() gives
+    `deps_added`/`changed_files`, which land as lists in practice. A caller walking `evidence` as
+    str->str must never receive a list, but the list is real information and must survive, not
+    vanish."""
+    docs = escalation_docs(
+        [{"id": "e9", "kind": "credentials", "question": "?", "evidence": {"deps_added": ["left-pad", "chalk"]}}]
+    )
+
+    value = docs["e9"]["evidence"]["deps_added"]
+    assert isinstance(value, str)
+    assert "left-pad" in value and "chalk" in value
+
+
+def test_escalation_docs_drop_evidence_entirely_when_it_is_not_even_a_dict():
+    """Live drift: evidence has arrived as something other than a dict. A caller doing
+    `for k, v in evidence.items()` must never receive something it cannot walk."""
+    docs = escalation_docs([{"id": "e10", "kind": "credentials", "question": "?", "evidence": "not a dict"}])
+
+    assert docs["e10"]["evidence"] == {}
+
+
+def test_escalation_docs_carry_the_classifier_reason():
+    docs = escalation_docs(
+        [
+            {
+                "id": "e11",
+                "kind": "blocked_on_credentials",
+                "question": "?",
+                "reason": "unknown kind 'blocked_on_credentials' — defaulting to a human",
+            }
+        ]
+    )
+
+    assert docs["e11"]["reason"] == "unknown kind 'blocked_on_credentials' — defaulting to a human"
+
+
+def test_escalation_docs_default_reason_to_none_when_absent():
+    docs = escalation_docs([{"id": "e12", "kind": "credentials", "question": "?"}])
+
+    assert docs["e12"]["reason"] is None
+
+
+def test_escalation_docs_coerce_a_non_string_reason_to_none():
+    """`reason` is daemon-stamped, not user-typed, but the contract is still string-or-None —
+    a future producer writing something else must not leak an unwalkable shape to the page."""
+    docs = escalation_docs([{"id": "e13", "kind": "credentials", "question": "?", "reason": 42}])
+
+    assert docs["e13"]["reason"] is None
+
+
+def test_escalation_docs_carry_the_tier():
+    docs = escalation_docs([{"id": "e14", "kind": "credentials", "question": "?", "tier": "tier3"}])
+
+    assert docs["e14"]["tier"] == "tier3"
+
+
+def test_escalation_docs_default_tier_to_none_when_absent():
+    docs = escalation_docs([{"id": "e15", "kind": "credentials", "question": "?"}])
+
+    assert docs["e15"]["tier"] is None
+
+
+def test_escalation_docs_coerce_a_non_string_tier_to_none():
+    docs = escalation_docs([{"id": "e16", "kind": "credentials", "question": "?", "tier": ["tier3"]}])
+
+    assert docs["e16"]["tier"] is None
+
+
 from board_state import ticket_docs
 
 
@@ -404,7 +502,7 @@ def test_collect_uses_injected_readers_and_never_touches_the_network():
         read_registry=lambda: {"t1": {"branch": "feature/x", "short_id": "ab12"}},
         read_escalations=lambda: [{"id": "e1", "kind": "credentials", "question": "?"}],
         read_tickets=lambda: [{"id": "1", "title": "t", "state": "New", "sprint": "S1", "url": "u"}],
-        read_prs=lambda: {},
+        read_prs=dict,
         now=lambda: 500.0,
     )
 
@@ -423,10 +521,10 @@ def test_collect_degrades_to_an_empty_source_when_one_reader_fails():
 
     writes = collect(
         read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "idle"}],
-        read_registry=lambda: {},
-        read_escalations=lambda: [],
+        read_registry=dict,
+        read_escalations=list,
         read_tickets=boom,
-        read_prs=lambda: {},
+        read_prs=dict,
         now=lambda: 500.0,
     )
 
@@ -455,11 +553,11 @@ def test_collect_stamps_last_ado_sweep_normally_when_the_sweep_finds_nothing():
     any other successful pass. `tickets or []` normalises the value for build_writes but must
     not also flip `ado_swept_at` to None; only `_safe` catching an exception may do that."""
     writes = collect(
-        read_agents=lambda: [],
-        read_registry=lambda: {},
-        read_escalations=lambda: [],
-        read_tickets=lambda: [],
-        read_prs=lambda: {},
+        read_agents=list,
+        read_registry=dict,
+        read_escalations=list,
+        read_tickets=list,
+        read_prs=dict,
         now=lambda: 500.0,
     )
 
@@ -475,9 +573,9 @@ def test_collect_carries_registry_fields_into_the_session_doc():
     writes = collect(
         read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "running"}],
         read_registry=lambda: {"t1": {"branch": "feature/x", "short_id": "ab12"}},
-        read_escalations=lambda: [],
-        read_tickets=lambda: [],
-        read_prs=lambda: {},
+        read_escalations=list,
+        read_tickets=list,
+        read_prs=dict,
         now=lambda: 500.0,
     )
 
@@ -491,11 +589,11 @@ def test_collect_writes_escalations_from_the_injected_reader():
     `escalations=[]` to `build_writes`, ignoring `read_escalations` entirely, would still pass
     both brief tests."""
     writes = collect(
-        read_agents=lambda: [],
-        read_registry=lambda: {},
+        read_agents=list,
+        read_registry=dict,
         read_escalations=lambda: [{"id": "e1", "kind": "credentials", "question": "?"}],
-        read_tickets=lambda: [],
-        read_prs=lambda: {},
+        read_tickets=list,
+        read_prs=dict,
         now=lambda: 500.0,
     )
 
@@ -510,9 +608,9 @@ def test_collect_writes_tickets_and_attaches_pr_data_from_the_injected_readers()
     success value reaches `ticket_docs` — the brief's own `read_prs=lambda: {}` fixture is too
     trivial to tell a dropped argument from a working one."""
     writes = collect(
-        read_agents=lambda: [],
-        read_registry=lambda: {},
-        read_escalations=lambda: [],
+        read_agents=list,
+        read_registry=dict,
+        read_escalations=list,
         read_tickets=lambda: [{"id": "8311", "title": "t", "state": "Active", "sprint": "S", "url": "u"}],
         read_prs=lambda: {"8311": {"number": 42, "state": "OPEN", "url": "https://example/42"}},
         now=lambda: 500.0,
@@ -534,10 +632,10 @@ def test_collect_degrades_agents_to_empty_without_blanking_other_sources():
 
     writes = collect(
         read_agents=boom,
-        read_registry=lambda: {},
+        read_registry=dict,
         read_escalations=lambda: [{"id": "e1", "kind": "credentials", "question": "?"}],
         read_tickets=lambda: [{"id": "1", "title": "t", "state": "New", "sprint": "S", "url": "u"}],
-        read_prs=lambda: {},
+        read_prs=dict,
         now=lambda: 500.0,
     )
 
@@ -556,9 +654,9 @@ def test_collect_degrades_registry_to_empty_without_blanking_sessions():
     writes = collect(
         read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "running"}],
         read_registry=boom,
-        read_escalations=lambda: [],
-        read_tickets=lambda: [],
-        read_prs=lambda: {},
+        read_escalations=list,
+        read_tickets=list,
+        read_prs=dict,
         now=lambda: 500.0,
     )
 
@@ -573,10 +671,10 @@ def test_collect_degrades_escalations_to_empty_without_blanking_other_sources():
 
     writes = collect(
         read_agents=lambda: [{"name": "t1", "sessionId": "s1", "state": "running"}],
-        read_registry=lambda: {},
+        read_registry=dict,
         read_escalations=boom,
         read_tickets=lambda: [{"id": "1", "title": "t", "state": "New", "sprint": "S", "url": "u"}],
-        read_prs=lambda: {},
+        read_prs=dict,
         now=lambda: 500.0,
     )
 
@@ -593,9 +691,9 @@ def test_collect_degrades_prs_to_empty_without_blanking_tickets():
         raise TypeError("gh output not JSON")
 
     writes = collect(
-        read_agents=lambda: [],
-        read_registry=lambda: {},
-        read_escalations=lambda: [],
+        read_agents=list,
+        read_registry=dict,
+        read_escalations=list,
         read_tickets=lambda: [{"id": "1", "title": "t", "state": "New", "sprint": "S", "url": "u"}],
         read_prs=boom,
         now=lambda: 500.0,
@@ -617,11 +715,11 @@ def test_collect_calls_now_exactly_once_so_every_stamp_in_one_call_agrees():
         return 100.0 + len(calls)
 
     writes = collect(
-        read_agents=lambda: [],
-        read_registry=lambda: {},
-        read_escalations=lambda: [],
-        read_tickets=lambda: [],
-        read_prs=lambda: {},
+        read_agents=list,
+        read_registry=dict,
+        read_escalations=list,
+        read_tickets=list,
+        read_prs=dict,
         now=counting_now,
     )
 
@@ -641,11 +739,11 @@ def test_collect_lets_a_broken_clock_propagate_instead_of_writing_a_bogus_timest
     threw = False
     try:
         collect(
-            read_agents=lambda: [],
-            read_registry=lambda: {},
-            read_escalations=lambda: [],
-            read_tickets=lambda: [],
-            read_prs=lambda: {},
+            read_agents=list,
+            read_registry=dict,
+            read_escalations=list,
+            read_tickets=list,
+            read_prs=dict,
             now=boom,
         )
     except RuntimeError:

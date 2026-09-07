@@ -234,6 +234,9 @@
   .btn-option:disabled { cursor: not-allowed; opacity: .55; }
   .esc-pending-note { font-size: var(--fs-sm); color: var(--ink-soft); font-style: italic; }
   .esc-no-options { font-size: var(--fs-sm); color: var(--faint); font-style: italic; }
+  /* Supporting detail (reason/evidence/tier), always last in the card, set off from the
+     question+options above it by a thin rule so the card stays scannable at a glance. */
+  .esc-evidence { display: flex; flex-direction: column; gap: 3px; padding-top: 5px; border-top: 1px dashed var(--border-soft); }
 
   /* ============ Sessions ============ */
   .session-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
@@ -471,6 +474,15 @@ function escalationCard(esc) {
   const gloss = esc.kind ? KIND_GLOSS[esc.kind] : null;
   const pending = pendingAnswers.has(esc.id);
   const options = Array.isArray(esc.options) ? esc.options : [];
+  const evidence = esc.evidence && typeof esc.evidence === "object" ? esc.evidence : {};
+  const evidenceRows = Object.entries(evidence);
+  // `tier` (tier2/tier3, stamped when the record was queued) duplicates the severity pill
+  // whenever the two agree — escalation_severity() computes P0/P1 exactly when classify() would
+  // say tier3 and P2 exactly when it would say tier2, so an agreeing tier tells a manager nothing
+  // the pill doesn't. Show it only when it disagrees: that means the stored tier is stale
+  // relative to what today's classifier would say, the same kind of drift kind_raw flags above.
+  const impliedTier = sev === "P2" ? "tier2" : "tier3";
+  const tierDrift = esc.tier && esc.tier !== impliedTier ? esc.tier : null;
 
   return h("div", { class: "esc-card sev-" + sev + (pending ? " is-pending" : "") },
     h("div", { class: "esc-top" },
@@ -490,6 +502,15 @@ function escalationCard(esc) {
         ? h("div", { class: "esc-options" }, options.map((opt) =>
             h("button", { class: "btn-option", type: "button", onclick: () => submitAnswer(esc.id, opt) }, opt)))
         : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
+    // Supporting detail — why this reached a human, and what it touches — always last so the
+    // question and options above stay the first thing scanned.
+    esc.reason ? h("div", { class: "esc-session" }, "vì sao: " + esc.reason) : null,
+    evidenceRows.length ? [
+      h("div", { class: "esc-session" }, "bằng chứng:"),
+      h("div", { class: "esc-evidence" }, evidenceRows.map(([k, v]) =>
+        h("div", { class: "session-row" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v)))),
+    ] : null,
+    tierDrift ? h("div", { class: "esc-session" }, "tier đã lưu: " + tierDrift + " (khác mức hiện tại)") : null,
   );
 }
 

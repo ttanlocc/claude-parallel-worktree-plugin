@@ -5,6 +5,7 @@ No I/O, no subprocess, no session: every function here takes already-read data a
 plain dicts. That is what makes the board's data model testable without publishing anything.
 """
 
+import json
 import os
 
 from escalations import classify, normalize_kind, normalize_options
@@ -55,6 +56,26 @@ def escalation_severity(record: dict) -> str:
     return "P1" if tier == "tier3" else "P2"
 
 
+def _safe_evidence(raw) -> dict[str, str]:
+    """Coerce worker-authored evidence into a flat str->str dict the page can walk directly.
+
+    Same tolerance as normalize_kind/normalize_options: evidence is written by a model against
+    a prose schema, so "not even a dict" is normal drift, not an error — the whole thing is
+    dropped rather than guessed at. A value that is not itself a string is stringified, never
+    dropped: a value that says something is NOT affected ("git_push: khong anh huong") is exactly
+    as load-bearing to a manager as one that says something broke.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v if isinstance(v, str) else json.dumps(v, ensure_ascii=False) for k, v in raw.items()}
+
+
+def _str_or_none(value) -> str | None:
+    """`reason`/`tier` must reach the page as a string or None — never some other JSON-native
+    type a future producer might write."""
+    return value if isinstance(value, str) else None
+
+
 def escalation_docs(records: list[dict]) -> dict[str, dict]:
     """One document per escalation, keyed by its id."""
     docs = {}
@@ -74,6 +95,11 @@ def escalation_docs(records: list[dict]) -> dict[str, dict]:
             "status": rec.get("status") or "open",
             "answer": rec.get("answer"),
             "answered_at": rec.get("answered_at"),
+            # Why this reached a human, and what it touches — daemon/worker-authored context a
+            # manager needs to act, not just triage. See docstrings above for the shape guards.
+            "evidence": _safe_evidence(rec.get("evidence")),
+            "reason": _str_or_none(rec.get("reason")),
+            "tier": _str_or_none(rec.get("tier")),
         }
     return docs
 
@@ -160,7 +186,6 @@ def build_writes(
     return writes
 
 
-import json
 import subprocess
 import sys
 
