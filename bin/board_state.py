@@ -97,3 +97,20 @@ def ticket_docs(tickets: list[dict], pr_by_ticket: dict) -> dict[str, dict]:
             "pr": (pr_by_ticket or {}).get(str(ticket_id)),
         }
     return docs
+
+
+def meta_status(now: float, ado_swept_at=None, sessions_scanned_at=None, manager=None) -> dict:
+    """When each source was last read, and who the manager is.
+
+    One document, several clocks: the page shows the age of each source separately, because a
+    30-minute-old ticket list must not be presentable as though it were as live as a session
+    state. This doubles as the failure signal — an age that keeps growing IS the alarm.
+    """
+    manager = manager or {}
+    return {
+        "written_at": now,
+        "last_ado_sweep": ado_swept_at,
+        "last_session_scan": sessions_scanned_at,
+        "manager_session_id": manager.get("session_id"),
+        "manager_started_at": manager.get("started_at"),
+    }

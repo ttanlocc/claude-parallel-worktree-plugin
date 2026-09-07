@@ -206,3 +206,32 @@ def test_ticket_docs_carry_type_and_default_it_to_empty_when_absent():
 
     assert docs["1"]["type"] == "Bug"
     assert docs["2"]["type"] == ""
+
+
+from board_state import meta_status
+
+
+def test_meta_status_records_each_source_separately():
+    """The cadences differ by design — sessions update on events, ADO on a slow cron. One
+    combined timestamp would let a 30-minute-old ticket list look as fresh as a live session."""
+    doc = meta_status(
+        now=1000.0, ado_swept_at=400.0, sessions_scanned_at=990.0, manager={"session_id": "m1", "started_at": 100.0}
+    )
+
+    assert doc["last_ado_sweep"] == 400.0
+    assert doc["last_session_scan"] == 990.0
+    assert doc["manager_session_id"] == "m1"
+    assert doc["manager_started_at"] == 100.0
+    assert doc["written_at"] == 1000.0
+
+
+def test_meta_status_reports_a_source_that_has_never_run_as_null_not_as_now():
+    """A never-run sweep must not read as a fresh one. The page shows age from these fields,
+    and `now` here would claim data that does not exist."""
+    doc = meta_status(now=1000.0)
+
+    assert doc["last_ado_sweep"] is None
+    assert doc["last_session_scan"] is None
+    assert doc["manager_session_id"] is None
+    assert doc["manager_started_at"] is None
+    assert doc["written_at"] == 1000.0
