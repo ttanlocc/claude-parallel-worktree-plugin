@@ -881,6 +881,10 @@ python3 -c "import json;w=json.load(open('/tmp/board-writes.json'));print(len(w)
 
 Publish `bin/board.html` with the Artifact tool, passing `capabilities: {db: {}}`, a title, a description and a favicon. Record the URL in this plan file.
 
+**Published 2026-09-07:** https://claude.ai/code/artifact/bc6f123e-bd44-4840-87e3-d78ffc95529e
+(contract 0.2.41, capabilities `db`, sharing `owner`; first seed was 44 documents —
+31 sessions, 1 escalation, 11 tickets, 1 meta — committed atomically.)
+
 - [ ] **Step 3: Write the seeded rows**
 
 Use the Artifact tool's `write_db` with `db_op: "batch"`, passing the entries from `/tmp/board-writes.json` (at most 50 per batch — split if the file is longer).
