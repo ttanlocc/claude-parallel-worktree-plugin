@@ -669,7 +669,12 @@ function ticketRow(r) {
   const states = el("div", "ticket-states");
   if (r.sprint) states.append(el("span", "ticket-sprint", r.sprint));
   if (r.adoState) states.append(pill(ADO_STATE_TONE[r.adoState] || "", r.adoState));
-  states.append(pill(TICKET_STATUS_TONE[r.status] || "", TICKET_STATUS_LABEL[r.status] || r.status));
+  // Once ADO calls a ticket done, the derived status has nothing left to add — it is computed
+  // from sessions and PRs, which keep moving after a ticket closes, so it reads as a live
+  // "đang làm" on work that is over. ADO's word is the only one that matters here.
+  if (!ticketIsDone(r)) {
+    states.append(pill(TICKET_STATUS_TONE[r.status] || "", TICKET_STATUS_LABEL[r.status] || r.status));
+  }
   row.append(left, states);
 
   if (r.status === "not-started" || r.status === "stalled") {
