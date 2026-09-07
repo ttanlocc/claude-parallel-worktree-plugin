@@ -734,7 +734,9 @@ def main() -> int:
         read_agents=manager_daemon.list_agents,
         read_registry=read_registry,
         read_escalations=lambda: dashboard.get_escalations()["needs_human"],
-        read_tickets=lambda: dashboard.get_ado_backlog() or None,
+        # No `or None`: an empty backlog is a successful sweep that found nothing, and must
+        # stamp last_ado_sweep. Only an exception (caught by _safe) means "did not run".
+        read_tickets=dashboard.get_ado_backlog,
         read_prs=lambda: {},
         now=time.time,
     )
