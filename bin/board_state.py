@@ -5,6 +5,12 @@ No I/O, no subprocess, no session: every function here takes already-read data a
 plain dicts. That is what makes the board's data model testable without publishing anything.
 """
 
+from escalations import classify, normalize_kind, normalize_options
+
+# Kinds that mean production is already hurting. Scored off the CANONICAL name, never the raw
+# one: `blocked_on_credentials` is a credentials outage and must not be scored as an unknown.
+_URGENT_KINDS = frozenset({"credentials", "irreversible", "cost_anomaly", "push_or_pr"})
+
 
 def session_docs(agents: list[dict], registry: dict) -> dict[str, dict]:
     """One document per live task, keyed by task name.
@@ -30,5 +36,41 @@ def session_docs(agents: list[dict], registry: dict) -> dict[str, dict]:
             "worktree": reg.get("path"),
             "started_at": agent.get("startedAt"),
             "ado_refs": list(reg.get("ado_ids") or []),
+        }
+    return docs
+
+
+def escalation_severity(record: dict) -> str:
+    """P0 / P1 / P2 from what the record already says.
+
+    An unrecognised kind stays P1 — a human's call. Recognising more kinds must never widen
+    what looks urgent, or the vocabulary becomes a way to shout.
+    """
+    kind = normalize_kind(record.get("kind"))
+    if kind in _URGENT_KINDS:
+        return "P0"
+    tier, _ = classify(record)
+    return "P1" if tier == "tier3" else "P2"
+
+
+def escalation_docs(records: list[dict]) -> dict[str, dict]:
+    """One document per escalation, keyed by its id."""
+    docs = {}
+    for rec in records or []:
+        rec_id = rec.get("id")
+        if not rec_id:
+            continue
+        docs[str(rec_id)] = {
+            "ts": rec.get("ts"),
+            "session": rec.get("session_id"),
+            "kind": normalize_kind(rec.get("kind")),
+            # Kept so the board can mark drift instead of absorbing it silently.
+            "kind_raw": rec.get("kind"),
+            "severity": escalation_severity(rec),
+            "question": rec.get("question") or "",
+            "options": normalize_options(rec.get("options")),
+            "status": rec.get("status") or "open",
+            "answer": rec.get("answer"),
+            "answered_at": rec.get("answered_at"),
         }
     return docs
