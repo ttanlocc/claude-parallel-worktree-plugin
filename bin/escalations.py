@@ -97,6 +97,42 @@ _TIER3_KINDS = {
     "worktree_collision",
 }
 
+# The closed vocabulary. A worker picks one of these; anything else is drift.
+CANONICAL_KINDS = frozenset(_TIER2_KINDS | _TIER3_KINDS | {"diff_review"})
+
+# Longest first, so a raw kind containing two canonical names resolves to the more specific
+# one ("push_or_pr" wins over a bare "pr" were one ever added) rather than to whichever the
+# set happened to yield first.
+_KINDS_BY_LENGTH = tuple(sorted(CANONICAL_KINDS, key=len, reverse=True))
+
+
+def normalize_kind(raw) -> str | None:
+    """Map a worker-authored `kind` onto the canonical vocabulary, or None if it does not fit.
+
+    `kind` is written by a model against a prose schema, so near-misses are the norm rather
+    than the exception — the live queue carried `blocked_on_credentials` where the vocabulary
+    says `credentials`. That near-miss is not harmless: it falls through to the unknown branch,
+    and while the TIER stays safe (unknown defaults to a human), every consumer keying off the
+    kind treats a production credentials outage as an unrecognised one. The dashboard scored it
+    P1 instead of P0 for exactly this reason.
+
+    Matching is containment on a normalised form, not equality, because the drift seen in
+    practice decorates the canonical name rather than replacing it (`blocked_on_credentials`,
+    `credentials_expired`). A raw value that contains none of them returns None — this widens
+    what is recognised, and never invents a kind for text that does not name one.
+    """
+    if not isinstance(raw, str):
+        return None
+    flat = "".join(ch if ch.isalnum() else "_" for ch in raw.strip().lower())
+    if not flat:
+        return None
+    if flat in CANONICAL_KINDS:
+        return flat
+    for kind in _KINDS_BY_LENGTH:
+        if kind in flat:
+            return kind
+    return None
+
 
 def _as_text(value) -> str:
     """Render a field for a reason string whether it arrived as a str or a list."""
@@ -127,6 +163,24 @@ def _sensitive(changed_files) -> str | None:
     return None
 
 
+def normalize_options(raw) -> list[str]:
+    """Coerce a record's `options` field to a list of strings, tolerating on-disk drift.
+
+    `options` is worker-authored against a prose schema, not a validated contract — the same
+    tolerance _as_text/_sensitive give evidence's fields above. A list keeps only its string
+    items (a stray non-string entry is dropped, not stringified — it is not a label any worker
+    actually offered). A bare string is one option, not a sequence of characters to iterate
+    one-by-one, so it becomes a single-item list. Anything else yields no options rather than
+    raising — a caller that does `for opt in options` must never receive something it cannot
+    safely walk.
+    """
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, str)]
+    if isinstance(raw, str):
+        return [raw]
+    return []
+
+
 def classify(record: dict) -> tuple[str, str]:
     """Route one record: ("tier2", reason) the manager may decide, or ("tier3", reason) for a human.
 
@@ -134,7 +188,8 @@ def classify(record: dict) -> tuple[str, str]:
     carrying an irreversible, dependency, migration, or secret-shaped change still goes to a human.
     """
     ev = record.get("evidence") or {}
-    kind = record.get("kind")
+    raw_kind = record.get("kind")
+    kind = normalize_kind(raw_kind)
 
     if ev.get("irreversible"):
         return "tier3", "evidence marks this irreversible"
@@ -172,7 +227,26 @@ def classify(record: dict) -> tuple[str, str]:
     if kind in _TIER2_KINDS:
         return "tier2", f"{kind} is a mechanical call"
 
-    return "tier3", f"unknown kind {kind!r} — defaulting to a human"
+    return "tier3", f"unknown kind {raw_kind!r} — defaulting to a human"
+
+
+def is_undeliverable(record: dict) -> bool:
+    """True for a `needs_human` record that already carries a decided answer nobody could
+    deliver — not a genuine open question still waiting on human judgement.
+
+    manager_daemon.py's `_try_deliver` is the only place that ever stamps `delivery_attempts`
+    onto a record, and it flips `status` to `needs_human` only once attempts are exhausted — so
+    this trio (status, a non-null answer, a non-null delivery_attempts) co-occurs only on a
+    record that failed delivery, whether the answer came from the manager or a human. A record
+    that reaches needs_human via process_open's other branch (the manager punting on an open
+    question) carries neither field: new_record() never sets them, and that branch never touches
+    them either.
+    """
+    return (
+        record.get("status") == "needs_human"
+        and record.get("answer") is not None
+        and record.get("delivery_attempts") is not None
+    )
 
 
 def current_state(path: str) -> list[dict]:
@@ -197,6 +271,25 @@ def record_answer(path: str, record_id: str, answer: str, decided_by: str) -> di
             updated["answer"] = answer
             updated["decided_by"] = decided_by
             updated["status"] = "answered"
+            updated["answered_at"] = time.time()
+            append(path, updated)
+            return updated
+    return None
+
+
+def record_dismiss(path: str, record_id: str, decided_by: str) -> dict | None:
+    """Retire a record by appending an updated copy with a terminal status. Returns the update,
+    or None if unknown id.
+
+    Append-only, like record_answer: the prior needs_human line is never edited, only
+    superseded — current_state() folds to this newer copy, so get_escalations() stops offering
+    it under needs_human without needing any filtering logic of its own.
+    """
+    for rec in current_state(path):
+        if rec.get("id") == record_id:
+            updated = dict(rec)
+            updated["status"] = "dismissed"
+            updated["decided_by"] = decided_by
             updated["answered_at"] = time.time()
             append(path, updated)
             return updated

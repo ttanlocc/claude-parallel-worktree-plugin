@@ -5,7 +5,17 @@ import json
 import os
 import tempfile
 
-from escalations import append, classify, current_state, new_record, read_all, record_answer
+from escalations import (
+    append,
+    classify,
+    current_state,
+    is_undeliverable,
+    new_record,
+    normalize_options,
+    read_all,
+    record_answer,
+    record_dismiss,
+)
 
 
 def _tmp():
@@ -44,6 +54,28 @@ def test_new_record_ids_are_unique():
     a = new_record("s", "k", "q")
     b = new_record("s", "k", "q")
     assert a["id"] != b["id"]
+
+
+def test_normalize_options_keeps_a_list_of_strings():
+    assert normalize_options(["Approve", "Reject"]) == ["Approve", "Reject"]
+
+
+def test_normalize_options_wraps_a_bare_string():
+    # The live bug: a record authored with options="Approve" instead of ["Approve"]. Must
+    # become a one-element list, never iterated character by character.
+    assert normalize_options("Approve") == ["Approve"]
+
+
+def test_normalize_options_drops_non_string_items_from_a_list():
+    assert normalize_options(["Approve", None, 3, {"x": 1}, "Reject"]) == ["Approve", "Reject"]
+
+
+def test_normalize_options_empty_for_a_dict():
+    assert normalize_options({"Approve": True}) == []
+
+
+def test_normalize_options_empty_for_none():
+    assert normalize_options(None) == []
 
 
 def test_append_then_read_all_roundtrips():
@@ -422,9 +454,149 @@ def test_current_state_preserves_first_seen_order():
         os.unlink(path)
 
 
+def test_is_undeliverable_true_for_the_delivery_failure_trio():
+    r = new_record("s", "push_or_pr", "push?")
+    r["status"] = "needs_human"
+    r["answer"] = "yes"
+    r["delivery_attempts"] = 3
+    assert is_undeliverable(r) is True
+
+
+def test_is_undeliverable_false_for_a_genuine_open_question_flipped_to_needs_human():
+    # process_open's other branch: the manager punts on an open record with no answer of its own.
+    r = new_record("s", "push_or_pr", "push?")
+    r["status"] = "needs_human"
+    assert r["answer"] is None
+    assert is_undeliverable(r) is False
+
+
+def test_is_undeliverable_false_without_delivery_attempts():
+    r = new_record("s", "push_or_pr", "push?")
+    r["status"] = "needs_human"
+    r["answer"] = "yes"
+    assert is_undeliverable(r) is False
+
+
+def test_is_undeliverable_false_while_still_open():
+    r = new_record("s", "push_or_pr", "push?")
+    r["answer"] = "yes"
+    r["delivery_attempts"] = 3
+    assert is_undeliverable(r) is False  # status hasn't flipped to needs_human
+
+
+def test_is_undeliverable_false_mid_retry_before_status_flips():
+    # Delivery has failed once, not yet exhausted — status is still "answered", per _try_deliver.
+    r = new_record("s", "push_or_pr", "push?")
+    r["status"] = "answered"
+    r["answer"] = "yes"
+    r["delivery_attempts"] = 1
+    assert is_undeliverable(r) is False
+
+
+def test_record_dismiss_appends_and_marks_dismissed():
+    path = _tmp()
+    try:
+        r = new_record("s1", "push_or_pr", "push?")
+        append(path, r)
+        updated = record_dismiss(path, r["id"], "cto")
+        assert updated is not None
+        assert updated["status"] == "dismissed"
+        assert updated["decided_by"] == "cto"
+        assert updated["answered_at"] is not None
+        # append-only: the original line is still there, the update is a second line
+        assert len(read_all(path)) == 2
+    finally:
+        os.unlink(path)
+
+
+def test_record_dismiss_unknown_id_returns_none():
+    path = _tmp()
+    try:
+        append(path, new_record("s", "k", "q"))
+        assert record_dismiss(path, "nope", "cto") is None
+        assert len(read_all(path)) == 1
+    finally:
+        os.unlink(path)
+
+
+def test_record_dismiss_preserves_the_decided_answer():
+    # Retiring a record is not un-deciding it — the answer stays on the record as history.
+    path = _tmp()
+    try:
+        r = new_record("s1", "push_or_pr", "push?")
+        append(path, r)
+        record_answer(path, r["id"], "yes", "manager")
+        updated = record_dismiss(path, r["id"], "cto")
+        assert updated["answer"] == "yes"
+    finally:
+        os.unlink(path)
+
+
+def test_record_dismiss_no_longer_reads_as_undeliverable():
+    # Once dismissed, get_escalations()'s needs_human filter (status == "needs_human") and
+    # is_undeliverable() both stop matching — the record is off the panel, not just relabelled.
+    path = _tmp()
+    try:
+        r = new_record("s1", "push_or_pr", "push?")
+        append(path, r)
+        record_answer(path, r["id"], "yes", "manager")
+        undelivered = dict(current_state(path)[0])
+        undelivered["status"] = "needs_human"
+        undelivered["delivery_attempts"] = 3
+        append(path, undelivered)
+        assert is_undeliverable(current_state(path)[0]) is True
+
+        record_dismiss(path, r["id"], "cto")
+        final = current_state(path)[0]
+        assert final["status"] == "dismissed"
+        assert is_undeliverable(final) is False
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
         t()
         print(f"PASS {t.__name__}")
     print(f"{len(tests)} passed")
+
+
+def test_normalize_kind_accepts_the_canonical_vocabulary_unchanged():
+    from escalations import CANONICAL_KINDS, normalize_kind
+
+    for kind in CANONICAL_KINDS:
+        assert normalize_kind(kind) == kind
+
+
+def test_normalize_kind_maps_a_decorated_near_miss_onto_its_canonical_name():
+    """The live queue carried `blocked_on_credentials`. The tier stayed safe (unknown defaults
+    to a human) but every consumer keying off the kind read a production credentials outage as
+    unrecognised — the dashboard scored it P1 where `credentials` scores P0."""
+    from escalations import normalize_kind
+
+    assert normalize_kind("blocked_on_credentials") == "credentials"
+    assert normalize_kind("credentials_expired") == "credentials"
+    assert normalize_kind("Red Tests") == "red_tests"
+    assert normalize_kind("  PUSH_OR_PR  ") == "push_or_pr"
+
+
+def test_normalize_kind_invents_nothing_for_text_that_names_no_kind():
+    from escalations import normalize_kind
+
+    for raw in ("", "   ", "something_else", None, 7, ["credentials"]):
+        assert normalize_kind(raw) is None
+
+
+def test_classify_routes_a_decorated_kind_by_its_canonical_name():
+    tier, reason = classify(new_record("s", "blocked_on_credentials", "q"))
+    assert tier == "tier3"
+    assert "credentials" in reason
+    assert "unknown" not in reason
+
+
+def test_classify_still_defaults_an_unrecognisable_kind_to_a_human():
+    """Widening what counts as a known kind must not widen what gets auto-decided."""
+    tier, reason = classify(new_record("s", "totally_made_up", "q"))
+    assert tier == "tier3"
+    assert "unknown kind 'totally_made_up'" in reason
