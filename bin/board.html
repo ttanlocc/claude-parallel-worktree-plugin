@@ -253,11 +253,13 @@
     box-shadow: var(--shadow), 0 0 0 1px var(--warn-soft);
   }
   .session-tile.state-done { border-left-color: var(--border); opacity: .65; }
+  .session-tile.state-unknown { border-left-color: var(--bad); }
 
   .state-badge { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
   .state-badge.b-waiting { color: var(--warn-ink); }
   .state-badge.b-running { color: var(--good-ink); }
   .state-badge.b-idle,.state-badge.b-done { color: var(--faint); }
+  .state-badge.b-unknown { color: var(--bad-ink); }
   .state-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
   .state-dot.dot-waiting { animation: pulse-warn 1.5s ease-in-out infinite; }
   @keyframes pulse-warn { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(.7); } }
@@ -354,8 +356,13 @@ const SEVERITY_RANK = { P0: 0, P1: 1, P2: 2 };
 const SEVERITY_LABEL = { P0: "khẩn cấp", P1: "quan trọng", P2: "mức thấp" };
 const SEVERITY_TONE = { P0: "pill-bad", P1: "pill-warn", P2: "pill-accent" };
 
-const STATE_RANK = { waiting: 0, running: 1, idle: 2, done: 3 };
-const STATE_LABEL = { waiting: "Đang chờ duyệt", running: "Đang chạy", idle: "Rảnh", done: "Đã xong" };
+// "unknown" is not a state `claude agents --json` emits — it's what board_state.py's
+// normalize_state() returns for anything IT doesn't recognise (see board_state.py). It needs a
+// rank and a label like every other state: sessionTile()'s hasOwnProperty check below falls back
+// to "idle" for anything missing from this map, and idle is exactly the wrong word for a state
+// nobody has identified yet.
+const STATE_RANK = { waiting: 0, unknown: 1, running: 2, idle: 3, done: 4 };
+const STATE_LABEL = { waiting: "Đang chờ duyệt", running: "Đang chạy", idle: "Rảnh", done: "Đã xong", unknown: "Không rõ trạng thái" };
 
 const RESOLVED_STATUSES = new Set(["answered", "dismissed"]);
 // Same list the localhost dashboard uses for "not done" vs "done" — keep the two boards agreeing
@@ -608,7 +615,12 @@ function renderSessions() {
 
   const byStateThenTask = (a, b) =>
     (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9) || String(a.task).localeCompare(String(b.task));
-  const waiting = view.sessions.filter((s) => s.state === "waiting").sort(byStateThenTask);
+  // An "unknown" state joins "cần bạn xử lý", not "đã xong" — the same fail-toward-a-human
+  // default classify() already uses for a kind it cannot recognise (escalations.py). It is
+  // never "running" or "idle" either: both of those would claim a certainty the mirror doesn't
+  // have. Keeping it out of every filter here is what silently dropped 8 of 33 sessions off the
+  // whole board (C1) — every session must land in exactly one of these three groups.
+  const waiting = view.sessions.filter((s) => s.state === "waiting" || s.state === "unknown").sort(byStateThenTask);
   const running = view.sessions.filter((s) => s.state === "running").sort(byStateThenTask);
   const finished = view.sessions.filter((s) => s.state === "idle" || s.state === "done").sort(byStateThenTask);
 

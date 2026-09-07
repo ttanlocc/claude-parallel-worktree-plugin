@@ -15,6 +15,35 @@ from escalations import classify, normalize_kind, normalize_options
 _URGENT_KINDS = frozenset({"credentials", "irreversible", "cost_anomaly", "push_or_pr"})
 
 
+# `claude agents --json --all` verified LIVE (2026-09-07, 33 real sessions): blocked(4) /
+# done(21) / stopped(5) / None(8) — zero running, zero idle, zero waiting. board.html's whole
+# vocabulary (STATE_RANK/STATE_LABEL) is the four canonical words on the right; this is the one
+# seam that reconciles the CLI's real words with it, so a new CLI spelling is fixed in one place
+# instead of guessed at by every consumer.
+_STATE_MAP = {
+    "working": "running",
+    "blocked": "waiting",
+    "stopped": "done",
+    "running": "running",
+    "idle": "idle",
+    "waiting": "waiting",
+    "done": "done",
+}
+
+
+def normalize_state(raw) -> str:
+    """Map whatever `claude agents --json` actually emits onto the board's four canonical words.
+
+    Anything not in the map — None/missing, or a future CLI word not seen yet — becomes
+    "unknown", never "idle". Folding an unrecognised state into "idle" IS the bug this exists to
+    prevent: a blocked worker showing the badge "Rảnh" (free) is the opposite of the truth. An
+    unrecognised state must look unrecognised so board.html can still surface it, just not lie.
+    """
+    if isinstance(raw, str) and raw in _STATE_MAP:
+        return _STATE_MAP[raw]
+    return "unknown"
+
+
 def session_docs(agents: list[dict], registry: dict) -> dict[str, dict]:
     """One document per live task, keyed by task name.
 
@@ -33,8 +62,9 @@ def session_docs(agents: list[dict], registry: dict) -> dict[str, dict]:
             "task": name,
             "session_id": agent.get("sessionId"),
             "short_id": reg.get("short_id"),
-            # `claude agents --json` has used both spellings; read whichever is present.
-            "state": agent.get("state") or agent.get("status"),
+            # `claude agents --json` has used both spellings; read whichever is present, then
+            # translate it — see normalize_state() above.
+            "state": normalize_state(agent.get("state") or agent.get("status")),
             "branch": reg.get("branch"),
             "worktree": reg.get("path"),
             "started_at": agent.get("startedAt"),

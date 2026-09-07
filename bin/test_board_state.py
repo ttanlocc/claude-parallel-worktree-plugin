@@ -58,6 +58,51 @@ def test_session_docs_skip_an_entry_with_no_name():
     assert session_docs([{"sessionId": "s1", "state": "idle"}], {}) == {}
 
 
+from board_state import normalize_state
+
+
+def test_normalize_state_maps_the_real_claude_agents_vocabulary_onto_the_pages_four_words():
+    """`claude agents --json --all` verified live (2026-09-07): working/blocked/stopped are
+    real values the page's running/waiting/idle/done vocabulary has never heard of."""
+    assert normalize_state("working") == "running"
+    assert normalize_state("blocked") == "waiting"
+    assert normalize_state("stopped") == "done"
+
+
+def test_normalize_state_leaves_the_pages_own_four_words_unchanged():
+    for canonical in ("running", "idle", "waiting", "done"):
+        assert normalize_state(canonical) == canonical
+
+
+def test_normalize_state_marks_an_unrecognised_value_as_unknown_never_idle():
+    """Folding an unrecognised state into "idle" IS the bug: a blocked worker would show the
+    badge "Rảnh" (free) — the opposite of the truth. An unrecognised state must look
+    unrecognised, not free."""
+    assert normalize_state(None) == "unknown"
+    assert normalize_state("some_future_cli_word") == "unknown"
+    assert normalize_state(["not", "a", "string"]) == "unknown"
+
+
+def test_session_docs_normalise_state_using_a_captured_real_claude_agents_payload():
+    """Captured live from `claude agents --json --all` (2026-09-07) across 33 real sessions:
+    blocked(4)/done(21)/stopped(5)/None(8) — zero running, zero idle, zero waiting. Every
+    fixture before this one was hand-written to the plan's assumed vocabulary, which is
+    exactly why nothing caught this until a human ran the real CLI."""
+    agents = [
+        {"name": "t-blocked", "sessionId": "s1", "state": "blocked"},
+        {"name": "t-done", "sessionId": "s2", "state": "done"},
+        {"name": "t-stopped", "sessionId": "s3", "state": "stopped"},
+        {"name": "t-unstated", "sessionId": "s4"},  # neither `state` nor `status` present
+    ]
+
+    docs = session_docs(agents, {})
+
+    assert docs["t-blocked"]["state"] == "waiting"
+    assert docs["t-done"]["state"] == "done"
+    assert docs["t-stopped"]["state"] == "done"
+    assert docs["t-unstated"]["state"] == "unknown"
+
+
 from board_state import escalation_docs
 
 
