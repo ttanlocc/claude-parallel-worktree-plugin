@@ -52,6 +52,24 @@ latest record per `id` wins. Fields: `id`, `ts`, `title`, `priority` (`P0`/`P1`/
 A plan step is `{"step", "owner", "depends_on", "eta", "state"}` where `state` is `todo`, `doing`,
 or `done`. `at_risk` and `progress` are computed from these — never store them.
 
+### Write it in real words
+
+Every human-readable field — `title`, `note`, each plan step's `step`, and an escalation's
+`question` — is read on a dashboard by a person, so write it the way you would write it to them.
+
+Vietnamese takes its diacritics: "Sửa hàng ticket bị clip khi cửa sổ hẹp", never "Sua hang ticket
+bi clip khi cua so hep". Stripping them is a habit picked up from shell quoting, and it does not
+apply here — `assignments.append` writes JSON through Python, so the text never touches a shell
+and non-ASCII survives untouched. Unaccented Vietnamese is slower to read and ambiguous ("chet"
+is both "chết" and "chệt"), and it makes the board look broken.
+
+Match the language of the work: an English ticket stays English, a Vietnamese one stays
+Vietnamese. Do not translate one into the other, and do not mix them inside one sentence.
+
+Escalation `options` are the exception: write them in **English**, short and imperative
+("Renew the credential", "Switch to a service account"). They are decisions, and they read as
+buttons on the dashboard — a consistent language keeps them scannable next to each other.
+
 Append with `assignments.append`, never with shell redirection — the dashboard and the daemon both
 take a lock while they write this same file, and `echo '{...}' >> assignments.jsonl` does not take
 it. An unlocked write that lands mid-append produces a torn line, and a torn line is dropped

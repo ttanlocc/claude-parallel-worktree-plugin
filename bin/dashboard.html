@@ -186,6 +186,10 @@
   /* ---------- decisions ---------- */
   .decision { padding: 16px var(--pad) 18px; border-top: 1px solid var(--rule-soft); }
   .zone-head + .decision { border-top: 0; }
+  .decision-meta { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; margin-bottom: 7px; }
+  .decision-age { font-family: var(--mono); font-size: 11px; color: var(--faint);
+                  font-variant-numeric: tabular-nums; margin-left: auto; }
+  .decision-age.over { color: var(--red); font-weight: 700; }
   .decision-q { font-size: 15px; font-weight: 600; line-height: 1.4; }
   .decision-why { font-size: 12.5px; color: var(--ink-soft); margin-top: 5px; line-height: 1.5; }
   .decision-actions { display: flex; gap: 8px; margin-top: 13px; flex-wrap: wrap; }
@@ -824,8 +828,52 @@ function isUndeliverable(rec) {
   return rec.status === "needs_human" && rec.answer != null && rec.delivery_attempts != null;
 }
 
+// How long the escalation has been sitting, and whether that is past the point where it stops
+// being "recent" and starts being "nobody looked". A blocker 30 minutes old and one 3 days old
+// are not the same item, and the card said nothing about which it was.
+const ESCALATION_SLA_HOURS = 24;
+
+function escalationAge(rec) {
+  const ts = Number(rec.ts);
+  if (!isFinite(ts) || ts <= 0) return null;
+  // Records are written by time.time() — seconds. Guard anyway: a millisecond timestamp would
+  // otherwise read as ~55 years old and paint every card red.
+  const secs = (Date.now() / 1000) - (ts > 1e11 ? ts / 1000 : ts);
+  if (secs < 0) return null;
+  return secs / 3600;
+}
+
+function formatAge(hours) {
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} phút`;
+  if (hours < 48) return `${Math.round(hours)} giờ`;
+  return `${Math.round(hours / 24)} ngày`;
+}
+
+// Severity, from what the record already says. `kind` is worker-authored and open-ended, so
+// this reads as "which known kinds are urgent", never as a closed enum — an unknown kind is
+// NOT quietly demoted, it keeps whatever the tier says.
+const URGENT_KINDS = new Set(["credentials", "irreversible", "cost_anomaly", "push_or_pr"]);
+
+function escalationSeverity(rec) {
+  const kind = String(rec.kind || "");
+  if (URGENT_KINDS.has(kind)) return { label: "P0", tone: "on-red" };
+  if (rec.tier === "tier3" || !rec.tier) return { label: "P1", tone: "on-ink" };
+  return { label: "P2", tone: "on-line" };
+}
+
 function decisionCard(rec) {
   const card = el("div", "decision");
+  const sev = escalationSeverity(rec);
+  const meta = el("div", "decision-meta");
+  meta.append(pill(sev.tone, sev.label));
+  if (rec.kind) meta.append(pill("", String(rec.kind)));
+  const hours = escalationAge(rec);
+  if (hours !== null) {
+    const late = hours >= ESCALATION_SLA_HOURS;
+    meta.append(el("span", "decision-age" + (late ? " over" : ""),
+      `chờ ${formatAge(hours)}${late ? ` · quá ${ESCALATION_SLA_HOURS}h` : ""}`));
+  }
+  card.append(meta);
   if (isUndeliverable(rec)) {
     // The real situation, not the stale question: what was decided, and who never got it.
     card.append(el("div", "decision-q", `Trả lời "${rec.answer}" chưa tới được ${rec.session_id || "?"}`));
