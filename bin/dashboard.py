@@ -406,10 +406,13 @@ def start_manager_turn(text: str, source: str, ask=None) -> threading.Thread:
     it (or anything else ask() raises) from escaping as an unhandled-thread traceback.
     """
     ask = ask or manager_session.ask
+    # Read at spawn time, not at import: the CTO can change this between turns and the next
+    # turn must honour it without restarting the dashboard.
+    prefs = manager_session.read_prefs()
 
     def _run() -> None:
         try:
-            ask(text, source)
+            ask(text, source, model=prefs["model"], effort=prefs["effort"])
         except Exception as e:
             print(f"manager turn failed: {e}", file=sys.stderr)
 
@@ -438,6 +441,31 @@ def manager_chat_payload(history=None, busy=None) -> dict:
 # ponytail: process-local only — a second dashboard process, or the daemon, can still race
 # this; manager_session's own flock is what keeps that safe, at the cost of a redundant call.
 _MANAGER_SPAWN_LOCK = threading.Lock()
+
+
+def manager_prefs_payload() -> dict:
+    """The chat path's current model/effort plus everything it may be set to, so the UI never
+    hardcodes a vocabulary that lives in manager_session."""
+    return {
+        **manager_session.read_prefs(),
+        "models": list(manager_session.MANAGER_MODELS),
+        "efforts": list(manager_session.MANAGER_EFFORTS),
+    }
+
+
+def _manager_prefs_post(body: dict) -> tuple[int, dict]:
+    """(status, body) for a prefs POST. A rejected value returns 400 with the reason, never a
+    silent fallback — a picker that appears to accept a choice it did not store is worse than
+    an error."""
+    if not isinstance(body, dict):
+        return 400, {"error": "expected a JSON object"}
+    try:
+        saved = manager_session.write_prefs(body.get("model"), body.get("effort"))
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    except OSError as e:
+        return 500, {"error": f"could not save: {e}"}
+    return 200, saved
 
 
 def _manager_chat_post(text: str, busy=None, start=None) -> tuple[int, dict]:
@@ -606,6 +634,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/api/manager/chat":
             self._json(manager_chat_payload())
             return
+        if parsed.path == "/api/manager/prefs":
+            self._json(manager_prefs_payload())
+            return
         if parsed.path == "/":
             html_path = os.path.join(PLUGIN_BIN, "dashboard.html")
             if not os.path.exists(html_path):
@@ -720,6 +751,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"error": "text is required"}, status=400)
                 return
             status, resp = _manager_chat_post(text)
+            self._json(resp, status=status)
+            return
+        if parsed.path == "/api/manager/prefs":
+            try:
+                body = self._read_json_body()
+            except ValueError as e:
+                self._body_error(e)
+                return
+            status, resp = _manager_prefs_post(body)
             self._json(resp, status=status)
             return
         if parsed.path == "/api/manager/reset":

@@ -140,7 +140,7 @@ def test_start_manager_turn_returns_before_the_model_does():
 
     released = threading.Event()
 
-    def slow_ask(text, source):
+    def slow_ask(text, source, model=None, effort=None):
         _time.sleep(0.3)
         released.set()
         return "done"
@@ -161,7 +161,7 @@ def test_start_manager_turn_swallows_exceptions_from_ask():
 
     import dashboard
 
-    def boom(text, source):
+    def boom(text, source, model=None, effort=None):
         raise RuntimeError("boom")
 
     stderr = io.StringIO()
@@ -732,3 +732,61 @@ def test_one_key_still_refreshes_only_once_under_concurrency():
         t.join(timeout=5)
 
     assert sum(calls) == 1, f"refreshed {sum(calls)} times, expected exactly 1"
+
+
+def test_start_manager_turn_passes_the_stored_chat_prefs_to_ask():
+    """The picker only means anything if the next turn actually carries it. Read at spawn time,
+    not import time, so changing it does not need a dashboard restart."""
+    import manager_session
+
+    seen = {}
+
+    def spy(text, source, model=None, effort=None):
+        seen["model"] = model
+        seen["effort"] = effort
+        return "ok"
+
+    original = manager_session.read_prefs
+    manager_session.read_prefs = lambda: {"model": "claude-haiku-4-5-20251001", "effort": "low"}
+    try:
+        dashboard.start_manager_turn("hello", "cto", ask=spy).join(timeout=5)
+    finally:
+        manager_session.read_prefs = original
+
+    assert seen == {"model": "claude-haiku-4-5-20251001", "effort": "low"}
+
+
+def test_manager_prefs_post_rejects_a_value_outside_the_vocabulary():
+    """A picker that appears to accept a choice it did not store is worse than an error — and a
+    bad --effort would break every later chat turn with no way to fix it from the UI."""
+    status, body = dashboard._manager_prefs_post({"model": "claude-opus-5", "effort": "turbo"})
+    assert status == 400
+    assert "turbo" in body["error"]
+
+    status, body = dashboard._manager_prefs_post({"model": "gpt-4", "effort": "low"})
+    assert status == 400
+    assert "gpt-4" in body["error"]
+
+    status, body = dashboard._manager_prefs_post("not a dict")
+    assert status == 400
+
+
+def test_manager_prefs_round_trip(tmp_path):
+    import manager_session
+
+    path = str(tmp_path / "prefs.json")
+    manager_session.write_prefs("claude-sonnet-5", "medium", path=path)
+    assert manager_session.read_prefs(path) == {"model": "claude-sonnet-5", "effort": "medium"}
+
+
+def test_manager_prefs_fall_back_to_the_defaults_when_the_file_is_unusable(tmp_path):
+    """A hand-edited or truncated file must never hand `claude` an argument it will reject."""
+    import manager_session
+
+    bad = tmp_path / "prefs.json"
+    bad.write_text('{"model": "made-up", "effort": "ludicrous"}')
+    assert manager_session.read_prefs(str(bad)) == {
+        "model": manager_session.MANAGER_MODEL,
+        "effort": manager_session.MANAGER_EFFORT,
+    }
+    assert manager_session.read_prefs(str(tmp_path / "missing.json"))["effort"] == manager_session.MANAGER_EFFORT

@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 HERMES_DIR = os.path.expanduser("~/.claude/hermes")
@@ -28,6 +29,62 @@ CHARTER_PATH = os.path.join(
 
 MANAGER_MODEL = os.environ.get("PWT_MANAGER_MODEL", "claude-opus-5")
 MANAGER_EFFORT = os.environ.get("PWT_MANAGER_EFFORT", "max")
+
+# What the CTO may pick for the CHAT path. The daemon's own ticks keep MANAGER_MODEL/EFFORT
+# above: a tick does real work unattended and nobody is waiting on it, while a chat turn has a
+# person watching a spinner — opus-5 at max effort took 4m30s to answer one word.
+MANAGER_MODELS = ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-fable-5-1")
+MANAGER_EFFORTS = ("low", "medium", "high", "xhigh", "max")  # --effort's own vocabulary
+PREFS_PATH = os.path.expanduser("~/.claude/hermes/manager-prefs.json")
+
+
+def read_prefs(path: str = None) -> dict:
+    """The chat path's model/effort. Falls back to the env defaults for anything missing or
+    unrecognised — a hand-edited file must never be able to hand `claude` an argument it will
+    reject, which would break every chat turn with no way to fix it from the UI."""
+    prefs = {}
+    try:
+        with open(path or PREFS_PATH, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            prefs = loaded
+    except (OSError, ValueError):
+        pass
+    model = prefs.get("model")
+    effort = prefs.get("effort")
+    return {
+        "model": model if model in MANAGER_MODELS else MANAGER_MODEL,
+        "effort": effort if effort in MANAGER_EFFORTS else MANAGER_EFFORT,
+    }
+
+
+def write_prefs(model: str, effort: str, path: str = None) -> dict:
+    """Persist a validated choice. Raises ValueError on anything outside the two vocabularies."""
+    if model not in MANAGER_MODELS:
+        raise ValueError(f"unknown model {model!r}")
+    if effort not in MANAGER_EFFORTS:
+        raise ValueError(f"unknown effort {effort!r}")
+    target = path or PREFS_PATH
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    prefs = {"model": model, "effort": effort}
+    # Write-then-rename, into a temp file UNIQUE per writer. A fixed "<target>.tmp" is not
+    # safe here: changing model and effort fires two saves back to back, and both wrote the
+    # same path — one interleaved the other's bytes and the survivor was
+    # `{"model": ..., "effort": "low"}m"}`, which read_prefs could only discard back to the
+    # defaults. mkstemp in the target's own directory keeps os.replace atomic (same
+    # filesystem) while giving each writer its own file, so concurrent saves are
+    # last-writer-wins instead of corrupting.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target) or ".", prefix=".prefs-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(prefs, f)
+        os.replace(tmp, target)
+    except BaseException:
+        # Never leave the scratch file behind on a failed save.
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return prefs
 
 
 def resolve_repo_root(argv_repo: str | None = None, env=None, cwd_fn=os.getcwd) -> str:
@@ -148,13 +205,18 @@ def busy() -> bool:
     return False
 
 
-def ask_argv(session_id, text: str) -> list[str]:
+def ask_argv(session_id, text: str, model: str = None, effort: str = None) -> list[str]:
     """Argv for one manager turn.
 
     Model and effort go on every call, resumes included: --effort applies to the invocation, not to
     the stored session, so omitting it on a resume silently downgrades the manager.
     """
-    argv = ["claude", "--model", MANAGER_MODEL, "--effort", MANAGER_EFFORT, "--output-format", "json"]
+    argv = [
+        "claude",
+        "--model", model or MANAGER_MODEL,
+        "--effort", effort or MANAGER_EFFORT,
+        "--output-format", "json",
+    ]
     if session_id:
         argv += ["--resume", session_id]
     return argv + ["-p", "--", text]
@@ -216,7 +278,7 @@ def _failure_note(e: Exception) -> str:
     return f"manager call failed: {type(e).__name__}: {e}"
 
 
-def _ask_locked(text: str, source: str, run, timeout: int) -> tuple[bool, str]:
+def _ask_locked(text: str, source: str, run, timeout: int, model=None, effort=None) -> tuple[bool, str]:
     """One turn, with the lock already held. Returns (ok, text) on every path."""
     _log_quietly("cto" if source == "cto" else "system", source, text)
     try:
@@ -229,7 +291,7 @@ def _ask_locked(text: str, source: str, run, timeout: int) -> tuple[bool, str]:
 
     try:
         proc = run(
-            ask_argv(session_id, prompt),
+            ask_argv(session_id, prompt, model, effort),
             capture_output=True,
             text=True,
             check=True,
@@ -268,7 +330,14 @@ def _ask_locked(text: str, source: str, run, timeout: int) -> tuple[bool, str]:
     return True, reply
 
 
-def ask_result(text: str, source: str, run=subprocess.run, timeout: int = CALL_TIMEOUT) -> tuple[bool, str]:
+def ask_result(
+    text: str,
+    source: str,
+    run=subprocess.run,
+    timeout: int = CALL_TIMEOUT,
+    model: str = None,
+    effort: str = None,
+) -> tuple[bool, str]:
     """One turn. Returns (ok, text) — ok is False when the call failed and text is the failure note.
 
     Any caller that parses the manager's output as a contract MUST use this rather than ask():
@@ -277,13 +346,20 @@ def ask_result(text: str, source: str, run=subprocess.run, timeout: int = CALL_T
     """
     try:
         with _locked():
-            return _ask_locked(text, source, run, timeout)
+            return _ask_locked(text, source, run, timeout, model, effort)
     except ManagerBusy:
         _log_quietly("manager", source, "manager busy — this turn was not delivered")
         raise
 
 
-def ask(text: str, source: str, run=subprocess.run, timeout: int = CALL_TIMEOUT) -> str:
+def ask(
+    text: str,
+    source: str,
+    run=subprocess.run,
+    timeout: int = CALL_TIMEOUT,
+    model: str = None,
+    effort: str = None,
+) -> str:
     """The manager's reply, or a note describing why there wasn't one. For display only —
     parsers use ask_result(), which can tell those two apart."""
-    return ask_result(text, source, run, timeout)[1]
+    return ask_result(text, source, run, timeout, model, effort)[1]

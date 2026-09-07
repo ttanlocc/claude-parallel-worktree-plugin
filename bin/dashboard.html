@@ -186,6 +186,11 @@
   /* ---------- decisions ---------- */
   .decision { padding: 16px var(--pad) 18px; border-top: 1px solid var(--rule-soft); }
   .zone-head + .decision { border-top: 0; }
+  .chat-prefs { display: flex; align-items: center; gap: 7px; padding: 0 var(--pad) 11px; flex-wrap: wrap; }
+  .chat-prefs select { font-family: var(--sans); font-size: 12px; color: var(--ink); background: var(--leaf);
+                       border: 1px solid var(--rule); border-radius: 5px; padding: 3px 6px; }
+  .chat-prefs select:hover { border-color: var(--ink-soft); }
+  .chat-prefs-note { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
   .decision-meta { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; margin-bottom: 7px; }
   .decision-age { font-family: var(--mono); font-size: 11px; color: var(--faint);
                   font-variant-numeric: tabular-nums; margin-left: auto; }
@@ -1148,11 +1153,85 @@ function ensureChatShell() {
 
   const head = el("div", "chat-head");
   head.append(el("h2", null, "Manager"), reset);
+
+  // Model + effort for the CHAT path only. The daemon's own ticks keep their configured
+  // defaults: nobody is watching a tick, but a person is watching this spinner, and opus-5 at
+  // max effort took four and a half minutes to answer one word.
+  const prefs = el("div", "chat-prefs");
+  const model = document.createElement("select");
+  model.id = "chat-model";
+  model.setAttribute("aria-label", "Model cho chat");
+  const effort = document.createElement("select");
+  effort.id = "chat-effort";
+  effort.setAttribute("aria-label", "Mức effort cho chat");
+  const note = el("span", "chat-prefs-note", "");
+  prefs.append(model, effort, note);
   const log = el("div", "chat-log");
   log.id = "chat-log";
   const compose = el("div", "chat-compose");
   compose.append(input, send);
-  panel.replaceChildren(head, log, compose);
+  panel.replaceChildren(head, prefs, log, compose);
+  loadChatPrefs();
+}
+
+// Label the vocabularies the server owns; an unknown value still renders, as itself, rather
+// than vanishing from a list the server is the authority on.
+const MODEL_LABEL = {
+  "claude-opus-5": "Opus 5",
+  "claude-sonnet-5": "Sonnet 5",
+  "claude-haiku-4-5-20251001": "Haiku 4.5",
+  "claude-fable-5-1": "Fable 5.1",
+};
+const EFFORT_LABEL = { low: "Thấp", medium: "Vừa", high: "Cao", xhigh: "Rất cao", max: "Tối đa" };
+
+function fillPrefSelect(sel, values, current, labels) {
+  sel.replaceChildren(...values.map(v => {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = labels[v] || v;
+    return o;
+  }));
+  sel.value = current;
+}
+
+async function loadChatPrefs() {
+  const model = document.getElementById("chat-model");
+  const effort = document.getElementById("chat-effort");
+  const note = document.querySelector(".chat-prefs-note");
+  if (!model || !effort) return;
+  let p;
+  try {
+    const res = await fetch("/api/manager/prefs");
+    if (!res.ok) throw new Error(String(res.status));
+    p = await res.json();
+  } catch (e) {
+    // Leave the selects empty and say so: a picker showing a default it never read would
+    // claim a setting the server may not actually be using.
+    if (note) note.textContent = "không đọc được cấu hình";
+    return;
+  }
+  fillPrefSelect(model, p.models || [], p.model, MODEL_LABEL);
+  fillPrefSelect(effort, p.efforts || [], p.effort, EFFORT_LABEL);
+  const save = async () => {
+    if (note) note.textContent = "đang lưu…";
+    try {
+      const res = await fetch("/api/manager/prefs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model.value, effort: effort.value }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || String(res.status));
+      if (note) note.textContent = "đã lưu";
+      setTimeout(() => { if (note && note.textContent === "đã lưu") note.textContent = ""; }, 2000);
+    } catch (e) {
+      // Re-read rather than leave the select showing a choice the server rejected.
+      if (note) note.textContent = "không lưu được: " + (e.message || e);
+      loadChatPrefs();
+    }
+  };
+  model.onchange = save;
+  effort.onchange = save;
 }
 
 function sourceLabel(source) {

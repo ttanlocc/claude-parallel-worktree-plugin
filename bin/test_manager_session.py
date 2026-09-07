@@ -387,3 +387,50 @@ if __name__ == "__main__":
         t()
         print(f"PASS {t.__name__}")
     print(f"{len(tests)} passed")
+
+
+def test_write_prefs_survives_concurrent_saves(tmp_path):
+    """Changing model and effort fires two saves back to back. Sharing one "<target>.tmp"
+    between them interleaved their bytes and left
+    `{"model": ..., "effort": "low"}m"}` on disk — valid-looking, unparseable, and silently
+    discarded back to the defaults by read_prefs."""
+    import threading
+
+    import manager_session as ms
+
+    path = str(tmp_path / "prefs.json")
+    combos = [("claude-opus-5", "max"), ("claude-sonnet-5", "low"), ("claude-haiku-4-5-20251001", "high")]
+    start = threading.Barrier(len(combos) * 4)
+    errors = []
+
+    def save(model, effort):
+        try:
+            start.wait(5)
+            for _ in range(20):
+                ms.write_prefs(model, effort, path=path)
+        except Exception as e:  # noqa: BLE001 - the assertion below reports it
+            errors.append(e)
+
+    threads = [threading.Thread(target=save, args=c) for c in combos for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not errors, f"a concurrent save failed: {errors[:2]}"
+    # Whichever writer landed last, the file must be one of the values actually written —
+    # never a blend of two, and never so broken that read_prefs falls back to the defaults.
+    got = ms.read_prefs(path)
+    assert (got["model"], got["effort"]) in combos, f"corrupted result: {got}"
+
+
+def test_write_prefs_leaves_no_scratch_files_behind(tmp_path):
+    import os
+
+    import manager_session as ms
+
+    path = str(tmp_path / "prefs.json")
+    for _ in range(5):
+        ms.write_prefs("claude-sonnet-5", "medium", path=path)
+    leftovers = [n for n in os.listdir(tmp_path) if n != "prefs.json"]
+    assert not leftovers, f"scratch files left behind: {leftovers}"
