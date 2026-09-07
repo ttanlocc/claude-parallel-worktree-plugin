@@ -222,30 +222,43 @@ import sys
 _SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
 
 
-def _safe(reader, fallback):
+def _safe(reader, fallback, name):
     """Read one source, or fall back. A source that cannot be read must not blank the board —
-    every other source is still worth publishing, and meta/status shows the missing one aging."""
+    every other source is still worth publishing, and meta/status shows the missing one aging.
+
+    Prints which reader failed and why to stderr. This exact broad catch once swallowed a
+    FileNotFoundError in the registry join for a full day: every session document silently wrote
+    branch/worktree/short_id/ado_refs as null, and a broken join looked identical to a working
+    one from the scheduled run's output. The catch stays broad — that part was always correct —
+    but silence about WHICH reader gave up is what let it go unnoticed.
+    """
     try:
         return reader()
-    except Exception:
+    except Exception as exc:
+        print(f"board_state: {name} reader failed, falling back to {fallback!r}: {exc}", file=sys.stderr)
         return fallback
 
 
 def collect(read_agents, read_registry, read_escalations, read_tickets, read_prs, now) -> list[dict]:
     """Gather every source and return the write set. Readers are injected so this is testable
     without `az`, `gh`, or a live session."""
-    tickets = _safe(read_tickets, None)
+    tickets = _safe(read_tickets, None, "tickets")
     stamp = now()
     return build_writes(
-        agents=_safe(read_agents, []),
-        registry=_safe(read_registry, {}),
-        escalations=_safe(read_escalations, []),
+        agents=_safe(read_agents, [], "agents"),
+        registry=_safe(read_registry, {}, "registry"),
+        escalations=_safe(read_escalations, [], "escalations"),
         tickets=tickets or [],
-        pr_by_ticket=_safe(read_prs, {}),
+        pr_by_ticket=_safe(read_prs, {}, "prs"),
         now=stamp,
         # None, not `stamp`: a sweep that failed must not claim to have just run.
         ado_swept_at=stamp if tickets is not None else None,
     )
+
+
+def _registry_path(repo_root: str) -> str:
+    """Where parallel-task.sh recorded what it provisioned, for a given repo root."""
+    return os.path.join(repo_root, ".claude", "worktrees", ".parallel-registry.json")
 
 
 def main() -> int:
@@ -255,12 +268,22 @@ def main() -> int:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import dashboard
     import manager_daemon
+    import manager_session
 
     def read_registry():
         # The registry FILE is already keyed by task name, which is the shape session_docs
         # wants. `dashboard.get_registry()` shells out to parallel-task.sh and returns a list;
         # reading the file skips a subprocess and a reshape.
-        path = os.path.join(dashboard.REPO_DIR, ".claude", "worktrees", ".parallel-registry.json")
+        #
+        # NOT dashboard.REPO_DIR: that is os.getcwd() frozen at IMPORT time. dashboard.main()
+        # reassigns it, but this script never calls dashboard.main() — board-mirror.md runs it
+        # directly with no cwd of its own, so that reassignment never happens and REPO_DIR
+        # silently resolves against whatever cwd the scheduled session happened to have. This
+        # swallowed the whole registry join for a full day: every session doc wrote
+        # branch/worktree/short_id/ado_refs as null. Resolve the root explicitly instead, the
+        # same precedence dashboard.main()/manager_daemon.py's own entry points use (this script
+        # has no argv tier of its own, same as manager_daemon.py).
+        path = _registry_path(manager_session.resolve_repo_root())
         with open(path, encoding="utf-8") as f:
             return json.load(f)
 

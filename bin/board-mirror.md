@@ -3,11 +3,16 @@
 
   Cron id: 0b576159 (created 2026-09-07, cadence 7,22,37,52 * * * *)
 
-  Two things the operator must set before scheduling, because neither belongs in a shipped file:
+  What the operator should set before scheduling, because none of it belongs in a shipped file:
     ARTIFACT_URL — the board published from bin/board.html with capabilities {db: {}}
     PWR_ADO_ASSIGNED_TO — only if one person holds more than one ADO identity. Unset, the
       query falls back to WIQL's @Me, which resolves to whichever identity `az` authenticated
       and silently omits every ticket assigned to the other one.
+    PWT_REPO_ROOT — recommended. Step 1 has no cwd of its own; board_state.py resolves the
+      plugin's registry (branch/worktree/short_id/ado_refs per session) against this env var
+      first, then falls back to whatever cwd the scheduled session happens to have. Unset, a
+      session with the wrong cwd silently nulls out those fields on every session document
+      rather than failing loudly — set it to this repo's absolute path to pin the join.
 -->
 
 Refresh the manager board. Do exactly this and nothing else.

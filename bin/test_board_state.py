@@ -794,3 +794,37 @@ def test_collect_lets_a_broken_clock_propagate_instead_of_writing_a_bogus_timest
     except RuntimeError:
         threw = True
     assert threw
+
+
+from board_state import _registry_path, _safe
+
+
+def test_safe_prints_which_reader_failed_and_why_to_stderr(capsys):
+    """This exact broad catch once swallowed a FileNotFoundError in the registry join for a full
+    day — a broken reader and a working one looked identical from the outside, because nothing
+    said which one gave up. `_safe` must name the reader and the exception on stderr every time
+    it falls back."""
+
+    def boom():
+        raise FileNotFoundError("no such file: .parallel-registry.json")
+
+    result = _safe(boom, {"fallback": True}, "registry")
+
+    assert result == {"fallback": True}
+    err = capsys.readouterr().err
+    assert "registry" in err
+    assert "no such file" in err
+
+
+def test_safe_prints_nothing_when_the_reader_succeeds(capsys):
+    result = _safe(lambda: 42, None, "agents")
+
+    assert result == 42
+    assert capsys.readouterr().err == ""
+
+
+def test_registry_path_joins_the_repo_root_with_the_known_registry_location():
+    """The registry join went silently dead for a full day because it resolved against the
+    wrong repo root, not because this join itself was wrong — but pin the join's own shape too,
+    now that it is a named, reusable seam instead of an inline string buried in a closure."""
+    assert _registry_path("/repo") == "/repo/.claude/worktrees/.parallel-registry.json"
