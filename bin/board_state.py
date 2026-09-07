@@ -216,10 +216,7 @@ def build_writes(
     return writes
 
 
-import subprocess
 import sys
-
-_SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
 
 
 def _safe(reader, fallback, name):

@@ -607,7 +607,6 @@ function ticketStateTone(state) {
   if (state === "Blocked") return "pill-bad";
   if (state === "Active") return "pill-accent";
   if (state === "Resolved") return "pill-good";
-  if (TICKET_DONE_STATES.has(state)) return "pill-neutral";
   return "pill-neutral";
 }
 function ticketPrChip(pr) {
