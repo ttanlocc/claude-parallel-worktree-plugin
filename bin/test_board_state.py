@@ -80,6 +80,9 @@ def test_escalation_docs_normalise_kind_and_keep_the_raw_spelling():
     )
 
     doc = docs["e1"]
+    assert doc["ts"] == 1788700000.0
+    assert doc["session"] == "s1"
+    assert doc["question"] == "OAuth expired again"
     assert doc["kind"] == "credentials"
     assert doc["kind_raw"] == "blocked_on_credentials"
     assert doc["severity"] == "P0"
@@ -106,8 +109,16 @@ def test_escalation_docs_mark_a_mechanical_kind_lowest():
 
 def test_escalation_docs_carry_an_answer_once_one_exists():
     docs = escalation_docs(
-        [{"id": "e4", "kind": "red_tests", "question": "?", "status": "answered",
-          "answer": "rerun", "answered_at": 1788700100.0}]
+        [
+            {
+                "id": "e4",
+                "kind": "red_tests",
+                "question": "?",
+                "status": "answered",
+                "answer": "rerun",
+                "answered_at": 1788700100.0,
+            }
+        ]
     )
 
     assert docs["e4"]["status"] == "answered"
@@ -125,3 +136,12 @@ def test_escalation_docs_tolerate_a_string_options_field():
 
 def test_escalation_docs_skip_a_record_with_no_id():
     assert escalation_docs([{"kind": "looping", "question": "?"}]) == {}
+
+
+def test_escalation_docs_default_status_to_open_when_status_is_absent():
+    """A record can reach here before a status key was ever written. It must still render as
+    open — a live escalation waiting on an answer — rather than a blank state that hides it
+    from the board."""
+    docs = escalation_docs([{"id": "e6", "kind": "looping", "question": "?"}])
+
+    assert docs["e6"]["status"] == "open"
