@@ -1,7 +1,10 @@
 <!--
   The prompt a scheduled session runs to refresh the manager board artifact.
 
-  Cron id: 093cac6a (created 2026-09-07, cadence 7,22,37,52 * * * *)
+  Scheduled via a systemd user timer — see bin/systemd/README.md for install steps. This file's
+  body (below, outside the HTML comments) is fed to `claude -p` verbatim by
+  bin/systemd/run-board-mirror.sh, placeholders substituted — it is not just documentation, it
+  IS the prompt, so edit the instructions with that in mind.
 
   What the operator should set before scheduling, because none of it belongs in a shipped file:
     ARTIFACT_URL — the board published from bin/board.html with capabilities {db: {}}
@@ -28,7 +31,10 @@ Refresh the manager board. Do exactly this and nothing else.
    with `db_op: "batch"`. A batch takes at most 50 entries — if there are more, split them in
    order, keeping the `meta/status` entry in the final batch.
 
-3. Report one line: how many documents were written, and the value of `last_ado_sweep`.
+3. Report exactly one line, starting with one of these two exact prefixes so a script can tell
+   success from failure without parsing prose:
+   - `REFRESH_OK: wrote <N> documents, last_ado_sweep=<value>` on success.
+   - `REFRESH_FAILED: <error>` if step 1 failed. Do not attempt step 2 in that case.
 
 Do not publish the page. Do not edit any file. If step 1 fails, report the error and stop — a
 failed refresh must leave the previous rows standing rather than write partial state.
@@ -36,17 +42,24 @@ failed refresh must leave the previous rows standing rather than write partial s
 <!--
   Scheduling
 
-  Every 15 minutes, on the off-minutes 7/22/37/52 rather than the quarter marks — every job that
-  asks for "every 15 minutes" lands on :00/:15/:30/:45, and there is no reason to join that queue.
-  The cadence is set by the ADO sweep, which is the only slow source; sessions and escalations
-  reach the board through the manager on events, not through this job.
+  Every 3 minutes, on :01/:04/:07/.../:58 rather than the round marks — every job that asks for
+  "every 3 minutes" lands on :00/:03/:06/..., and there is no reason to join that queue. See
+  bin/systemd/board-mirror.timer's OnCalendar for the actual schedule; keep this note and that
+  file in agreement if either changes.
 
-  KNOWN LIMIT — CronCreate is session-scoped. The job lives in the Claude session that created
-  it: nothing is written to disk, it dies when that session exits, and it auto-expires after
-  seven days regardless. That is fine for trying the cadence out, and NOT enough for a board
-  meant to keep itself current unattended. For that, run the same command from a systemd user
-  timer or a real crontab entry, which survives both.
+  This was 15 minutes, set by the ADO sweep being the only slow source. The CTO tightened it to
+  3 minutes because the board's planned "Refresh" button runs inside the sandboxed artifact page,
+  which cannot pull ADO itself — it can only replay whatever this job already wrote — so this
+  job's own interval is the ceiling on how fresh a manual refresh can ever look. Sessions and
+  escalations still reach the board through the manager on events, not through this job; only the
+  ADO-sourced rows depend on this cadence.
 
-  What this costs: one Claude session per run, ~96 runs a day. Stop it with CronDelete and the
-  id recorded at the top of this file; `CronList` finds it again if that line was lost.
+  KNOWN LIMIT (retired) — CronCreate is session-scoped. The job lived in the Claude session that
+  created it: nothing was written to disk, it died when that session exited, and it auto-expired
+  after seven days regardless. That is exactly what happened, silently, for most of a day — the
+  incident that prompted the move below.
+
+  Replaced by bin/systemd/board-mirror.timer + board-mirror.service, which run independently of
+  any Claude session and survive it exiting. See bin/systemd/README.md for install steps and the
+  one prerequisite (`loginctl enable-linger`) that step needs and must not be skipped.
 -->

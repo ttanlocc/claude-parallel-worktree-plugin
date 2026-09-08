@@ -1,0 +1,70 @@
+# board-mirror systemd user timer
+
+Runs the refresh described in `bin/board-mirror.md` every 3 minutes, independent of any Claude
+session — replaces the session-scoped `CronCreate` job that died when its session exited (see
+board-mirror.md's Scheduling section for what that cost).
+
+## 0. Prerequisite — enable linger (needs a higher-privileged account, MANDATORY)
+
+```
+loginctl enable-linger azureuser
+```
+
+This needs root or sudo — a normal user cannot enable-linger for themselves. **Do not skip this
+step or treat it as optional.** Without it, `systemctl --user` services are tied to a logind
+session: they stop the moment the last login session for this user ends (SSH disconnect,
+terminal closed), which is exactly the failure this timer exists to fix, just delayed until
+logout instead of session exit. Confirm it took effect:
+
+```
+loginctl show-user azureuser -p Linger
+```
+
+Expect `Linger=yes`. If you cannot run `loginctl enable-linger` yourself, ask whoever has root on
+this box to run it, and don't consider this setup done until `Linger=yes` comes back — a timer
+installed without it will look correct today and die at the next logout.
+
+## 1. Config file (outside the repo, real values only here)
+
+```
+mkdir -p ~/.config/board-mirror
+cp bin/systemd/board-mirror.env.example ~/.config/board-mirror/env
+chmod 600 ~/.config/board-mirror/env
+$EDITOR ~/.config/board-mirror/env   # fill in ARTIFACT_URL and PWT_REPO_ROOT for real
+```
+
+## 2. Symlink the run script and unit files
+
+```
+ln -sf "$(pwd)/bin/systemd/run-board-mirror.sh" ~/.config/board-mirror/run-board-mirror.sh
+mkdir -p ~/.config/systemd/user
+ln -sf "$(pwd)/bin/systemd/board-mirror.service" ~/.config/systemd/user/board-mirror.service
+ln -sf "$(pwd)/bin/systemd/board-mirror.timer" ~/.config/systemd/user/board-mirror.timer
+```
+
+Symlinks, not copies: re-running these two commands after a `git pull` is the entire upgrade
+path, no reinstall step needed.
+
+## 3. Enable and start
+
+```
+systemctl --user daemon-reload
+systemctl --user enable --now board-mirror.timer
+```
+
+## 4. Verify
+
+```
+systemctl --user list-timers board-mirror.timer
+systemctl --user status board-mirror.service
+journalctl --user -u board-mirror.service -n 50
+```
+
+A healthy `list-timers` row shows a `NEXT` a few minutes out and a `LAST`/`PASSED` from the run
+before it. `status` on the service after a run shows `Active: inactive (dead)` with
+`Main PID: ... (code=exited, status=0/SUCCESS)` — `oneshot` units go back to inactive between
+runs, that's expected, not a failure. A failed refresh (bad env, `board_state.py` erroring inside
+the session, a malformed `claude -p` reply) shows as `status=1/FAILURE` here and the reason in the
+journal line above it — see `run-board-mirror.sh` for what each exit path logs.
+
+To force one run without waiting for the timer: `systemctl --user start board-mirror.service`.
