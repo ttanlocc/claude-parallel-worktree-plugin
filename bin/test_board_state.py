@@ -2286,6 +2286,22 @@ def test_board_keeps_the_long_note_and_the_step_list_behind_the_toggle():
     assert "steps.map" not in summary, "the collapsed line must not render every step"
 
 
+def test_board_shows_the_ticket_chip_on_the_collapsed_summary_line():
+    """The AB# chip used to live only in `detail`, behind the click that opens the card — a
+    reader scanning the collapsed board had no way to tell which ticket a card was for. It must
+    render on `summary`, next to the title, still linked through ticketUrl()."""
+    summary = _card_part("summary")
+    assert "ticketUrl" in summary, "the collapsed summary line never renders a ticket chip"
+    assert "refs" in summary, "the collapsed summary line never reads a.ado_refs"
+
+
+def test_board_does_not_render_the_ticket_chip_twice():
+    """Once the chip moved to the summary line, an unchanged copy left behind in `detail` would
+    just be visual noise every time a card is opened."""
+    detail = _card_part("detail")
+    assert "ticketUrl" not in detail, "the ticket chip is rendered in both summary and detail"
+
+
 def test_board_formats_token_counts_for_a_reader_not_as_raw_digits():
     """A 14-digit number is unreadable at a glance and is exactly what made the raw sum look
     plausible. Counts are shown as "1,2 tr" / "340 k"."""
