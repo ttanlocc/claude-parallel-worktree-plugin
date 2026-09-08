@@ -1792,6 +1792,48 @@ def test_main_wires_an_iterations_reader_for_the_default_sprint():
     assert "get_ado_iterations" in src
 
 
+def test_main_actually_wires_the_real_pr_reader_into_the_collect_call(monkeypatch, tmp_path, capsys):
+    """A source-string check (`"read_prs" in inspect.getsource(main)`) would stay green even if
+    the `collect(...)` call inside main() went back to `read_prs=dict` — the `def read_prs():`
+    closure would still be defined and still mention every name a string check could look for, it
+    would just sit there unused. The only thing that actually proves the wiring is running
+    main() and checking a ticket doc really has PR data.
+
+    Every OTHER subprocess-backed reader is faked here too, deliberately — this must not become
+    a test that shells out to a real `az`/`claude` and depends on this machine being logged in.
+    `dashboard.get_github_prs` is the one seam left real end to end: main() must reach it, not a
+    bypass of it.
+    """
+    import json
+
+    import board_state
+    import dashboard
+    import manager_daemon
+    import manager_session
+
+    monkeypatch.setattr(manager_daemon, "list_agents", lambda: [])
+    monkeypatch.setattr(
+        dashboard, "get_ado_backlog", lambda: [{"id": "42", "title": "t", "state": "New", "sprint": "S", "url": "u"}]
+    )
+    monkeypatch.setattr(dashboard, "get_ado_iterations", lambda: [])
+    monkeypatch.setattr(dashboard, "_ado_identities", lambda: [])
+    monkeypatch.setattr(manager_session, "_read_state", lambda: {})
+    monkeypatch.setattr(manager_session, "resolve_repo_root", lambda *a, **k: str(tmp_path))
+    monkeypatch.setattr(board_state, "QUEUE_PATH", str(tmp_path / "no-escalations.jsonl"))
+    monkeypatch.setattr(board_state, "LEDGER_PATH", str(tmp_path / "no-assignments.jsonl"))
+    monkeypatch.setattr(
+        dashboard,
+        "get_github_prs",
+        lambda repo_root: [{"number": 1, "title": "fix: x (AB#42)", "url": "pu", "state": "OPEN", "isDraft": False}],
+    )
+
+    board_state.main()
+
+    writes = json.loads(capsys.readouterr().out)
+    tickets = [w for w in writes if w["collection"] == "tickets"]
+    assert tickets[0]["data"]["pr"] == {"number": 1, "state": "OPEN", "url": "pu"}
+
+
 def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
     """open_assignments() would drop every finished assignment off the board the moment it was
     closed. read_all() hands over every record of every id — done included, and every earlier
