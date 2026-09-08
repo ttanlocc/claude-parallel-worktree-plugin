@@ -6,38 +6,40 @@
   bin/systemd/run-board-mirror.sh, placeholders substituted — it is not just documentation, it
   IS the prompt, so edit the instructions with that in mind.
 
+  run-board-mirror.sh runs board_state.py itself (it's plain bash — no reason to make a headless
+  LLM session invoke a script the shell can call directly) and substitutes its JSON output into
+  <WRITE_ENTRIES_JSON> below. That keeps this prompt's only job "write this array to the
+  artifact", so `claude -p`'s --allowedTools only ever needs to grant Artifact, never Bash.
+
   What the operator should set before scheduling, because none of it belongs in a shipped file:
     ARTIFACT_URL — the board published from bin/board.html with capabilities {db: {}}
     PWR_ADO_ASSIGNED_TO — only if one person holds more than one ADO identity. Unset, the
       query falls back to WIQL's @Me, which resolves to whichever identity `az` authenticated
       and silently omits every ticket assigned to the other one.
-    PWT_REPO_ROOT — recommended. Step 1 has no cwd of its own; board_state.py resolves the
-      plugin's registry (branch/worktree/short_id/ado_refs per session) against this env var
-      first, then falls back to whatever cwd the scheduled session happens to have. Unset, a
-      session with the wrong cwd silently nulls out those fields on every session document
-      rather than failing loudly — set it to this repo's absolute path to pin the join.
+    PWT_REPO_ROOT — recommended. run-board-mirror.sh has no cwd of its own; board_state.py
+      resolves the plugin's registry (branch/worktree/short_id/ado_refs per session) against
+      this env var first, then falls back to whatever cwd the scheduled run happens to have.
+      Unset, the wrong cwd silently nulls out those fields on every session document rather
+      than failing loudly — set it to this repo's absolute path to pin the join.
 -->
 
 Refresh the manager board. Do exactly this and nothing else.
 
-1. Run: `python3 <plugin bin dir>/board_state.py`
-   It prints a JSON array of write entries on stdout. Each entry is already shaped as
-   `{op, collection, doc_id, data}` — pass them through unchanged. Do not sort, filter or
-   reorder them: `meta/status` is deliberately last, because it asserts the rows beside it are
-   current, and a batch that dies halfway must never have already claimed a sweep whose rows
-   never landed.
+1. Write these entries to the artifact at `<ARTIFACT_URL>` using the Artifact tool's `write_db`
+   with `db_op: "batch"`. Each entry is already shaped as `{op, collection, doc_id, data}` — pass
+   them through unchanged. Do not sort, filter or reorder them: `meta/status` is deliberately
+   last, because it asserts the rows beside it are current, and a batch that dies halfway must
+   never have already claimed a sweep whose rows never landed. A batch takes at most 50 entries —
+   if there are more, split them in order, keeping the `meta/status` entry in the final batch.
 
-2. Write those entries to the artifact at `<ARTIFACT_URL>` using the Artifact tool's `write_db`
-   with `db_op: "batch"`. A batch takes at most 50 entries — if there are more, split them in
-   order, keeping the `meta/status` entry in the final batch.
+   <WRITE_ENTRIES_JSON>
 
-3. Report exactly one line, starting with one of these two exact prefixes so a script can tell
+2. Report exactly one line, starting with one of these two exact prefixes so a script can tell
    success from failure without parsing prose:
    - `REFRESH_OK: wrote <N> documents, last_ado_sweep=<value>` on success.
-   - `REFRESH_FAILED: <error>` if step 1 failed. Do not attempt step 2 in that case.
+   - `REFRESH_FAILED: <error>` if the write fails.
 
-Do not publish the page. Do not edit any file. If step 1 fails, report the error and stop — a
-failed refresh must leave the previous rows standing rather than write partial state.
+Do not publish the page. Do not edit any file.
 
 <!--
   Scheduling

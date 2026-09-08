@@ -148,7 +148,7 @@ def test_run_script_finds_board_mirror_md_when_invoked_through_a_symlink():
 
 def test_run_script_pre_grants_the_artifact_permission_for_headless_runs():
     # `claude -p` runs non-interactively under the timer — no one can approve the write_db
-    # permission prompt board-mirror.md's step 2 triggers, so without a pre-grant every run dies
+    # permission prompt board-mirror.md's step triggers, so without a pre-grant every run dies
     # with "requires permission approval that was not granted" and no rows ever get written.
     # Artifact has no finer specifier (unlike Bash's command patterns), so `Artifact` is the
     # narrowest grant --allowedTools supports; this pins that flag so a future edit can't drop it.
@@ -157,6 +157,63 @@ def test_run_script_pre_grants_the_artifact_permission_for_headless_runs():
     assert m, "expected a `claude -p ... --output-format` invocation in run-board-mirror.sh"
     assert re.search(r"--allowedTools\s+Artifact\b", m.group(1)), (
         f"claude -p invocation is missing --allowedTools Artifact: {m.group(1)!r}"
+    )
+
+
+def test_allowed_tools_cover_every_operation_the_prompt_actually_performs():
+    # Regression guard for the exact drift that broke this job: board-mirror.md's step 1 used to
+    # tell Claude to `Run: python3 .../board_state.py` (a Bash op) while --allowedTools only ever
+    # granted Artifact, so every headless run died unable to get Bash approved. board_state.py now
+    # runs in run-board-mirror.sh itself, so the prompt must have no shell step left for Claude to
+    # run — if it ever grows one again, --allowedTools must grant Bash too, or this must catch it.
+    doc = _read("board-mirror.md")
+    run_script = _read("systemd", "run-board-mirror.sh")
+
+    prompt_body = re.sub(r"<!--.*?-->", "", doc, flags=re.DOTALL)
+    assert not re.search(r"Run:\s*`?python3", prompt_body), (
+        "board-mirror.md's prompt still tells Claude to run a shell command, but "
+        "run-board-mirror.sh only grants --allowedTools Artifact, not Bash"
+    )
+
+    m = re.search(r'"\$CLAUDE_BIN"\s+-p\s+(.*?)--output-format', run_script)
+    assert m, "expected a `claude -p ... --output-format` invocation in run-board-mirror.sh"
+    assert not re.search(r"\bBash\b", m.group(1)), (
+        "run-board-mirror.sh grants Bash, but the prompt has no shell step for Claude to run — "
+        "board_state.py must run in the script itself, not need Bash inside the session"
+    )
+
+    # And the step board-mirror.md no longer runs must actually run somewhere: in the script.
+    assert re.search(r"python3\s+\"\$PLUGIN_BIN_DIR/board_state\.py\"", run_script), (
+        "board_state.py is not invoked by the prompt (no Bash grant) or by the script itself — "
+        "step 1 of board-mirror.md would never run at all"
+    )
+
+
+def test_write_entries_placeholder_flows_from_board_state_into_the_prompt():
+    doc = _read("board-mirror.md")
+    run_script = _read("systemd", "run-board-mirror.sh")
+    assert "<WRITE_ENTRIES_JSON>" in doc, (
+        "board-mirror.md must have a placeholder for board_state.py's write-entry JSON"
+    )
+    assert "<WRITE_ENTRIES_JSON>" in run_script, (
+        "run-board-mirror.sh must substitute the <WRITE_ENTRIES_JSON> placeholder"
+    )
+
+
+def test_write_entries_are_spliced_in_without_backslash_reinterpretation():
+    # board_state.py's JSON can contain escaped quotes/backslashes (e.g. an escalation whose
+    # evidence embeds literal `\"` sequences). Both `sed`'s replacement text and bash's
+    # `${var/pat/string}` form treat backslashes specially and can silently drop them — this
+    # bit exactly, corrupting the JSON mid-array. Splitting on the placeholder with `%%`/`#` and
+    # joining with plain `${WRITES}` expansion is the one form that doesn't reinterpret it.
+    run_script = _read("systemd", "run-board-mirror.sh")
+    assert "${WRITES}" in run_script or "$WRITES}" in run_script
+    assert not re.search(r"//<WRITE_ENTRIES_JSON>/\$\{?WRITES", run_script), (
+        "must not use ${PROMPT//<WRITE_ENTRIES_JSON>/$WRITES} — bash's pattern-substitution "
+        "replacement does backslash escaping that can corrupt JSON containing literal backslashes"
+    )
+    assert not re.search(r'sed\s+"s#<WRITE_ENTRIES_JSON>', run_script), (
+        "must not splice $WRITES through sed — its replacement text is backslash/& sensitive too"
     )
 
 
