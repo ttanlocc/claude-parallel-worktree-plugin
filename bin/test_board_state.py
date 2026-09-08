@@ -1625,13 +1625,13 @@ def test_board_labels_every_plan_step_state_in_vietnamese_including_unknown():
         assert state in block.group(1), f"no label for step state {state}"
 
 
-def test_board_shows_plan_steps_and_computed_progress():
+def test_board_shows_plan_steps_and_how_many_are_done():
     script = _board_html_script()
     body = re.search(r"function assignmentCard\((.*?)\n\}", script, re.S)
     assert body, "assignmentCard() not found"
     card = body.group(1)
     assert ".plan" in card, "the card never reads the plan steps"
-    assert "progress" in card, "the card never shows progress"
+    assert "doneSteps" in card, "the card never says how much of the plan is done"
     assert "at_risk" in card, "the card never surfaces at_risk"
 
 
@@ -1998,18 +1998,9 @@ def test_board_collapses_an_assignment_card_through_the_existing_details_mechani
     assert len(re.findall(r'h\("details"', script)) == 1, "only collapsedGroup() may build a <details>"
 
 
-def test_board_leaves_an_assignment_card_closed_until_it_is_clicked():
-    """collapsedGroup()'s third argument is the open hint. The card is condensed by default —
-    that is the entire point — so it must not be passed one."""
-    card = _assignment_card_source()
-    call = re.search(r"collapsedGroup\((.*)\)", card)
-    assert call, "collapsedGroup() call not found in assignmentCard()"
-    assert not re.search(r",\s*(true|1)\s*\)\s*$", call.group(1) + ")"), "the card must not open by default"
-
-
-def test_board_summary_line_carries_progress_elapsed_tokens_and_eta():
+def test_board_summary_line_carries_steps_elapsed_tokens_and_eta():
     summary = _card_part("summary")
-    assert "progress" in summary or "pct" in summary, "no progress on the collapsed line"
+    assert "steps.length" in summary, "no step count on the collapsed line"
     assert "elapsed_seconds" in summary, "no elapsed time on the collapsed line"
     assert "token" in summary, "no token spend on the collapsed line"
     assert "eta" in summary, "no ETA on the collapsed line"
@@ -2135,3 +2126,216 @@ def test_board_never_prints_a_formatter_that_gave_up():
     card = _assignment_card_source()
     for expr in re.findall(r'"[^"]*"\s*\+\s*(tokenText|durationText)\(', card):
         raise AssertionError(f"{expr}() result concatenated without a null check")
+
+
+# ---------------------------------------------------------------------------
+# One work section: a running session lives inside the assignment it serves.
+#
+# "Việc đã giao" and "Phiên làm việc" named the same thing twice — every assignment already
+# writes its worker into a plan step's `owner`, and that worker then appeared again in a section
+# of its own. The section is gone and the session moved into the card it belongs to.
+#
+# The section it replaced carried the board's single most important alarm: a "đang chờ duyệt"
+# worker looks exactly like a running one and is in fact stopped, waiting for a person. Its
+# "cần bạn xử lý" group defaulted OPEN so that alarm could never sit below the fold. Folding
+# sessions into cards that are collapsed by default is precisely how that alarm gets buried, so
+# most of what follows exists to prove it did not.
+# ---------------------------------------------------------------------------
+
+
+def _js_function(name, src=None):
+    """One top-level `function name(...) {...}` lifted out of board.html's <script>."""
+    src = _board_html_script() if src is None else src
+    body = re.search(r"^function " + name + r"\(.*?\n\}", src, re.S | re.M)
+    assert body, f"{name}() not found in board.html"
+    return body.group(0)
+
+
+def _run_board_js(snippet):
+    """Run board.html's real session/assignment join helpers under node.
+
+    The join and the partition below are the two places a session can vanish — claimed by no
+    card yet still counted by the topbar chip, which is an alarm the board reports and never
+    shows. A regex over the source cannot see that; running the functions can, and they are
+    pure (no DOM, no db), so node needs nothing stubbed.
+    """
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover - node is present in this repo's dev env
+        pytest.skip("node is not installed")
+    src = _board_html_script()
+    prelude = "\n".join(
+        _js_function(name, src) for name in ("ownersOf", "sessionsOf", "looseSessions", "needsAttention")
+    )
+    out = subprocess.run([node, "-e", prelude + "\n" + snippet], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+def test_board_has_no_standalone_sessions_section():
+    """Two sections describing the same work is the complaint. One goes."""
+    script = _board_html_script()
+    assert "function renderSessions" not in script, "renderSessions() must be gone, not just unused"
+    call = re.search(r"board\.replaceChildren\((.*?)\);", script, re.S)
+    assert call, "render()'s replaceChildren call not found"
+    assert "renderSessions()" not in call.group(1), "the sessions section is still drawn on its own"
+    assert 'sectionHead("Phiên làm việc"' not in script, "the standalone sessions section header survives"
+
+
+def test_board_attaches_a_session_to_the_assignment_whose_step_owns_it():
+    """The join is `plan[].owner` == the session's task name — the same one the token sum runs
+    through the registry. A second, different mapping is how the two would drift."""
+    out = _run_board_js(
+        """
+        const a = { plan: [{ step: "x", owner: "alpha" }, { step: "y", owner: "CTO" }] };
+        const sessions = [
+          { task: "alpha", managed: true, state: "running" },
+          { task: "beta", managed: true, state: "running" },
+        ];
+        console.log(JSON.stringify(sessionsOf(a, sessions).map((s) => s.task)));
+        """
+    )
+    assert out == '["alpha"]', f"session did not land on the assignment that owns it: {out}"
+
+
+def test_board_partitions_every_session_between_the_cards_and_the_loose_group():
+    """Exhaustive and non-overlapping. A session in neither half is an alarm the topbar counts
+    and the board never renders — the exact drift the shared needsAttention() exists to stop."""
+    out = _run_board_js(
+        """
+        const open = [
+          { plan: [{ step: "x", owner: "alpha" }] },
+          { plan: [{ step: "y", owner: "beta" }] },
+          { plan: [] },
+        ];
+        const sessions = ["alpha", "beta", "gamma"].map((t) => ({ task: t, managed: true, state: "running" }));
+        const claimed = open.flatMap((a) => sessionsOf(a, sessions)).map((s) => s.task);
+        const loose = looseSessions(open, sessions).map((s) => s.task);
+        console.log(JSON.stringify([claimed.sort(), loose.sort()]));
+        """
+    )
+    assert out == '[["alpha","beta"],["gamma"]]', f"sessions were dropped or double-claimed: {out}"
+
+
+def test_board_counts_the_same_stalled_sessions_the_topbar_chip_does():
+    """renderSummary()'s chip counts every session needsAttention() matches. After the fold, the
+    same sessions must still be reachable — some on cards, the rest in the loose group — or the
+    chip announces a number the page cannot show."""
+    out = _run_board_js(
+        """
+        const open = [{ plan: [{ step: "x", owner: "alpha" }] }];
+        const sessions = [
+          { task: "alpha", managed: true, state: "waiting" },
+          { task: "beta", managed: true, state: "unknown" },
+          { task: "gamma", managed: false, state: "waiting" },
+          { task: "delta", managed: true, state: "running" },
+        ];
+        const chip = sessions.filter(needsAttention).length;
+        const shown = open.flatMap((a) => sessionsOf(a, sessions)).concat(looseSessions(open, sessions));
+        console.log(JSON.stringify([chip, shown.filter(needsAttention).length]));
+        """
+    )
+    assert out == "[2,2]", f"the chip and what the board renders disagree: {out}"
+
+
+def test_board_opens_an_assignment_card_that_holds_a_session_needing_attention():
+    """The card is condensed by default — that is the whole point of it — EXCEPT when it holds a
+    worker that has stopped and is waiting for a person. That one must be readable without any
+    click at all."""
+    card = _assignment_card_source()
+    call = re.search(r"collapsedGroup\(summary, detail,\s*([^)]*)\)", card)
+    assert call, "assignmentCard() must pass collapsedGroup() an open hint, not a bare (summary, detail)"
+    assert "attention" in call.group(1), (
+        "the open hint must come from the sessions needing attention, not from anything else"
+    )
+
+
+def test_board_still_leaves_an_ordinary_assignment_card_closed():
+    """The open hint is conditional, never a constant — a card that always opens is the wall of
+    text this card was condensed to escape."""
+    card = _assignment_card_source()
+    call = re.search(r"collapsedGroup\(summary, detail,\s*([^)]*)\)", card)
+    assert call, "collapsedGroup() call not found in assignmentCard()"
+    assert call.group(1).strip() not in ("true", "1"), "the card must not open unconditionally"
+
+
+def test_board_marks_the_collapsed_line_when_the_card_holds_a_stalled_session():
+    """Auto-opening is not enough on its own: the summary line is what a manager scans, so it has
+    to say why this card is different."""
+    summary = _card_part("summary")
+    assert "attention" in summary, "the collapsed line carries no marker for a stopped worker"
+    assert "cần bạn xử lý" in summary, "the marker must say, in Vietnamese, that a person is needed"
+    assert "pill-bad" in summary, "a stopped worker is an alarm, not a neutral fact"
+
+
+def test_board_sorts_an_assignment_holding_a_stalled_session_above_the_rest():
+    """The group this replaced sat at the top of the page so the alarm was never below the fold.
+    Visible-if-you-scroll is not what that group guaranteed."""
+    body = re.search(r"function renderAssignments\(\)\s*\{(.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "renderAssignments() not found"
+    sorts = [line for line in body.group(1).splitlines() if ".sort(" in line]
+    assert any("needsAttention" in line for line in sorts), (
+        "cards holding a session that needs a human must sort to the top"
+    )
+
+
+def test_board_keeps_a_group_for_sessions_no_open_assignment_claims():
+    """An ad-hoc terminal, or a worker whose assignment was closed under it, still belongs on the
+    board — collapsed at the end, exactly like the unmanaged-sessions group it replaces."""
+    body = re.search(r"function renderAssignments\(\)\s*\{(.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "renderAssignments() not found"
+    assert "looseSessions(" in body.group(1), "sessions belonging to no assignment are dropped entirely"
+    assert "sessionGroup(" in body.group(1), "the leftover sessions get no group of their own"
+
+
+def test_board_opens_the_leftover_group_when_it_holds_a_session_needing_attention():
+    """Same rule as the cards, at the other end of the section: a stopped worker nobody assigned
+    is still a stopped worker, and a collapsed group hides it just as well as a collapsed card."""
+    body = re.search(r"function renderAssignments\(\)\s*\{(.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "renderAssignments() not found"
+    group = re.search(r"sessionGroup\((.*?)\);", body.group(1), re.S)
+    assert group, "sessionGroup() call not found"
+    open_hint = group.group(1).rsplit(",", 1)[-1].strip()
+    assert "needsAttention" in open_hint, (
+        "the leftover group's open hint must come from needsAttention, not be a constant"
+    )
+
+
+def test_board_never_hides_a_session_inside_the_collapsed_closed_assignments_group():
+    """"Đã đóng" is collapsed by default. A card in there is two clicks deep, so it gets no
+    session tiles at all — its sessions fall to the leftover group, which opens itself."""
+    body = re.search(r"function renderAssignments\(\)\s*\{(.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "renderAssignments() not found"
+    closed = re.search(r"closed\.slice\(\)\.sort\(byUrgency\)\.map\((.*?)\)\)", body.group(1), re.S)
+    assert closed, "the closed-assignments group's card mapping not found"
+    assert "sessionsOf" not in closed.group(1), (
+        "a closed card must not receive session tiles — it lives inside a collapsed group"
+    )
+
+
+def test_board_reports_a_broken_sessions_source_in_the_work_section():
+    """The section now reads two sources. An errored one is unknown, never 'nothing is running' —
+    the same rule every other section on this page already follows."""
+    body = re.search(r"function renderAssignments\(\)\s*\{(.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "renderAssignments() not found"
+    assert "view.errors.sessions" in body.group(1), "a dead sessions listener reads as 'no sessions'"
+    assert "view.loaded.sessions" in body.group(1), "loading and empty look the same"
+
+
+def test_board_summary_line_counts_steps_and_never_a_percentage():
+    """`0/7 bước` and `0%` say the same thing twice. The steps survive; the percentage does not."""
+    summary = _card_part("summary")
+    assert "bước" in summary, "the collapsed line no longer says how many steps are done"
+    assert "%" not in summary, "the percentage is still on the collapsed line"
+
+
+def test_board_no_longer_computes_a_percentage_anywhere():
+    """board_state.py keeps publishing `progress` for the localhost dashboard, but a value this
+    page stopped showing must not leave a dead computation behind."""
+    card = _assignment_card_source()
+    assert "a.progress" not in card, "the card still reads a field it no longer shows"
+    assert "pct" not in card, "the percentage computation is dead code now"

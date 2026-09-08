@@ -596,20 +596,96 @@ function renderEscalations() {
   return section;
 }
 
-/* ---------- assignments: the manager's own ledger ---------- */
-function assignmentCard(a) {
+/* ---------- sessions ---------- */
+function sessionTile(s) {
+  const state = STATE_RANK.hasOwnProperty(s.state) ? s.state : "unknown";
+  const refs = Array.isArray(s.ado_refs) ? s.ado_refs : [];
+  return h("div", { class: "session-tile state-" + state },
+    h("div", { class: "state-badge b-" + state },
+      h("span", { class: "state-dot" + (state === "waiting" ? " dot-waiting" : "") }),
+      STATE_LABEL[state] || s.state || "?"),
+    h("div", { class: "session-task" }, s.task || s.id),
+    h("div", { class: "session-row" }, h("span", { class: "k" }, "nhánh"),
+      h("span", { class: "v" }, s.branch || "—")),
+    h("div", { class: "session-row" }, h("span", { class: "k" }, "chạy"),
+      h("span", { class: "v" }, s.started_at ? ageText(s.started_at / 1000) + " trước" : "—")),
+    s.short_id ? h("div", { class: "session-row" }, h("span", { class: "k" }, "id"),
+      h("span", { class: "v" }, s.short_id)) : null,
+    refs.length ? h("div", { class: "session-refs" }, refs.map((id) => {
+      const url = ticketUrl(id);
+      return url
+        ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
+        : h("span", { class: "chip" }, "AB#" + id);
+    })) : null,
+  );
+}
+
+const byStateThenTask = (a, b) =>
+  (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9) || String(a.task).localeCompare(String(b.task));
+
+// One collapsible group of sessions: its own count (in the summary text, same "N label" idiom
+// the done-tickets/resolved-escalations subgroups already use) and its own "nothing here" note
+// rather than vanishing when empty — so an operator sees "0 phiên chưa gắn với việc nào" as a
+// real, checked-and-clear state, not a group that silently failed to render.
+function sessionGroup(label, sessions, emptyText, emptyIsGood, openByDefault) {
+  const body = sessions.length
+    ? h("div", { class: "session-grid" }, sessions.map(sessionTile))
+    : (emptyIsGood ? goodNote(emptyText) : loadingNote(emptyText));
+  return collapsedGroup(sessions.length + " " + label, [body], openByDefault);
+}
+
+// An "unknown" state joins "waiting" as "cần bạn xử lý" — the same fail-toward-a-human default
+// classify() already uses for a kind it cannot recognise (escalations.py). It is never "running"
+// or "idle": both would claim a certainty the mirror doesn't have. Gated on `managed` first: an
+// ad-hoc terminal session (no worktree-registry entry — a spike, a smoke test, someone's own
+// interactive session) is not work the manager dispatched, so an unrecognised or stalled state on
+// it is not the manager's alarm to raise. Shared by the assignment cards, the leftover group
+// under them and renderSummary()'s topbar chip so those counts can never drift apart again —
+// that drift (a second copy of this rule going stale) is exactly how the topbar under-counted
+// the section this one replaced.
+function needsAttention(s) {
+  return s.managed && (s.state === "waiting" || s.state === "unknown");
+}
+
+// The join from an assignment to the sessions doing it. A plan step's `owner` is a worktree task
+// name and a session document is keyed by that same name (board_state.session_docs) — the same
+// hop board_state.py's token sum already makes through the registry, resolved here on a field
+// the page is handed outright, so there is no second mapping to keep in step with the first.
+function ownersOf(a) {
+  return (Array.isArray(a.plan) ? a.plan : []).map((s) => s.owner).filter(Boolean);
+}
+function sessionsOf(a, sessions) {
+  const owners = ownersOf(a);
+  return sessions.filter((s) => owners.includes(s.task));
+}
+// The other half of that partition, written against the same ownersOf() so the two can never
+// both drop the same session: everything no OPEN assignment claims — an ad-hoc terminal, or a
+// worker whose assignment was closed out from under it. A session claimed by nobody and drawn
+// nowhere is an alarm the topbar chip counts and the board has no way to show.
+function looseSessions(assignments, sessions) {
+  const owned = new Set(assignments.flatMap((a) => ownersOf(a)));
+  return sessions.filter((s) => !owned.has(s.task));
+}
+
+/* ---------- assignments: the ledger, and the sessions working it ---------- */
+function assignmentCard(a, sessions) {
   const sev = a.priority in SEVERITY_RANK ? a.priority : "P1";
   const known = Object.prototype.hasOwnProperty.call(ASSIGNMENT_STATUS_LABEL, a.status);
   const steps = Array.isArray(a.plan) ? a.plan : [];
   const refs = Array.isArray(a.ado_refs) ? a.ado_refs : [];
-  // progress / at_risk / stalled / elapsed_seconds / tokens / eta are all computed by
-  // board_state.py from these very steps and only shown here, never recomputed — the page cannot
-  // read a ledger or a transcript, and one derivation means the numbers and the step list under
-  // them cannot disagree.
-  const pct = typeof a.progress === "number" ? Math.round(a.progress * 100) : null;
+  // at_risk / stalled / elapsed_seconds / tokens / eta are all computed by board_state.py from
+  // these very steps and only shown here, never recomputed — the page cannot read a ledger or a
+  // transcript, and one derivation means the numbers and the step list under them cannot
+  // disagree. `progress` is still published for the localhost dashboard but no longer read here:
+  // it rendered "0%" beside "0/7 bước", which is the same sentence twice.
   const doneSteps = steps.filter((s) => s.state === "done").length;
   const tokens = a.tokens && typeof a.tokens === "object" ? a.tokens : null;
   const eta = a.eta && typeof a.eta === "object" ? a.eta : null;
+  // The sessions actually doing this work, and the ones among them that have stopped and are
+  // waiting for a person. Both drive the card: the collapsed line says so, and the card opens
+  // itself — nobody clicks a card to discover there is an alarm inside it.
+  const mine = sessions || [];
+  const attention = mine.filter(needsAttention);
 
   // "chưa rõ", never "0": 0 is a measurement that came back empty, and no transcript is not a
   // measurement at all. `partial` means some owner session's transcript was unreadable, so the
@@ -635,9 +711,12 @@ function assignmentCard(a) {
       known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
     a.at_risk ? pill("pill-bad", "trễ hạn") : null,
     a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
+    // The alarm the standalone sessions section used to carry, moved onto the one line that is
+    // visible whether or not this card is open.
+    attention.length ? pill("pill-bad", attention.length + " phiên cần bạn xử lý") : null,
     h("span", { class: "a-title" }, a.title || "(không có tiêu đề)"),
     h("span", { class: "a-facts mono" },
-      pct == null ? "chưa có kế hoạch" : doneSteps + "/" + steps.length + " bước · " + pct + "%",
+      steps.length ? doneSteps + "/" + steps.length + " bước" : "chưa có kế hoạch",
       " · chạy " + (durationText(a.elapsed_seconds) || "chưa rõ"),
       " · token " + spendText,
       " · xong: " + (etaParts.length ? etaParts.join(" · ") : "chưa rõ")),
@@ -646,6 +725,9 @@ function assignmentCard(a) {
   // Everything below only exists once the card is opened. The note is a paragraph of prose and
   // the plan is every step — together they are what made one assignment fill the screen.
   const detail = [
+    // First thing an opened card shows: who is on it right now. The old standalone section left
+    // a reader matching a worker name to an assignment by hand; here they arrive together.
+    mine.length ? h("div", { class: "session-grid" }, mine.map(sessionTile)) : null,
     h("div", { class: "session-row" }, h("span", { class: "k" }, "hạn"),
       h("span", { class: "v" }, a.deadline || "—")),
     cacheText ? h("div", { class: "session-row" }, h("span", { class: "k" }, "cache"),
@@ -675,17 +757,22 @@ function assignmentCard(a) {
 
   // collapsedGroup() already owns <details>/<summary> everywhere else on this page; the card is
   // wrapped in its own div rather than growing a fourth argument, so the severity styling stays
-  // exactly the rule .esc-card.sev-* already carries. No open hint: condensed by default is the
-  // whole point.
-  return h("div", { class: "esc-card a-card sev-" + sev }, collapsedGroup(summary, detail));
+  // exactly the rule .esc-card.sev-* already carries. Condensed by default is the whole point —
+  // the single exception is a card holding a worker that has stopped and is waiting for a person.
+  // That one opens itself, because a click is precisely what nobody makes before it matters.
+  return h("div", { class: "esc-card a-card sev-" + sev },
+    collapsedGroup(summary, detail, attention.length > 0));
 }
 
 function renderAssignments() {
   const section = h("section", { class: "board-section" });
   const loaded = view.loaded.assignments;
   const open = view.assignments.filter((a) => !ASSIGNMENT_CLOSED_STATUSES.has(a.status));
+  // The reason the standalone sessions section existed, kept on the section that absorbed it: a
+  // worker in "đang chờ duyệt" looks exactly like one that is running and has in fact stopped.
   section.append(sectionHead("Việc đã giao",
-    "Sổ giao việc của manager — một kết quả đã nhận, không phải một vé.", loaded ? open.length : null));
+    "Sổ giao việc của manager, kèm phiên đang chạy cho từng việc — “đang chờ duyệt” trông giống " +
+    "đang chạy nhưng thực ra đã đứng lại, cần bạn mở khoá.", loaded ? open.length : null));
 
   if (!view.db) { section.append(loadingNote("Đang kết nối tới dữ liệu…")); return section; }
   if (!loaded) { section.append(loadingNote("Đang tải sổ giao việc…")); return section; }
@@ -699,112 +786,43 @@ function renderAssignments() {
     (a.ts ?? 0) - (b.ts ?? 0);
   const closed = view.assignments.filter((a) => ASSIGNMENT_CLOSED_STATUSES.has(a.status));
 
+  // Sessions are a second source behind this one section now. An errored or not-yet-loaded
+  // listener must never read as "nothing is running": the cards draw no tiles either way, so the
+  // state is said out loud at the end of the section rather than left to be inferred from
+  // silence — the same rule every other section here already follows.
+  const sessions = view.loaded.sessions && !view.errors.sessions ? view.sessions : [];
+
+  const cards = open.slice().sort(byUrgency).map((a) => ({ a, mine: sessionsOf(a, sessions) }));
+  // Then, above all of it, whatever holds a stopped worker. The group this section absorbed sat
+  // at the top of the page and defaulted open so that alarm could never fall below the fold;
+  // sort() is stable, so byUrgency still decides the order of everything underneath.
+  cards.sort((x, y) => Number(y.mine.some(needsAttention)) - Number(x.mine.some(needsAttention)));
+
   if (!open.length) section.append(goodNote("Không có việc nào đang mở."));
-  else section.append(h("div", { class: "esc-list" }, open.slice().sort(byUrgency).map(assignmentCard)));
+  else section.append(h("div", { class: "esc-list" }, cards.map((c) => assignmentCard(c.a, c.mine))));
 
   // Done and cancelled stay on the board, collapsed — board_state.py deliberately keeps mirroring
   // them, so dropping them here would throw away the record it went to the trouble of publishing.
+  // Deliberately WITHOUT session tiles: this group is collapsed, so a stopped worker inside one
+  // of these cards would sit two clicks deep. Their sessions fall through to the leftover group
+  // below instead, which opens itself.
   if (closed.length) {
     section.append(collapsedGroup(closed.length + " việc đã đóng",
-      [h("div", { class: "esc-list" }, closed.slice().sort(byUrgency).map(assignmentCard))]));
+      [h("div", { class: "esc-list" }, closed.slice().sort(byUrgency).map((a) => assignmentCard(a)))]));
   }
-  return section;
-}
 
-/* ---------- sessions ---------- */
-function sessionTile(s) {
-  const state = STATE_RANK.hasOwnProperty(s.state) ? s.state : "unknown";
-  const refs = Array.isArray(s.ado_refs) ? s.ado_refs : [];
-  return h("div", { class: "session-tile state-" + state },
-    h("div", { class: "state-badge b-" + state },
-      h("span", { class: "state-dot" + (state === "waiting" ? " dot-waiting" : "") }),
-      STATE_LABEL[state] || s.state || "?"),
-    h("div", { class: "session-task" }, s.task || s.id),
-    h("div", { class: "session-row" }, h("span", { class: "k" }, "nhánh"),
-      h("span", { class: "v" }, s.branch || "—")),
-    h("div", { class: "session-row" }, h("span", { class: "k" }, "chạy"),
-      h("span", { class: "v" }, s.started_at ? ageText(s.started_at / 1000) + " trước" : "—")),
-    s.short_id ? h("div", { class: "session-row" }, h("span", { class: "k" }, "id"),
-      h("span", { class: "v" }, s.short_id)) : null,
-    refs.length ? h("div", { class: "session-refs" }, refs.map((id) => {
-      const url = ticketUrl(id);
-      return url
-        ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
-        : h("span", { class: "chip" }, "AB#" + id);
-    })) : null,
-  );
-}
-
-// One collapsible group of the sessions grouping below: its own count (in the summary text,
-// same "N label" idiom the done-tickets/resolved-escalations subgroups already use) and its own
-// "nothing here" note rather than vanishing when empty — so an operator sees "0 cần bạn xử lý"
-// as a real, checked-and-clear state, not a group that silently failed to render.
-function sessionGroup(label, sessions, emptyText, emptyIsGood, openByDefault) {
-  const body = sessions.length
-    ? h("div", { class: "session-grid" }, sessions.map(sessionTile))
-    : (emptyIsGood ? goodNote(emptyText) : loadingNote(emptyText));
-  return collapsedGroup(sessions.length + " " + label, [body], openByDefault);
-}
-
-// An "unknown" state joins "waiting" as "cần bạn xử lý" — the same fail-toward-a-human default
-// classify() already uses for a kind it cannot recognise (escalations.py). It is never "running"
-// or "idle": both would claim a certainty the mirror doesn't have. Gated on `managed` first: an
-// ad-hoc terminal session (no worktree-registry entry — a spike, a smoke test, someone's own
-// interactive session) is not work the manager dispatched, so an unrecognised or stalled state on
-// it is not the manager's alarm to raise — see the board's unmanaged-sessions group below. Shared
-// by renderSessions()'s section filter and renderSummary()'s topbar chip so the two counts can
-// never drift apart again — that drift (a second copy of this rule going stale) is exactly how the
-// topbar under-counted the section below it.
-function needsAttention(s) {
-  return s.managed && (s.state === "waiting" || s.state === "unknown");
-}
-
-function renderSessions() {
-  const section = h("section", { class: "board-section" });
-  const loaded = view.loaded.sessions;
-
-  const byStateThenTask = (a, b) =>
-    (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9) || String(a.task).localeCompare(String(b.task));
-  const managedSessions = view.sessions.filter((s) => s.managed);
-  const unmanagedSessions = view.sessions.filter((s) => !s.managed).sort(byStateThenTask);
-  // Keeping "unknown" out of every filter here is what silently dropped 8 of 33 sessions off the
-  // whole board (C1) — every MANAGED session must land in exactly one of these three groups.
-  // Unmanaged sessions (no worktree-registry entry — not the manager's dispatched work) never
-  // enter these three; they get their own group below instead.
-  const waiting = managedSessions.filter(needsAttention).sort(byStateThenTask);
-  const running = managedSessions.filter((s) => s.state === "running").sort(byStateThenTask);
-  const finished = managedSessions.filter((s) => s.state === "idle" || s.state === "done").sort(byStateThenTask);
-
-  // "Live" here means not yet filed under Đã xong — idle joins done in that group below, so the
-  // header count (still "what's not settled yet") follows the same split. Computed straight from
-  // the waiting/running arrays the groups below render — not a second filter expression — so
-  // header and body can never drift apart (the same class of bug C1 fixed for the topbar chip).
-  // Scoped to managed sessions only: an unmanaged session is never "settled" or "unsettled" from
-  // the manager's point of view, so it plays no part in this count.
-  const count = loaded ? waiting.length + running.length : null;
-  section.append(sectionHead("Phiên làm việc",
-    "“Đang chờ duyệt” trông giống đang chạy nhưng thực ra đã đứng lại — cần bạn mở khoá.", count));
-
-  if (!view.db) { section.append(loadingNote("Đang kết nối tới dữ liệu…")); return section; }
-  if (!loaded) { section.append(loadingNote("Đang tải phiên làm việc…")); return section; }
-  if (view.errors.sessions) { section.append(errorNote("Không đọc được sessions — kiểm tra console.")); return section; }
-
-  // Order is the point: the group that needs a human comes first so it is never below the fold,
-  // then what is actively running, then what needs nobody. Waiting and running default OPEN —
-  // both are "happening right now" and were always visible pre-grouping; Đã xong defaults
-  // collapsed, same as the old done-only subgroup, now also absorbing idle (nothing to act on in
-  // either state). An operator can still collapse "đang chạy" or expand "đã xong" by hand — the
-  // default only controls what greets them on load. Unmanaged sessions render last and start
-  // collapsed regardless of what state they're in — an ad-hoc session sitting in "waiting" is
-  // ordinary (someone's own interactive terminal idling on a prompt), not a stalled worker, so it
-  // does not earn the same default-open treatment as the managed "cần bạn xử lý" group above.
-  section.append(
-    sessionGroup("cần bạn xử lý", waiting, "Không có phiên nào đang chờ duyệt.", true, true),
-    sessionGroup("đang chạy", running, "Không có phiên nào đang chạy.", false, true),
-    sessionGroup("đã xong", finished, "Chưa có phiên nào đã xong.", false, false),
-    sessionGroup("phiên chạy trên máy này nhưng manager chưa giao việc", unmanagedSessions,
-      "Không có phiên nào ngoài phạm vi quản lý.", false, false),
-  );
+  // Everything no open assignment claims — an ad-hoc terminal, or a worker whose assignment was
+  // closed under it. Collapsed at the end like every other tail group on this page, unless one of
+  // them needs a human, for exactly the reason a card holding one opens itself.
+  if (view.errors.sessions) {
+    section.append(errorNote("Không đọc được phiên làm việc — kiểm tra console."));
+  } else if (!view.loaded.sessions) {
+    section.append(loadingNote("Đang tải phiên làm việc…"));
+  } else {
+    const loose = looseSessions(open, view.sessions).sort(byStateThenTask);
+    section.append(sessionGroup("phiên chưa gắn với việc nào đang mở", loose,
+      "Không có phiên nào ngoài các việc trên.", true, loose.some(needsAttention)));
+  }
   return section;
 }
 
@@ -1089,7 +1107,7 @@ async function refresh() {
 function render() { /* draw from `view`; called after every snapshot */
   const board = document.getElementById("board");
   if (board) board.replaceChildren(
-    renderEscalations(), renderAssignments(), renderSessions(), renderTickets());
+    renderEscalations(), renderAssignments(), renderTickets());
   renderSummary();
   renderFreshness();
   renderRefresh();
