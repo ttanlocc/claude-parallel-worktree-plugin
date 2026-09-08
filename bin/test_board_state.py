@@ -994,3 +994,519 @@ def test_freshness_info_treats_a_never_swept_source_as_stale():
     assert m, "freshnessInfo's null-timestamp branch not found"
     assert m.group(1) == "true", "a never-swept source must be reported as stale"
     assert m.group(2) == "true"
+
+
+# ---------------------------------------------------------------------------
+# "Làm mới" button — a manual trigger of the SAME redraw path the 30s tick uses.
+#
+# The page is a read-only artifact in a sandbox: it cannot reach the filesystem, cannot run `az`,
+# and cannot call back to the machine running the pump timer. So this button re-reads the artifact
+# db and nothing else. Every test below exists to keep that honest — a button that looked like it
+# fetched fresh ADO numbers would be worse than no button at all.
+# ---------------------------------------------------------------------------
+
+
+def _board_html():
+    import pathlib
+
+    return (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+
+
+def test_board_markup_has_a_refresh_container():
+    """The strip is a persistent element the render path fills, the same way #summary and
+    #freshness are — not a node built once at boot that a later render would orphan."""
+    assert re.search(r'id="refresh"', _board_html()), "#refresh container not found in the markup"
+
+
+def test_refresh_button_is_labelled_in_vietnamese():
+    script = _board_html_script()
+    assert "Làm mới" in script, "the refresh button must be labelled 'Làm mới'"
+
+
+def test_refresh_button_click_runs_the_refresh_path():
+    """The button must be wired to refresh(), not to a private copy of the read logic."""
+    script = _board_html_script()
+    assert re.search(r'onclick:\s*refresh\b', script), "the button's onclick must call refresh()"
+
+
+def test_refresh_redraws_through_the_existing_render_function():
+    """`render()` is the one redraw path — escalations, sessions, tickets, assignments, summary
+    and freshness all come from it. A refresh that repainted only some sections would leave the
+    board half-updated with no sign of it."""
+    script = _board_html_script()
+    body = re.search(r"async function refresh\(\)\s*\{(.*?)\n\}", script, re.S)
+    assert body, "refresh() not found"
+    assert "render()" in body.group(1), "refresh() must redraw through render()"
+
+
+def test_refresh_re_reads_every_source_the_live_listeners_read():
+    """One table of sources drives both the boot listeners and the button, so a collection can
+    never be wired into one path and forgotten in the other — which is exactly how a 'refresh'
+    silently stops refreshing one section."""
+    script = _board_html_script()
+    assert re.search(r"const SOURCES\s*=", script), "SOURCES table not found"
+    table = re.search(r"const SOURCES\s*=\s*\[(.*?)\n\];", script, re.S)
+    assert table, "SOURCES table body not found"
+    for key in ("sessions", "escalations", "tickets", "meta", "assignments"):
+        assert f'"{key}"' in table.group(1), f"{key} missing from the SOURCES table"
+    assert ".get()" in script, "refresh() must actually re-read the db with get()"
+
+
+def test_refresh_shows_the_real_age_of_the_data_beside_the_button():
+    """The whole point of the label: the button re-reads what the pump timer already wrote, so
+    the data keeps whatever age it had. Showing a wall-clock stamp AND a relative age means a
+    click that changes nothing visibly leaves the age visibly unchanged too."""
+    script = _board_html_script()
+    assert "dữ liệu tính đến" in script, "the data-age label text not found"
+    assert "written_at" in script, "the age label must come from meta.written_at"
+    assert "toLocaleTimeString" in script, "the label must include a wall-clock time"
+
+
+def test_refresh_label_reuses_the_existing_freshness_helpers():
+    """freshnessInfo()/ageText() already phrase ages for this page. A second implementation would
+    drift from the chips right beside it."""
+    script = _board_html_script()
+    body = re.search(r"function renderRefresh\(\)\s*\{(.*?)\n\}", script, re.S)
+    assert body, "renderRefresh() not found"
+    assert "freshnessInfo(" in body.group(1) or "ageText(" in body.group(1)
+
+
+def test_refresh_button_shows_that_it_is_reading():
+    """A click with no visible response reads as a dead button and invites a second click."""
+    script = _board_html_script()
+    assert "Đang tải lại…" in script, "no busy label on the refresh button"
+    assert re.search(r"refresh\.busy\s*=\s*true", script), "busy flag never set"
+    assert re.search(r"refresh\.busy\s*=\s*false", script), "busy flag never cleared"
+
+
+def test_refresh_says_so_when_the_read_fails():
+    """A failed re-read must not leave the previous numbers sitting there looking freshly
+    confirmed — that is the one way this button could actively mislead."""
+    script = _board_html_script()
+    body = re.search(r"async function refresh\(\)\s*\{(.*?)\n\}", script, re.S)
+    assert body, "refresh() not found"
+    assert "catch" in body.group(1), "refresh() must handle a failed read"
+    assert re.search(r"refresh\.error\s*=", body.group(1)), "refresh() must record the error"
+    assert "Không đọc lại được dữ liệu" in script, "no Vietnamese error text for a failed refresh"
+
+
+def test_refresh_clears_a_dead_sources_error_flag_on_success():
+    """A snapshot listener that errors is terminal — it never fires again. The manual re-read is
+    the only way back, so it has to clear view.errors or the board keeps showing 'nguồn dữ liệu bị
+    lỗi' forever after a re-read that actually worked."""
+    script = _board_html_script()
+    body = re.search(r"async function refresh\(\)\s*\{(.*?)\n\}", script, re.S)
+    assert body, "refresh() not found"
+    assert re.search(r"view\.errors\[[^\]]+\]\s*=\s*false", body.group(1)), (
+        "a successful re-read must clear the per-source error flag"
+    )
+
+
+def test_refresh_button_never_claims_to_fetch_fresh_ado_data():
+    """The sandbox cannot reach ADO. The page has to say what the button really does, in the UI
+    and not only in a tooltip a reader may never hover."""
+    script = _board_html_script()
+    assert "không gọi" in script and "ADO" in script, (
+        "the page must state that the button does not call out to ADO"
+    )
+
+
+def test_board_adds_no_second_timer():
+    """The page already redraws on one 30s setInterval. The button is a manual trigger of that
+    same path — a second timer would double the redraw rate and race the first."""
+    script = _board_html_script()
+    assert len(re.findall(r"setInterval\s*\(", script)) == 1, "board.html must have exactly one setInterval"
+
+
+def test_board_html_uses_no_dom_apis_the_artifact_sandbox_forbids():
+    """Every one of these fails silently in the artifact sandbox rather than throwing, so a
+    single slip would blank a section with no error anywhere. The page builds DOM through h()."""
+    html = _board_html()
+    for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+        assert banned not in html, f"board.html must not use {banned}"
+
+
+def test_board_html_loads_no_external_script_and_only_the_allowed_font_stylesheet():
+    """The artifact CSP blocks external scripts outright. Stylesheets are blocked too, with one
+    exception it explicitly allows and this page already depends on: fonts.googleapis.com. So the
+    check is 'no external script at all, and no stylesheet from anywhere else' — banning the font
+    link outright would break a working page for a rule the sandbox does not actually have."""
+    html = _board_html()
+    assert not re.search(r"<script[^>]+\bsrc\s*=", html, re.I), "board.html must not load an external script"
+    for href in re.findall(r'<link[^>]+rel=["\']?stylesheet["\']?[^>]*>', html, re.I):
+        url = re.search(r'href="([^"]*)"', href)
+        assert url and url.group(1).startswith("https://fonts.googleapis.com/"), (
+            f"only fonts.googleapis.com stylesheets are allowed, got: {href}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Assignments — the manager's own ledger, which has never reached the board at all.
+# ---------------------------------------------------------------------------
+
+
+def _assignment(**over):
+    rec = {
+        "id": "a1",
+        "ts": 100.0,
+        "title": "Dựng lại pipeline",
+        "priority": "P0",
+        "deadline": "2030-01-01",
+        "ado_refs": ["4321"],
+        "status": "in_progress",
+        "plan": [],
+        "note": "ghi chú",
+    }
+    rec.update(over)
+    return rec
+
+
+def test_assignment_docs_key_on_id_and_carry_the_ledger_fields():
+    from board_state import assignment_docs
+
+    docs = assignment_docs([_assignment()], now=200.0)
+    assert set(docs) == {"a1"}
+    doc = docs["a1"]
+    assert doc["title"] == "Dựng lại pipeline"
+    assert doc["priority"] == "P0"
+    assert doc["status"] == "in_progress"
+    assert doc["deadline"] == "2030-01-01"
+    assert doc["ado_refs"] == ["4321"]
+    assert doc["note"] == "ghi chú"
+    assert doc["ts"] == 100.0
+
+
+def test_assignment_docs_skip_a_record_with_no_id():
+    """Same rule as every other doc builder here: a document id cannot be empty."""
+    from board_state import assignment_docs
+
+    assert assignment_docs([_assignment(id=None)], now=200.0) == {}
+
+
+def test_assignment_docs_let_the_latest_record_for_an_id_win():
+    """The ledger is append-only: the same id appears once per update, oldest first. The board
+    must show the newest, not the first one it happened to read."""
+    from board_state import assignment_docs
+
+    docs = assignment_docs(
+        [_assignment(status="assigned", note="cũ"), _assignment(status="done", note="mới")],
+        now=200.0,
+    )
+    assert docs["a1"]["status"] == "done"
+    assert docs["a1"]["note"] == "mới"
+
+
+def test_assignment_docs_keep_a_done_assignment_instead_of_dropping_it():
+    """Mirroring only open assignments is how the escalation mirror froze records open forever
+    (see main()'s current_state comment). A finished assignment must still be published, marked
+    done — the board shows what happened, not only what is outstanding."""
+    from board_state import assignment_docs
+
+    docs = assignment_docs([_assignment(status="done"), _assignment(id="a2", status="cancelled")], now=200.0)
+    assert set(docs) == {"a1", "a2"}
+    assert docs["a1"]["status"] == "done"
+    assert docs["a2"]["status"] == "cancelled"
+
+
+def test_assignment_docs_compute_progress_from_the_plan_steps():
+    from board_state import assignment_docs
+
+    plan = [
+        {"step": "một", "state": "done"},
+        {"step": "hai", "state": "done"},
+        {"step": "ba", "state": "todo"},
+        {"step": "bốn", "state": "doing"},
+    ]
+    assert assignment_docs([_assignment(plan=plan)], now=200.0)["a1"]["progress"] == 0.5
+
+
+def test_assignment_docs_ignore_a_progress_field_someone_stored_in_the_ledger():
+    """Derived data is computed here, never read back from the record. A stale `progress` written
+    into the ledger by hand must lose to the plan steps, which are the truth."""
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[{"step": "một", "state": "done"}], progress=0.0, at_risk=False)
+    doc = assignment_docs([rec], now=200.0)["a1"]
+    assert doc["progress"] == 1.0
+
+
+def test_assignment_docs_report_no_progress_rather_than_zero_when_there_is_no_plan():
+    """None, not 0.0 — an empty bar reads as 'nothing done yet', which is a different (and
+    wrong) claim from 'nobody has broken this down yet'."""
+    from board_state import assignment_docs
+
+    assert assignment_docs([_assignment(plan=[])], now=200.0)["a1"]["progress"] is None
+
+
+def test_assignment_docs_compute_at_risk_from_a_passed_step_eta():
+    """at_risk is not a ledger field. An unfinished step whose ETA has gone by puts the whole
+    assignment at risk even when its own deadline is still far off."""
+    from board_state import assignment_docs
+
+    now = 1893456000.0  # 2030-01-01
+    rec = _assignment(deadline="2035-01-01", plan=[{"step": "một", "state": "todo", "eta": "2020-01-01"}])
+    assert assignment_docs([rec], now=now)["a1"]["at_risk"] is True
+
+
+def test_assignment_docs_ignore_an_at_risk_field_stored_in_the_ledger():
+    from board_state import assignment_docs
+
+    now = 1893456000.0
+    rec = _assignment(deadline="2020-01-01", at_risk=False)
+    assert assignment_docs([rec], now=now)["a1"]["at_risk"] is True
+
+
+def test_assignment_docs_never_flag_a_finished_assignment_as_at_risk():
+    """A deadline that passed after the work was already done is history, not an alarm."""
+    from board_state import assignment_docs
+
+    now = 1893456000.0
+    for status in ("done", "cancelled"):
+        rec = _assignment(status=status, deadline="2020-01-01")
+        assert assignment_docs([rec], now=now)["a1"]["at_risk"] is False
+
+
+def test_assignment_docs_flag_an_unplanned_assignment_as_stalled():
+    """Open, never broken into steps, and sitting that way for over an hour: nobody has started.
+    A distinct signal from at_risk, which needs a date to be late against."""
+    from board_state import assignment_docs
+
+    doc = assignment_docs([_assignment(ts=0.0, plan=[])], now=100000.0)["a1"]
+    assert doc["stalled"] is True
+
+
+def test_assignment_docs_tolerate_a_plan_that_is_not_a_list():
+    """`plan` is model-authored against a prose schema — drift is normal, not an error."""
+    from board_state import assignment_docs
+
+    for junk in ("chưa có", {"step": "một"}, None, 7):
+        doc = assignment_docs([_assignment(plan=junk)], now=200.0)["a1"]
+        assert doc["plan"] == []
+        assert doc["progress"] is None
+
+
+def test_assignment_docs_drop_a_plan_step_that_is_not_a_dict():
+    from board_state import assignment_docs
+
+    doc = assignment_docs([_assignment(plan=["một", {"step": "hai", "state": "done"}, None])], now=200.0)["a1"]
+    assert [s["step"] for s in doc["plan"]] == ["hai"]
+    assert doc["progress"] == 1.0
+
+
+def test_assignment_docs_mark_an_unrecognised_step_state_as_unknown_never_todo():
+    """Same rule as normalize_state(): an unrecognised value must look unrecognised. Folding a
+    step the manager wrote as `in_progress` into `todo` would understate real progress, and
+    folding it into `done` would overstate it."""
+    from board_state import assignment_docs
+
+    doc = assignment_docs([_assignment(plan=[{"step": "một", "state": "in_progress"}])], now=200.0)["a1"]
+    assert doc["plan"][0]["state"] == "unknown"
+
+
+def test_assignment_docs_carry_the_step_fields_the_page_renders():
+    from board_state import assignment_docs
+
+    step = {"step": "dựng schema", "owner": "worker-a", "depends_on": ["một"], "eta": "2030-02-02", "state": "doing"}
+    got = assignment_docs([_assignment(plan=[step])], now=200.0)["a1"]["plan"][0]
+    assert got["step"] == "dựng schema"
+    assert got["owner"] == "worker-a"
+    assert got["depends_on"] == ["một"]
+    assert got["eta"] == "2030-02-02"
+    assert got["state"] == "doing"
+
+
+def test_assignment_docs_coerce_ado_refs_to_a_list():
+    from board_state import assignment_docs
+
+    assert assignment_docs([_assignment(ado_refs=None)], now=200.0)["a1"]["ado_refs"] == []
+
+
+def test_assignment_docs_default_an_unrecognised_priority_to_p1():
+    """Same reasoning as escalation_severity(): an unknown value stays a human's call, and must
+    never be quietly promoted to P0."""
+    from board_state import assignment_docs
+
+    assert assignment_docs([_assignment(priority="urgent!")], now=200.0)["a1"]["priority"] == "P1"
+
+
+def test_build_writes_emits_the_assignments_collection():
+    from board_state import build_writes
+
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=200.0, assignments=[_assignment()],
+    )
+    rows = _writes_for(writes, "assignments")
+    assert len(rows) == 1
+    assert rows[0]["op"] == "set"
+    assert rows[0]["doc_id"] == "a1"
+    assert rows[0]["data"]["title"] == "Dựng lại pipeline"
+
+
+def test_build_writes_still_puts_meta_status_last_with_assignments_present():
+    """meta/status asserts the rows before it are current — a new collection must not slip in
+    after it."""
+    from board_state import build_writes
+
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=200.0, assignments=[_assignment()],
+    )
+    assert writes[-1]["collection"] == "meta"
+
+
+def test_collect_emits_assignment_documents_from_the_injected_reader():
+    from board_state import collect
+
+    writes = collect(
+        read_agents=list, read_registry=dict, read_escalations=list, read_tickets=list,
+        read_prs=dict, now=lambda: 200.0,
+        read_assignments=lambda: [_assignment()],
+    )
+    rows = _writes_for(writes, "assignments")
+    assert [r["doc_id"] for r in rows] == ["a1"]
+
+
+def test_collect_folds_an_append_only_ledger_to_the_latest_record_per_id(tmp_path):
+    """End to end over a real ledger file, the way main() reads it: two records for one id, and
+    the board must publish one document carrying the newer one."""
+    from assignments import append
+    from board_state import collect
+    from escalations import current_state
+
+    path = str(tmp_path / "assignments.jsonl")
+    append(_assignment(status="assigned", note="cũ"), path=path)
+    append(_assignment(status="done", note="mới"), path=path)
+
+    writes = collect(
+        read_agents=list, read_registry=dict, read_escalations=list, read_tickets=list,
+        read_prs=dict, now=lambda: 200.0,
+        read_assignments=lambda: current_state(path),
+    )
+    rows = _writes_for(writes, "assignments")
+    assert len(rows) == 1
+    assert rows[0]["data"]["status"] == "done"
+    assert rows[0]["data"]["note"] == "mới"
+
+
+def test_collect_degrades_assignments_to_empty_without_blanking_other_sources():
+    from board_state import collect
+
+    def boom():
+        raise RuntimeError("ledger unreadable")
+
+    writes = collect(
+        read_agents=lambda: [{"name": "t1", "state": "working"}],
+        read_registry=dict, read_escalations=list, read_tickets=list, read_prs=dict,
+        now=lambda: 200.0, read_assignments=boom,
+    )
+    assert not _writes_for(writes, "assignments")
+    assert _writes_for(writes, "sessions")
+    assert writes[-1]["collection"] == "meta"
+
+
+def test_collect_needs_no_assignments_reader_from_an_existing_caller():
+    """Every call site written before this parameter existed must keep working unchanged."""
+    from board_state import collect
+
+    writes = collect(
+        read_agents=list, read_registry=dict, read_escalations=list, read_tickets=list,
+        read_prs=dict, now=lambda: 200.0,
+    )
+    assert not _writes_for(writes, "assignments")
+    assert writes[-1]["collection"] == "meta"
+
+
+def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
+    """open_assignments() would drop every finished assignment off the board the moment it was
+    closed. current_state() folds the append-only ledger keeping all ids, which is what the
+    escalation reader right above it already does for the same reason."""
+    import inspect
+
+    import board_state
+
+    src = inspect.getsource(board_state.main)
+    assert "read_assignments" in src, "main() never wires an assignments reader"
+    assert "LEDGER_PATH" in src
+    # Comments stripped: main() is expected to *explain* why open_assignments() is the wrong
+    # reader, so only an actual call to it counts as the mistake.
+    code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+    assert "open_assignments(" not in code
+    assert "current_state(LEDGER_PATH)" in code
+
+
+# ---------------------------------------------------------------------------
+# Assignments on the page.
+# ---------------------------------------------------------------------------
+
+
+def test_board_renders_an_assignments_section_in_the_main_render_path():
+    script = _board_html_script()
+    assert re.search(r"function renderAssignments\(\)", script), "renderAssignments() not found"
+    call = re.search(r"board\.replaceChildren\((.*?)\);", script, re.S)
+    assert call, "render()'s replaceChildren call not found"
+    assert "renderAssignments()" in call.group(1), "assignments section missing from render()"
+
+
+def test_board_subscribes_to_the_assignments_collection():
+    script = _board_html_script()
+    assert '"assignments"' in script or "'assignments'" in script
+    assert "view.assignments" in script, "assignments never reach the view state"
+
+
+def test_board_labels_every_assignment_status_in_vietnamese():
+    """assignments.py's STATUSES is the closed vocabulary; a status with no label would render
+    as a bare English slug on a Vietnamese board."""
+    from assignments import STATUSES
+
+    script = _board_html_script()
+    block = re.search(r"const ASSIGNMENT_STATUS_LABEL\s*=\s*\{(.*?)\}", script, re.S)
+    assert block, "ASSIGNMENT_STATUS_LABEL not found"
+    for status in STATUSES:
+        assert status in block.group(1), f"no Vietnamese label for status {status}"
+    assert re.search(r"[àáảãạăâằắẳẵặầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ]",
+                     block.group(1), re.I), "status labels must be Vietnamese with diacritics"
+
+
+def test_board_labels_every_plan_step_state_in_vietnamese_including_unknown():
+    script = _board_html_script()
+    block = re.search(r"const STEP_STATE_LABEL\s*=\s*\{(.*?)\}", script, re.S)
+    assert block, "STEP_STATE_LABEL not found"
+    for state in ("todo", "doing", "done", "unknown"):
+        assert state in block.group(1), f"no label for step state {state}"
+
+
+def test_board_shows_plan_steps_and_computed_progress():
+    script = _board_html_script()
+    body = re.search(r"function assignmentCard\((.*?)\n\}", script, re.S)
+    assert body, "assignmentCard() not found"
+    card = body.group(1)
+    assert ".plan" in card, "the card never reads the plan steps"
+    assert "progress" in card, "the card never shows progress"
+    assert "at_risk" in card, "the card never surfaces at_risk"
+
+
+def test_board_handles_a_missing_or_broken_assignments_source_like_every_other_section():
+    """Loading, empty and errored must look like three different things here too — an errored
+    ledger rendering as 'no assignments' is the exact failure the other sections guard against."""
+    script = _board_html_script()
+    body = re.search(r"function renderAssignments\(\)\s*\{(.*?)\n\}\n", script, re.S)
+    assert body, "renderAssignments() not found"
+    assert "view.loaded.assignments" in body.group(1)
+    assert "view.errors.assignments" in body.group(1)
+
+
+def test_refresh_strip_never_hands_a_null_child_to_replace_children():
+    """h() drops a null child; replaceChildren() renders it as the literal text "null".
+
+    renderRefresh() appends the error chip conditionally, so the not-errored case passes null
+    straight into replaceChildren — which put the word "null" on the topbar of a perfectly
+    healthy board. Caught by rendering the page, not by reading it, so this pins the fix.
+    """
+    script = _board_html_script()
+    body = re.search(r"function renderRefresh\(\)\s*\{(.*?)\n\}", script, re.S)
+    assert body, "renderRefresh() not found"
+    if ": null" in body.group(1):
+        assert "filter(Boolean)" in body.group(1), (
+            "a conditional child must be filtered out before replaceChildren, not passed as null"
+        )

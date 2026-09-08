@@ -8,6 +8,7 @@ plain dicts. That is what makes the board's data model testable without publishi
 import json
 import os
 
+from assignments import LEDGER_PATH, PRIORITIES, at_risk, progress, stalled
 from escalations import QUEUE_PATH, classify, current_state, normalize_kind, normalize_options
 
 # Kinds that mean production is already hurting. Scored off the CANONICAL name, never the raw
@@ -143,6 +144,79 @@ def escalation_docs(records: list[dict]) -> dict[str, dict]:
     return docs
 
 
+# Plan-step states the page has a word for. Anything else becomes "unknown" — never "todo" —
+# for the same reason normalize_state() refuses to fold an unrecognised session state into
+# "idle": a step the manager wrote as `in_progress` would render as "chưa làm" and understate
+# work already underway, while folding it into "done" would overstate it. Both are lies about
+# the plan; "unknown" is the only honest answer, and the page has a label for it.
+_STEP_STATES = frozenset({"todo", "doing", "done"})
+
+
+def _safe_plan(raw) -> list[dict]:
+    """Coerce a model-authored plan into the flat list of steps the page walks directly.
+
+    Same tolerance as _safe_evidence(): `plan` is written by the manager against a prose schema,
+    so a plan that is not a list, or a step that is not a dict, is dropped rather than raised on.
+    The steps kept here are exactly the ones assignments.progress() counts, so the progress
+    number and the step list under it can never disagree about the denominator.
+    """
+    if not isinstance(raw, list):
+        return []
+    steps = []
+    for step in raw:
+        if not isinstance(step, dict):
+            continue
+        deps = step.get("depends_on")
+        state = step.get("state")
+        steps.append(
+            {
+                "step": str(step.get("step") or ""),
+                "owner": _str_or_none(step.get("owner")),
+                "depends_on": [str(d) for d in deps] if isinstance(deps, list) else [],
+                "eta": _str_or_none(step.get("eta")),
+                "state": state if state in _STEP_STATES else "unknown",
+            }
+        )
+    return steps
+
+
+def assignment_docs(records: list[dict], now: float) -> dict[str, dict]:
+    """One document per assignment, keyed by its id.
+
+    Keyed by id and built by overwrite, so an append-only ledger folded oldest-first lands on the
+    newest record per id — the same shape escalation_docs() relies on.
+
+    `progress`, `at_risk` and `stalled` are NOT ledger fields and must never become ones: they
+    are recomputed from the plan steps and the clock on every pump, through assignments.py's own
+    helpers rather than a second copy of the rules living here. Anything a writer stored in the
+    record under those names loses — a derived value that can be stored is one that can go stale,
+    and a stale "on track" is the failure this board exists to prevent.
+    """
+    docs = {}
+    for rec in records or []:
+        rec_id = rec.get("id")
+        if not rec_id:
+            continue
+        docs[str(rec_id)] = {
+            "id": str(rec_id),
+            "ts": rec.get("ts"),
+            "title": rec.get("title") or "",
+            # An unrecognised priority stays P1 — a human's call — for the same reason
+            # escalation_severity() refuses to promote an unknown kind to P0: a wider vocabulary
+            # must never become a way to shout.
+            "priority": rec.get("priority") if rec.get("priority") in PRIORITIES else "P1",
+            "deadline": rec.get("deadline"),
+            "ado_refs": [str(r) for r in rec.get("ado_refs") or []],
+            "status": rec.get("status") or "assigned",
+            "plan": _safe_plan(rec.get("plan")),
+            "note": rec.get("note") or "",
+            "progress": progress(rec),
+            "at_risk": at_risk(rec, now),
+            "stalled": stalled(rec, now),
+        }
+    return docs
+
+
 def ticket_docs(tickets: list[dict], pr_by_ticket: dict) -> dict[str, dict]:
     """One document per ADO work item, keyed by its id.
 
@@ -192,6 +266,7 @@ def build_writes(
     now: float,
     ado_swept_at=None,
     manager=None,
+    assignments=None,
 ) -> list[dict]:
     """Every document to write, in the order to write it.
 
@@ -204,6 +279,7 @@ def build_writes(
         ("sessions", session_docs(agents, registry)),
         ("escalations", escalation_docs(escalations)),
         ("tickets", ticket_docs(tickets, pr_by_ticket)),
+        ("assignments", assignment_docs(assignments, now)),
     ):
         for doc_id, data in docs.items():
             writes.append({"op": "set", "collection": collection, "doc_id": doc_id, "data": data})
@@ -245,13 +321,23 @@ def _safe(reader, fallback, name):
         return fallback
 
 
-def collect(read_agents, read_registry, read_escalations, read_tickets, read_prs, now, read_manager=dict) -> list[dict]:
+def collect(
+    read_agents,
+    read_registry,
+    read_escalations,
+    read_tickets,
+    read_prs,
+    now,
+    read_manager=dict,
+    read_assignments=list,
+) -> list[dict]:
     """Gather every source and return the write set. Readers are injected so this is testable
     without `az`, `gh`, or a live session.
 
     `read_manager` defaults to `dict` (a zero-arg callable returning `{}`, the same idiom
     `read_prs=dict` already uses elsewhere) so every existing caller that has no manager reader
     to give keeps getting the same null manager fields as before this parameter existed.
+    `read_assignments` defaults to `list` for the same reason.
     """
     tickets = _safe(read_tickets, None, "tickets")
     stamp = now()
@@ -265,6 +351,7 @@ def collect(read_agents, read_registry, read_escalations, read_tickets, read_prs
         # None, not `stamp`: a sweep that failed must not claim to have just run.
         ado_swept_at=stamp if tickets is not None else None,
         manager=_safe(read_manager, {}, "manager"),
+        assignments=_safe(read_assignments, [], "assignments"),
     )
 
 
@@ -320,6 +407,12 @@ def main() -> int:
         # manager through, so meta/status.manager_session_id stayed null forever and the board
         # showed "Manager: chưa có phiên nào nhận việc" even while the daemon was running.
         read_manager=manager_session._read_state,
+        # current_state(), not open_assignments(): the same trap the escalation reader above
+        # documents. open_assignments() drops everything done or cancelled, so an assignment
+        # would vanish off the board at the exact moment it was finished — and the board would
+        # keep publishing the last open copy of it forever, since a doc nobody rewrites is a doc
+        # that never changes. Folding the whole append-only ledger keeps every id, done included.
+        read_assignments=lambda: current_state(LEDGER_PATH),
     )
     json.dump(writes, sys.stdout, ensure_ascii=False)
     return 0

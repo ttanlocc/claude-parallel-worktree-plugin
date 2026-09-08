@@ -147,7 +147,16 @@
   .brand .subtitle { margin: 2px 0 0; color: var(--faint); font-size: var(--fs-sm); }
 
   .topbar-row2 { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-  .summary-strip, .freshness-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .summary-strip, .freshness-strip, .refresh-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .refresh-btn {
+    font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
+    padding: 4px 12px; border-radius: var(--radius-s);
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  .refresh-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
+  .refresh-btn:disabled { cursor: default; opacity: .6; }
+  .refresh-age { font-size: var(--fs-sm); color: var(--ink-soft); }
+  .refresh-note { font-size: var(--fs-xs); color: var(--faint); }
   .freshness-strip { margin-left: auto; }
 
   .conn { display: flex; align-items: center; gap: 7px; font-size: var(--fs-sm); color: var(--ink-soft); flex: none; }
@@ -317,6 +326,7 @@
     <div class="topbar-row2">
       <div class="summary-strip" id="summary"></div>
       <div class="freshness-strip" id="freshness"></div>
+      <div class="refresh-strip" id="refresh"></div>
     </div>
   </header>
 
@@ -351,6 +361,25 @@ const SEVERITY_TONE = { P0: "pill-bad", P1: "pill-warn", P2: "pill-accent" };
 // identified yet can never render as free.
 const STATE_RANK = { waiting: 0, unknown: 1, running: 2, idle: 3, done: 4 };
 const STATE_LABEL = { waiting: "Đang chờ duyệt", running: "Đang chạy", idle: "Rảnh", done: "Đã xong", unknown: "Không rõ trạng thái" };
+
+// The manager's own ledger vocabulary (assignments.py STATUSES). Priorities are NOT restated
+// here: an assignment's P0/P1/P2 means what an escalation's does, so it reuses SEVERITY_RANK /
+// SEVERITY_LABEL / SEVERITY_TONE above rather than growing a second scale that looks identical
+// and could quietly rank differently.
+const ASSIGNMENT_STATUS_LABEL = {
+  assigned: "đã giao", in_progress: "đang làm", blocked: "bị chặn",
+  done: "đã xong", cancelled: "đã huỷ",
+};
+const ASSIGNMENT_STATUS_TONE = {
+  assigned: "pill-neutral", in_progress: "pill-accent", blocked: "pill-bad",
+  done: "pill-good", cancelled: "pill-neutral",
+};
+const ASSIGNMENT_CLOSED_STATUSES = new Set(["done", "cancelled"]);
+// "unknown" is not a state the manager writes — it is what board_state.py returns for a step
+// state it does not recognise (see _STEP_STATES there). It needs a word here for exactly the
+// reason STATE_LABEL needs one: an unlabelled state renders as a bare English slug, or as
+// nothing at all, and "nothing at all" reads as "not started".
+const STEP_STATE_LABEL = { todo: "chưa làm", doing: "đang làm", done: "xong", unknown: "không rõ" };
 
 const RESOLVED_STATUSES = new Set(["answered", "dismissed"]);
 // Same list the localhost dashboard uses for "not done" vs "done" — keep the two boards agreeing
@@ -434,11 +463,14 @@ function sessionLabel(sessionId) {
 }
 
 /* ---------- shared state ---------- */
-const view = { sessions: [], escalations: [], tickets: [], meta: null, db: null };
+const view = { sessions: [], escalations: [], tickets: [], assignments: [], meta: null, db: null };
 // Extra bookkeeping alongside the required `view` shape above — which source has fired at least
 // once (so "empty" and "not loaded yet" never look the same) and which source's listener died.
-view.loaded = { sessions: false, escalations: false, tickets: false, meta: false };
-view.errors = { sessions: false, escalations: false, tickets: false, meta: false };
+view.loaded = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
+view.errors = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
+// Describes the "Làm mới" button, not a data source: whether a manual read is in flight, and
+// why the last one failed.
+view.refresh = { busy: false, error: null };
 
 const ticketFilters = { sprint: "", state: "" };
 
@@ -534,6 +566,86 @@ function renderEscalations() {
 
   if (resolved.length) {
     section.append(collapsedGroup(resolved.length + " đã xử lý", resolved.map(resolvedEscalationRow)));
+  }
+  return section;
+}
+
+/* ---------- assignments: the manager's own ledger ---------- */
+function assignmentCard(a) {
+  const sev = a.priority in SEVERITY_RANK ? a.priority : "P1";
+  const known = Object.prototype.hasOwnProperty.call(ASSIGNMENT_STATUS_LABEL, a.status);
+  const steps = Array.isArray(a.plan) ? a.plan : [];
+  const refs = Array.isArray(a.ado_refs) ? a.ado_refs : [];
+  // progress / at_risk / stalled are computed by board_state.py from these very steps and only
+  // shown here, never recomputed — one derivation, so the number and the step list under it
+  // cannot disagree, and neither can the board and the pump.
+  const pct = typeof a.progress === "number" ? Math.round(a.progress * 100) : null;
+  const doneSteps = steps.filter((s) => s.state === "done").length;
+
+  return h("div", { class: "esc-card sev-" + sev },
+    h("div", { class: "esc-top" },
+      pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
+      pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
+        known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
+      a.at_risk ? pill("pill-bad", "trễ hạn") : null,
+      a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
+      h("span", { class: "esc-wait mono" },
+        pct == null ? "chưa có kế hoạch" : doneSteps + "/" + steps.length + " bước · " + pct + "%"),
+    ),
+    h("div", { class: "esc-question" }, a.title || "(không có tiêu đề)"),
+    h("div", { class: "session-row" }, h("span", { class: "k" }, "hạn"),
+      h("span", { class: "v" }, a.deadline || "—")),
+    steps.length
+      ? h("div", { class: "esc-evidence" }, steps.map((s) => {
+          const st = Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
+          const deps = Array.isArray(s.depends_on) ? s.depends_on : [];
+          const extra = [
+            s.owner ? "ai: " + s.owner : null,
+            s.eta ? "hạn: " + s.eta : null,
+            deps.length ? "sau: " + deps.join(", ") : null,
+          ].filter(Boolean).join(" · ");
+          return h("div", { class: "session-row" },
+            h("span", { class: "k" }, STEP_STATE_LABEL[st]),
+            h("span", { class: "v" }, (s.step || "(bước không có mô tả)") + (extra ? " (" + extra + ")" : "")));
+        }))
+      : h("div", { class: "esc-no-options" }, "chưa chia thành bước nào"),
+    refs.length ? h("div", { class: "session-refs" }, refs.map((id) => {
+      const url = ticketUrl(id);
+      return url
+        ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
+        : h("span", { class: "chip" }, "AB#" + id);
+    })) : null,
+    a.note ? h("div", { class: "esc-session" }, "ghi chú: " + a.note) : null,
+  );
+}
+
+function renderAssignments() {
+  const section = h("section", { class: "board-section" });
+  const loaded = view.loaded.assignments;
+  const open = view.assignments.filter((a) => !ASSIGNMENT_CLOSED_STATUSES.has(a.status));
+  section.append(sectionHead("Việc đã giao",
+    "Sổ giao việc của manager — một kết quả đã nhận, không phải một vé.", loaded ? open.length : null));
+
+  if (!view.db) { section.append(loadingNote("Đang kết nối tới dữ liệu…")); return section; }
+  if (!loaded) { section.append(loadingNote("Đang tải sổ giao việc…")); return section; }
+  if (view.errors.assignments) { section.append(errorNote("Không đọc được sổ giao việc — kiểm tra console.")); return section; }
+
+  // Same ordering rule as the escalations above: priority first, then whatever is already late,
+  // then oldest. An unrecognised priority sorts last rather than jumping the queue.
+  const byUrgency = (a, b) =>
+    (SEVERITY_RANK[a.priority] ?? 9) - (SEVERITY_RANK[b.priority] ?? 9) ||
+    Number(!!b.at_risk) - Number(!!a.at_risk) ||
+    (a.ts ?? 0) - (b.ts ?? 0);
+  const closed = view.assignments.filter((a) => ASSIGNMENT_CLOSED_STATUSES.has(a.status));
+
+  if (!open.length) section.append(goodNote("Không có việc nào đang mở."));
+  else section.append(h("div", { class: "esc-list" }, open.slice().sort(byUrgency).map(assignmentCard)));
+
+  // Done and cancelled stay on the board, collapsed — board_state.py deliberately keeps mirroring
+  // them, so dropping them here would throw away the record it went to the trouble of publishing.
+  if (closed.length) {
+    section.append(collapsedGroup(closed.length + " việc đã đóng",
+      [h("div", { class: "esc-list" }, closed.slice().sort(byUrgency).map(assignmentCard))]));
   }
   return section;
 }
@@ -817,12 +929,95 @@ function renderFreshness() {
   renderStaleBanner(adoInfo);
 }
 
+// The "Làm mới" button and the true age of what it re-reads, side by side on purpose.
+//
+// This page is a read-only artifact in a sandbox: no filesystem, no `az`, no way to call back to
+// the machine running the pump timer. The button therefore re-reads the artifact db and NOTHING
+// else — it cannot go fetch newer ADO numbers, and it must never look like it can. The age shown
+// is the pump's own write stamp, so a click that changes nothing leaves the age visibly unchanged
+// too; that is the honest signal, and the note spells it out for anyone who reads it otherwise.
+function renderRefresh() {
+  const box = document.getElementById("refresh");
+  if (!box) return;
+  const writtenAt = view.meta ? view.meta.written_at : null;
+  // The session threshold, not the ADO one: meta_status() stamps written_at and
+  // last_session_scan from the same sweep, so this stamp ages on that cadence. Only
+  // info.text is drawn here — staleness is already shouted by the banner and the chips
+  // beside this strip, and a third copy of that alarm would just be noise.
+  const info = freshnessInfo(writtenAt, SESSION_CADENCE_S * STALE_MULTIPLIER);
+  const clock = writtenAt == null
+    ? null
+    : new Date(writtenAt * 1000).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+  const age = clock == null
+    ? "chưa rõ dữ liệu tính đến lúc nào"
+    : "dữ liệu tính đến " + clock + " (" + info.text + ")";
+
+  // .filter(Boolean), not a bare null in the argument list: h() drops a null child, but
+  // replaceChildren() renders it as the literal text "null" — which is exactly what the topbar
+  // of a perfectly healthy board showed before this filter existed.
+  box.replaceChildren(...[
+    h("button", {
+      class: "refresh-btn",
+      type: "button",
+      disabled: (view.refresh.busy || !view.db) ? "" : null,
+      title: "Đọc lại dữ liệu mà bộ hẹn giờ đã ghi vào bảng. Trang chạy trong hộp cát nên không tự gọi sang ADO được.",
+      onclick: refresh,
+    }, view.refresh.busy ? "Đang tải lại…" : "Làm mới"),
+    h("span", { class: "refresh-age" }, age),
+    h("span", { class: "refresh-note" }, "· chỉ đọc lại dữ liệu bảng, không gọi mới sang ADO"),
+    view.refresh.error ? pill("pill-bad", view.refresh.error) : null,
+  ].filter(Boolean));
+}
+
+/* ---------- data sources ----------
+   One table drives BOTH the live listeners at boot and the manual button above, so a collection
+   can never be wired into one path and forgotten in the other — a "Làm mới" that quietly stopped
+   refreshing one section is the failure this page has no way to show. */
+const docsOf = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+const SOURCES = [
+  { key: "sessions", ref: (db) => db.collection("sessions"), apply: (s) => { view.sessions = docsOf(s); } },
+  { key: "escalations", ref: (db) => db.collection("escalations"), apply: (s) => { view.escalations = docsOf(s); } },
+  { key: "tickets", ref: (db) => db.collection("tickets"), apply: (s) => { view.tickets = docsOf(s); } },
+  { key: "assignments", ref: (db) => db.collection("assignments"), apply: (s) => { view.assignments = docsOf(s); } },
+  { key: "meta", ref: (db) => db.doc("meta/status"), apply: (s) => { view.meta = s.exists ? s.data() : null; } },
+];
+
+// Manual re-read: the same sources, redrawn through the same render() the 30s tick already uses.
+// Deliberately all-or-nothing — if any source throws, none are applied and the board keeps showing
+// the previous read with the failure said out loud, rather than mixing rows from two different
+// moments with nothing on screen marking which is which.
+async function refresh() {
+  if (!view.db || view.refresh.busy) return;
+  view.refresh.busy = true;
+  view.refresh.error = null;
+  render();
+  try {
+    const snaps = await Promise.all(SOURCES.map((s) => s.ref(view.db).get()));
+    SOURCES.forEach((s, i) => {
+      s.apply(snaps[i]);
+      view.loaded[s.key] = true;
+      // A snapshot listener that errors is terminal — it never fires again, so this manual read is
+      // the only way back. Without clearing the flag the board would keep reporting a source as
+      // broken long after a re-read had proved it was not.
+      view.errors[s.key] = false;
+    });
+  } catch (e) {
+    console.error("refresh", e);
+    view.refresh.error = "Không đọc lại được dữ liệu — số liệu bên dưới vẫn là của lần đọc trước.";
+  } finally {
+    view.refresh.busy = false;
+    render();
+  }
+}
+
 /* ---------- render ---------- */
 function render() { /* draw from `view`; called after every snapshot */
   const board = document.getElementById("board");
-  if (board) board.replaceChildren(renderEscalations(), renderSessions(), renderTickets());
+  if (board) board.replaceChildren(
+    renderEscalations(), renderAssignments(), renderSessions(), renderTickets());
   renderSummary();
   renderFreshness();
+  renderRefresh();
 }
 
 // Keep "N minutes/seconds ago" honest while the tab just sits open with no new snapshot. Only
@@ -855,17 +1050,15 @@ setInterval(() => { if (view.db) render(); }, 30000);
     render();
   };
 
-  db.collection("sessions").onSnapshot(
-    (snap) => { view.sessions = snap.docs.map(d => ({ id: d.id, ...d.data() })); view.loaded.sessions = true; render(); },
-    onErr("sessions"));
-  db.collection("escalations").onSnapshot(
-    (snap) => { view.escalations = snap.docs.map(d => ({ id: d.id, ...d.data() })); view.loaded.escalations = true; render(); },
-    onErr("escalations"));
-  db.collection("tickets").onSnapshot(
-    (snap) => { view.tickets = snap.docs.map(d => ({ id: d.id, ...d.data() })); view.loaded.tickets = true; render(); },
-    onErr("tickets"));
-  db.doc("meta/status").onSnapshot(
-    (snap) => { view.meta = snap.exists ? snap.data() : null; view.loaded.meta = true; render(); },
-    onErr("meta"));
+  for (const src of SOURCES) {
+    src.ref(db).onSnapshot(
+      (snap) => {
+        src.apply(snap);
+        view.loaded[src.key] = true;
+        view.errors[src.key] = false;
+        render();
+      },
+      onErr(src.key));
+  }
 })();
 </script>
