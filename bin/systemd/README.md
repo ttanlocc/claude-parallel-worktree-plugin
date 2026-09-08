@@ -33,6 +33,12 @@ chmod 600 ~/.config/board-mirror/env
 $EDITOR ~/.config/board-mirror/env   # fill in ARTIFACT_URL and PWT_REPO_ROOT for real
 ```
 
+Leave `CLAUDE_CODE_ENTRYPOINT=claude-desktop` as the example file sets it — don't delete it and
+don't change the value. Without it, `claude -p` has no `Artifact` tool at all (not a denied
+permission, the tool doesn't exist for that session), and every run dies at the write step with
+the misleading `"Artifact tool is not available in this session"`. If you ever see that exact
+message in the journal, this is the first thing to check.
+
 `run-board-mirror.sh` also keeps a snapshot of the last successful write at
 `~/.config/board-mirror/last-writes.json`, next to `env` — not something you create, it writes
 itself after the first successful run, and only sends changed documents (plus deletes for ones

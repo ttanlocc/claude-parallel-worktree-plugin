@@ -150,13 +150,18 @@ def test_run_script_pre_grants_the_artifact_permission_for_headless_runs():
     # `claude -p` runs non-interactively under the timer — no one can approve the write_db
     # permission prompt board-mirror.md's step triggers, so without a pre-grant every run dies
     # with "requires permission approval that was not granted" and no rows ever get written.
-    # Artifact has no finer specifier (unlike Bash's command patterns), so `Artifact` is the
-    # narrowest grant --allowedTools supports; this pins that flag so a future edit can't drop it.
+    # Artifact has no per-action approval bypass the way Bash has command patterns, so the only
+    # way to pre-clear its write_db approval headlessly is --permission-mode bypassPermissions,
+    # narrowed back down with --disallowedTools for everything this prompt has no business
+    # touching — this pins that shape so a future edit can't drop it and land back on the wall.
     run_script = _read("systemd", "run-board-mirror.sh")
-    m = re.search(r'"\$CLAUDE_BIN"\s+-p\s+(.*?)--output-format', run_script)
+    m = re.search(r'"\$CLAUDE_BIN"\s+-p\s+(.*?)--output-format', run_script, re.DOTALL)
     assert m, "expected a `claude -p ... --output-format` invocation in run-board-mirror.sh"
-    assert re.search(r"--allowedTools\s+Artifact\b", m.group(1)), (
-        f"claude -p invocation is missing --allowedTools Artifact: {m.group(1)!r}"
+    assert re.search(r"--permission-mode\s+bypassPermissions\b", m.group(1)), (
+        f"claude -p invocation is missing --permission-mode bypassPermissions: {m.group(1)!r}"
+    )
+    assert not re.search(r"--disallowedTools\b.*\bArtifact\b", m.group(1)), (
+        f"claude -p invocation disallows Artifact, the one tool the prompt needs: {m.group(1)!r}"
     )
 
 
@@ -172,14 +177,15 @@ def test_allowed_tools_cover_every_operation_the_prompt_actually_performs():
     prompt_body = re.sub(r"<!--.*?-->", "", doc, flags=re.DOTALL)
     assert not re.search(r"Run:\s*`?python3", prompt_body), (
         "board-mirror.md's prompt still tells Claude to run a shell command, but "
-        "run-board-mirror.sh only grants --allowedTools Artifact, not Bash"
+        "run-board-mirror.sh's --disallowedTools excludes Bash from the session"
     )
 
-    m = re.search(r'"\$CLAUDE_BIN"\s+-p\s+(.*?)--output-format', run_script)
+    m = re.search(r'"\$CLAUDE_BIN"\s+-p\s+(.*?)--output-format', run_script, re.DOTALL)
     assert m, "expected a `claude -p ... --output-format` invocation in run-board-mirror.sh"
-    assert not re.search(r"\bBash\b", m.group(1)), (
-        "run-board-mirror.sh grants Bash, but the prompt has no shell step for Claude to run — "
-        "board_state.py must run in the script itself, not need Bash inside the session"
+    assert re.search(r"--disallowedTools\b.*\bBash\b", m.group(1)), (
+        "run-board-mirror.sh does not disallow Bash, but the prompt has no shell step for "
+        "Claude to run — board_state.py must run in the script itself, not need Bash inside "
+        "the session"
     )
 
     # And the step board-mirror.md no longer runs must actually run somewhere: in the script.
@@ -205,15 +211,17 @@ def test_write_entries_are_spliced_in_without_backslash_reinterpretation():
     # evidence embeds literal `\"` sequences). Both `sed`'s replacement text and bash's
     # `${var/pat/string}` form treat backslashes specially and can silently drop them — this
     # bit exactly, corrupting the JSON mid-array. Splitting on the placeholder with `%%`/`#` and
-    # joining with plain `${WRITES}` expansion is the one form that doesn't reinterpret it.
+    # joining with plain `${DIFF_WRITES}` expansion is the one form that doesn't reinterpret it.
+    # (It's $DIFF_WRITES, not $WRITES, that gets spliced in — $WRITES is board_state.py's full
+    # output; $DIFF_WRITES is what board_mirror_diff.py cut it down to before the prompt is built.)
     run_script = _read("systemd", "run-board-mirror.sh")
-    assert "${WRITES}" in run_script or "$WRITES}" in run_script
-    assert not re.search(r"//<WRITE_ENTRIES_JSON>/\$\{?WRITES", run_script), (
-        "must not use ${PROMPT//<WRITE_ENTRIES_JSON>/$WRITES} — bash's pattern-substitution "
+    assert "${DIFF_WRITES}" in run_script or "$DIFF_WRITES}" in run_script
+    assert not re.search(r"//<WRITE_ENTRIES_JSON>/\$\{?DIFF_WRITES", run_script), (
+        "must not use ${PROMPT//<WRITE_ENTRIES_JSON>/$DIFF_WRITES} — bash's pattern-substitution "
         "replacement does backslash escaping that can corrupt JSON containing literal backslashes"
     )
     assert not re.search(r'sed\s+"s#<WRITE_ENTRIES_JSON>', run_script), (
-        "must not splice $WRITES through sed — its replacement text is backslash/& sensitive too"
+        "must not splice $DIFF_WRITES through sed — its replacement text is backslash/& sensitive too"
     )
 
 
@@ -235,6 +243,34 @@ def test_run_script_treats_anything_but_refresh_ok_as_failure():
     assert "exit 1" in run_script
     # A non-zero claude -p exit must not be swallowed.
     assert "exited non-zero" in run_script
+
+
+def test_env_example_documents_every_var_run_board_mirror_actually_needs():
+    # Regression guard for the incident: run-board-mirror.sh requires ARTIFACT_URL/PWT_REPO_ROOT
+    # loudly (`${VAR:?...}`), so a missing one there was already caught here mechanically. But
+    # CLAUDE_CODE_ENTRYPOINT is read by neither a shell `${...}` expansion nor an `os.environ`
+    # call anywhere in this repo — it's consumed by the `claude` binary itself, so grepping this
+    # repo's own source would never surface it as "needed" the way the mandatory-var loop below
+    # does. It's pinned here by name and exact value instead: 5 rounds of bisection over 27
+    # CLAUDE_* vars found this is the one (and only `claude-desktop`, not `cli`) that makes
+    # `Artifact` appear in `claude -p`'s tool list at all. Without it, every refresh dies at the
+    # write step with a misleading "Artifact tool is not available in this session" that reads
+    # like a permissions bug, not a missing env var.
+    run_script = _read("systemd", "run-board-mirror.sh")
+    example = _read("systemd", "board-mirror.env.example")
+
+    required = set(re.findall(r'\$\{([A-Z_][A-Z0-9_]*):\?', run_script))
+    assert required, "expected at least one mandatory ${VAR:?...} check in run-board-mirror.sh"
+    for var in required:
+        assert re.search(rf"^{var}=", example, re.MULTILINE), (
+            f"run-board-mirror.sh requires {var} but board-mirror.env.example never sets it"
+        )
+
+    assert re.search(r"^CLAUDE_CODE_ENTRYPOINT=claude-desktop$", example, re.MULTILINE), (
+        "board-mirror.env.example must set CLAUDE_CODE_ENTRYPOINT=claude-desktop — without it "
+        "claude -p has no Artifact tool at all (not a denied permission; the tool doesn't exist "
+        "for that session), and every refresh dies at the write step"
+    )
 
 
 def test_prompt_requires_the_refresh_ok_or_refresh_failed_sentinel():
