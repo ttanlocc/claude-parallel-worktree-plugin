@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """assert-based checks for board_state, the pure transform behind the artifact board."""
 
+import re
+
 from board_state import session_docs
 
 
@@ -908,3 +910,87 @@ def test_collect_degrades_manager_to_empty_without_blanking_other_sources():
 
     assert [w for w in writes if w["collection"] == "sessions"]
     assert writes[-1]["data"]["manager_session_id"] is None
+
+
+def _board_html_script():
+    """The board's freshness/alarm logic lives only in board.html's inline <script> — there is
+    no Python model of it to import, so these tests read the script text directly, the same way
+    test_dashboard.py checks dashboard.html."""
+    import pathlib
+
+    html = (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+    blocks = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
+    assert blocks, "board.html has no <script> block — did the file move?"
+    return "\n".join(blocks)
+
+
+def test_ado_cadence_matches_the_real_15_minute_cron():
+    """The cron that fills this board's db runs every 15 min (see board_state.py's sweep loop).
+    board.html previously hard-coded 30 min here, so every staleness check below was computed
+    from a baseline twice as long as reality."""
+    script = _board_html_script()
+    m = re.search(r"const ADO_CADENCE_S\s*=\s*([0-9]+)\s*\*\s*([0-9]+)", script)
+    assert m, "ADO_CADENCE_S declaration not found"
+    assert int(m.group(1)) * int(m.group(2)) == 15 * 60
+
+
+def test_ado_stale_threshold_is_30_minutes_not_90():
+    """A dead cron must be flagged after 30 min, not the old 90-minute (30min cadence x3)
+    threshold this page shipped with — 90 minutes of silently-stale data on a board people
+    trust at a glance is the actual bug being fixed here."""
+    script = _board_html_script()
+    cadence_m = re.search(r"const ADO_CADENCE_S\s*=\s*([0-9]+)\s*\*\s*([0-9]+)", script)
+    multiplier_m = re.search(r"const ADO_STALE_MULTIPLIER\s*=\s*([0-9]+)", script)
+    assert cadence_m and multiplier_m, "ADO cadence/multiplier constants not found"
+    cadence_s = int(cadence_m.group(1)) * int(cadence_m.group(2))
+    threshold_s = cadence_s * int(multiplier_m.group(1))
+    assert threshold_s == 30 * 60
+
+
+def test_stale_banner_markup_starts_hidden():
+    """The banner must exist in the initial markup and be hidden until JS decides ADO data is
+    stale — otherwise it either never appears (missing element) or flashes on every load
+    (missing `hidden`)."""
+    import pathlib
+
+    html = (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+    assert re.search(r'id="stale-banner"[^>]*\bhidden\b', html), (
+        "#stale-banner must be present and hidden by default in the markup"
+    )
+
+
+def test_stale_banner_uses_the_bad_tone_not_the_warn_tone():
+    """The banner has to read as an alarm, not the same soft warning tone the small freshness
+    chip already uses — otherwise it's just a second, bigger version of the thing people were
+    already ignoring."""
+    import pathlib
+
+    html = (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+    css_m = re.search(r"\.stale-banner\s*\{([^}]*)\}", html)
+    assert css_m, ".stale-banner CSS rule not found"
+    css = css_m.group(1)
+    assert "--bad-ink" in css or "--bad-soft" in css
+    assert "--warn-ink" not in css and "--warn-soft" not in css
+
+
+def test_render_stale_banner_hides_when_ado_is_fresh():
+    """The banner is a persistent DOM node re-rendered on the existing 30s tick, not a one-shot
+    alert — it must actively hide itself once data is fresh again, not just skip showing."""
+    script = _board_html_script()
+    assert "renderStaleBanner(adoInfo)" in script
+    assert "banner.hidden = true" in script
+    assert "banner.hidden = false" in script
+
+
+def test_freshness_info_treats_a_never_swept_source_as_stale():
+    """last_ado_sweep can be null (the sweep has literally never run once). That must still
+    read as stale and drive the banner — a null timestamp is the clearest possible sign the
+    cron never started, not a reason to stay quiet."""
+    script = _board_html_script()
+    m = re.search(
+        r'if \(ts == null\) return \{ text: "[^"]*", stale: (true|false), never: (true|false) \};',
+        script,
+    )
+    assert m, "freshnessInfo's null-timestamp branch not found"
+    assert m.group(1) == "true", "a never-swept source must be reported as stale"
+    assert m.group(2) == "true"

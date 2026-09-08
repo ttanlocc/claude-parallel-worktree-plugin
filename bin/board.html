@@ -201,6 +201,12 @@
   .state-note.is-good  { border-style: solid; border-color: var(--good-soft); background: var(--good-soft); color: var(--good-ink); font-weight: 600; }
   .state-note.is-error { border-style: solid; border-color: var(--bad-soft); background: var(--bad-soft); color: var(--bad-ink); font-weight: 600; }
 
+  .stale-banner {
+    margin-bottom: 12px; padding: 12px 16px; border-radius: var(--radius-m);
+    border: 1px solid var(--bad-ink); background: var(--bad-soft); color: var(--bad-ink);
+    font-weight: 600; font-size: var(--fs-sm);
+  }
+
   .unavailable {
     margin-top: 8px; padding: 32px 20px; text-align: center;
     border: 1px solid var(--bad-soft); background: var(--bad-soft); color: var(--bad-ink);
@@ -293,6 +299,7 @@
 </style>
 
 <div class="app">
+  <div class="stale-banner" id="stale-banner" hidden></div>
   <header class="topbar">
     <div class="topbar-row1">
       <div class="brand">
@@ -321,13 +328,15 @@
 <script>
 /* ---------- constants & vocab ---------- */
 
-// ADO sweeps every 15-30 min per the mirror's design; take the slow end as "normal" so a sweep
-// landing anywhere in that documented window never falsely reads as stale. Sessions have no
-// fixed cadence on paper ("update on events"), but board_state.py stamps last_session_scan on
-// every run of the same sweep loop that drives the ADO check, and the freshness copy this page
-// is specced against phrases session age in seconds — so 60s is the nominal tick assumed here.
-// Tighten if the scheduler's real interval is ever surfaced in meta/status itself.
-const ADO_CADENCE_S = 30 * 60;
+// The cron that populates this board's db runs every 15 min (see board_state.py). Two missed
+// runs (30 min) means the cron's session almost certainly died, not just a slow tick — that's
+// the hard alarm threshold, kept as a multiplier of the real cadence so it can't silently drift
+// out of sync if the cadence is ever retuned. Sessions have no fixed cadence on paper ("update
+// on events"), but board_state.py stamps last_session_scan on every run of the same sweep loop
+// that drives the ADO check, and the freshness copy this page is specced against phrases
+// session age in seconds — so 60s is the nominal tick assumed here.
+const ADO_CADENCE_S = 15 * 60;
+const ADO_STALE_MULTIPLIER = 2;
 const SESSION_CADENCE_S = 60;
 const STALE_MULTIPLIER = 3;
 
@@ -745,10 +754,10 @@ function renderSummary() {
   box.replaceChildren(...chips);
 }
 
-function freshnessInfo(ts, cadenceS) {
+function freshnessInfo(ts, staleThresholdS) {
   if (ts == null) return { text: "chưa từng chạy", stale: true, never: true };
   const s = ageSeconds(ts);
-  return { text: (ageText(ts) || "0 giây") + " trước", stale: s > cadenceS * STALE_MULTIPLIER, never: false };
+  return { text: (ageText(ts) || "0 giây") + " trước", stale: s > staleThresholdS, never: false };
 }
 function freshnessChip(label, info) {
   return h("span", { class: "pill " + (info.stale ? "pill-warn" : "pill-neutral") },
@@ -758,6 +767,26 @@ function freshnessChip(label, info) {
     }, " ⚠") : null);
 }
 
+// Big, hard-to-miss alarm for ADO staleness — the small chip above is easy to miss, and a dead
+// cron leaves the rest of the board looking perfectly normal for as long as the tab stays open.
+function renderStaleBanner(adoInfo) {
+  const banner = document.getElementById("stale-banner");
+  if (!banner) return;
+  if (!adoInfo || !adoInfo.stale) {
+    banner.hidden = true;
+    banner.replaceChildren();
+    return;
+  }
+  const detail = adoInfo.never
+    ? "chưa từng ghi nhận lần đồng bộ nào"
+    : "chưa cập nhật trong " + (adoInfo.text.replace(/ trước$/, ""));
+  banner.hidden = false;
+  banner.replaceChildren(
+    "⚠ Dữ liệu ADO có thể đã lỗi thời: " + detail +
+      " — nhiều khả năng phiên chạy cron đồng bộ đã bị đóng."
+  );
+}
+
 function renderFreshness() {
   const box = document.getElementById("freshness");
   if (!box) return;
@@ -765,10 +794,12 @@ function renderFreshness() {
     // onErr resets view.meta to [] (it is written generically for all four sources), which is
     // truthy — check the error flag directly rather than let that accidentally read as data.
     box.replaceChildren(pill("pill-bad", "Không đọc được trạng thái nguồn — kiểm tra console."));
+    renderStaleBanner(null);
     return;
   }
   if (!view.meta) {
     box.replaceChildren(pill("pill-neutral", view.loaded.meta ? "chưa có meta/status" : "đang tải trạng thái nguồn…"));
+    renderStaleBanner(null);
     return;
   }
   const m = view.meta;
@@ -777,11 +808,13 @@ function renderFreshness() {
         (m.manager_started_at ? " · lên " + (ageText(m.manager_started_at) || "?") + " trước" : ""))
     : pill("pill-warn", "Manager: chưa có phiên nào nhận việc");
 
+  const adoInfo = freshnessInfo(m.last_ado_sweep, ADO_CADENCE_S * ADO_STALE_MULTIPLIER);
   box.replaceChildren(
-    freshnessChip("ADO", freshnessInfo(m.last_ado_sweep, ADO_CADENCE_S)),
-    freshnessChip("Phiên", freshnessInfo(m.last_session_scan, SESSION_CADENCE_S)),
+    freshnessChip("ADO", adoInfo),
+    freshnessChip("Phiên", freshnessInfo(m.last_session_scan, SESSION_CADENCE_S * STALE_MULTIPLIER)),
     managerChip,
   );
+  renderStaleBanner(adoInfo);
 }
 
 /* ---------- render ---------- */
