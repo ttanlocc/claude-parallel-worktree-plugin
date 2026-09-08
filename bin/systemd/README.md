@@ -1,6 +1,6 @@
 # board-mirror systemd user timer
 
-Runs the refresh described in `bin/board-mirror.md` every 3 minutes, independent of any Claude
+Runs the refresh described in `bin/board-mirror.md` every 5 minutes, independent of any Claude
 session — replaces the session-scoped `CronCreate` job that died when its session exited (see
 board-mirror.md's Scheduling section for what that cost).
 

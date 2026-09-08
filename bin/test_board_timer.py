@@ -21,27 +21,67 @@ def _read(*parts):
         return f.read()
 
 
-def test_timer_cadence_is_three_minutes_off_the_round_marks():
+def test_timer_cadence_is_five_minutes_off_the_round_marks():
     timer = _read("systemd", "board-mirror.timer")
     m = re.search(r"^OnCalendar=(.+)$", timer, re.MULTILINE)
     assert m, "board-mirror.timer must set OnCalendar"
     spec = m.group(1).strip()
-    # */1/3 minute step off an offset that is not 0 — :00/:03/:06/... is the round-mark grid this
+    # */2/5 minute step off an offset that is not 0 — :00/:05/:10/... is the round-mark grid this
     # must avoid, same reasoning as the old cron's 7/22/37/52.
-    step_match = re.search(r"\*:(\d+)/3:", spec)
-    assert step_match, f"expected a '*:<offset>/3:...' minute step in OnCalendar, got {spec!r}"
+    step_match = re.search(r"\*:(\d+)/5:", spec)
+    assert step_match, f"expected a '*:<offset>/5:...' minute step in OnCalendar, got {spec!r}"
     offset = int(step_match.group(1))
-    assert offset % 3 != 0, f"offset {offset} still lands on the round 3-minute marks"
+    assert offset % 5 != 0, f"offset {offset} still lands on the round 5-minute marks"
 
 
 def test_doc_and_unit_agree_on_the_cadence():
     doc = _read("board-mirror.md")
     timer = _read("systemd", "board-mirror.timer")
-    assert "Every 3 minutes" in doc, "the doc must state the CURRENT cadence as 3 minutes"
-    # "15 minutes" may still appear as history ("This was 15 minutes...") but must not be stated
-    # as the live cadence.
+    assert "Every 5 minutes" in doc, "the doc must state the CURRENT cadence as 5 minutes"
+    # "15 minutes" / "3 minutes" may still appear as history ("This was 15 minutes...", "tightened
+    # to 3 minutes") but must not be stated as the live cadence.
     assert "Every 15 minutes" not in doc
-    assert re.search(r"\*:\d+/3:", timer), "the unit file must actually run every 3 minutes"
+    assert "Every 3 minutes" not in doc
+    assert re.search(r"\*:\d+/5:", timer), "the unit file must actually run every 5 minutes"
+
+
+def test_doc_unit_and_readme_state_the_same_cadence_number():
+    # Regression guard for exactly the drift that prompted this test: the installed timer's
+    # OnCalendar step and every prose mention of the cadence must name the same number of
+    # minutes, or an operator reinstalling from the repo silently reverts the live schedule.
+    doc = _read("board-mirror.md")
+    timer = _read("systemd", "board-mirror.timer")
+    readme = _read("systemd", "README.md")
+
+    step_match = re.search(r"\*:\d+/(\d+):", timer)
+    assert step_match, "board-mirror.timer must set a '*:<offset>/<n>:00' OnCalendar step"
+    cadence = step_match.group(1)
+
+    assert f"every {cadence} minutes" in readme, (
+        f"README.md must say 'every {cadence} minutes' to match the unit's OnCalendar step"
+    )
+    assert f"Every {cadence} minutes" in doc, (
+        f"board-mirror.md must say 'Every {cadence} minutes' to match the unit's OnCalendar step"
+    )
+
+
+def test_service_timeout_is_comfortably_under_the_timer_cadence():
+    # TimeoutStartSec must stay below the cadence in seconds, or an overlapping fire can queue
+    # up behind a run that's still allowed to be going.
+    timer = _read("systemd", "board-mirror.timer")
+    service = _read("systemd", "board-mirror.service")
+
+    step_match = re.search(r"\*:\d+/(\d+):", timer)
+    assert step_match, "board-mirror.timer must set a '*:<offset>/<n>:00' OnCalendar step"
+    cadence_seconds = int(step_match.group(1)) * 60
+
+    timeout_match = re.search(r"^TimeoutStartSec=(\d+)$", service, re.MULTILINE)
+    assert timeout_match, "board-mirror.service must set TimeoutStartSec"
+    timeout_seconds = int(timeout_match.group(1))
+
+    assert timeout_seconds < cadence_seconds, (
+        f"TimeoutStartSec={timeout_seconds} must be under the {cadence_seconds}s timer cadence"
+    )
 
 
 def test_env_var_names_match_what_board_state_and_dashboard_actually_read():

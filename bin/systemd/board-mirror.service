@@ -14,5 +14,5 @@ EnvironmentFile=%h/.config/board-mirror/env
 # this path fixed under ~/.config means the unit file never hardcodes where this repo happens to
 # be checked out, and survives the repo moving as long as the symlink is redone.
 ExecStart=%h/.config/board-mirror/run-board-mirror.sh
-# Comfortably under the 3-minute timer cadence: a hung run must not block every later fire.
-TimeoutStartSec=150
+# Comfortably under the 5-minute timer cadence: a hung run must not block every later fire.
+TimeoutStartSec=240

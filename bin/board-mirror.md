@@ -42,17 +42,20 @@ failed refresh must leave the previous rows standing rather than write partial s
 <!--
   Scheduling
 
-  Every 3 minutes, on :01/:04/:07/.../:58 rather than the round marks — every job that asks for
-  "every 3 minutes" lands on :00/:03/:06/..., and there is no reason to join that queue. See
+  Every 5 minutes, on :02/:07/:12/.../:57 rather than the round marks — every job that asks for
+  "every 5 minutes" lands on :00/:05/:10/..., and there is no reason to join that queue. See
   bin/systemd/board-mirror.timer's OnCalendar for the actual schedule; keep this note and that
   file in agreement if either changes.
 
   This was 15 minutes, set by the ADO sweep being the only slow source. The CTO tightened it to
   3 minutes because the board's planned "Refresh" button runs inside the sandboxed artifact page,
   which cannot pull ADO itself — it can only replay whatever this job already wrote — so this
-  job's own interval is the ceiling on how fresh a manual refresh can ever look. Sessions and
-  escalations still reach the board through the manager on events, not through this job; only the
-  ADO-sourced rows depend on this cadence.
+  job's own interval is the ceiling on how fresh a manual refresh can ever look. The owner then
+  eased it back to 5 minutes: at 3 minutes this was ~480 `claude -p` sessions a day just to shuttle
+  a JSON array into the artifact db, too expensive for a board people glance at a few times a day;
+  5 minutes cuts that to ~288 while staying fresh enough. Sessions and escalations still reach the
+  board through the manager on events, not through this job; only the ADO-sourced rows depend on
+  this cadence.
 
   KNOWN LIMIT (retired) — CronCreate is session-scoped. The job lived in the Claude session that
   created it: nothing was written to disk, it died when that session exited, and it auto-expired
