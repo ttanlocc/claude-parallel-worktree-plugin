@@ -334,6 +334,51 @@ def get_ado_backlog() -> list[dict]:
         return []
 
 
+def _iteration_leaves(node: dict) -> list[dict]:
+    """Every leaf iteration under `node`, walked recursively. This project's tree is flat today
+    (verified live: every child is already a leaf) but a group node is exactly as valid a shape
+    for `az` to hand back, and assuming one level deep would silently drop half the tree the day
+    this project (or another one this ever gets pointed at) organises iterations under a release
+    node. Each leaf keeps only what board_state.py's date math needs — name, start, finish — the
+    date parsing itself stays out of this file, same split as `_shape_ado_ticket` vs. the pure
+    transforms in board_state.py."""
+    children = node.get("children") or []
+    if not children:
+        attrs = node.get("attributes") or {}
+        return [{"name": node.get("name"), "start": attrs.get("startDate"), "finish": attrs.get("finishDate")}]
+    leaves = []
+    for child in children:
+        leaves.extend(_iteration_leaves(child))
+    return leaves
+
+
+def get_ado_iterations() -> list[dict]:
+    """Every sprint/iteration this project defines, with its date range — the ONLY place sprint
+    boundaries live. A ticket's `System.IterationPath` is just a name; ADO never puts a date on
+    the ticket itself, so knowing which sprint is "today" requires this separate lookup. Same
+    degrade-to-empty contract as get_ado_backlog(): `az` failing must not blank the board, it
+    just leaves board_state.py unable to compute a default sprint filter."""
+
+    def run():
+        result = subprocess.run(
+            [
+                "az", "boards", "iteration", "project", "list",
+                "--project", _ADO_PROJECT, "--org", _ADO_ORG, "--depth", "3", "-o", "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            return []
+        return _iteration_leaves(json.loads(result.stdout))
+
+    try:
+        return _cached("ado_iterations", run, ttl=60.0)
+    except _SUBPROC_ERRORS:
+        return []
+
+
 def get_tasks() -> list[dict]:
     """Sessions running in this repo, enriched with registry data where it exists.
 

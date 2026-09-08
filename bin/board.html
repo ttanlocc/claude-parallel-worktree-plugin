@@ -495,6 +495,10 @@ view.errors = { sessions: false, escalations: false, tickets: false, assignments
 view.refresh = { busy: false, error: null };
 
 const ticketFilters = { sprint: "", state: "" };
+// Applied once, the first time meta/status loads — after that the filter is the viewer's to
+// drive. Without this guard, every later meta/status update (the pump ticks every ~15 min) would
+// stomp a manual "tất cả" back to the sprint default.
+let sprintFilterDefaulted = false;
 
 /* ---------- small state-note builders ---------- */
 function loadingNote(text) { return h("p", { class: "state-note is-loading" }, text); }
@@ -1036,7 +1040,21 @@ const SOURCES = [
   { key: "escalations", ref: (db) => db.collection("escalations"), apply: (s) => { view.escalations = docsOf(s); } },
   { key: "tickets", ref: (db) => db.collection("tickets"), apply: (s) => { view.tickets = docsOf(s); } },
   { key: "assignments", ref: (db) => db.collection("assignments"), apply: (s) => { view.assignments = docsOf(s); } },
-  { key: "meta", ref: (db) => db.doc("meta/status"), apply: (s) => { view.meta = s.exists ? s.data() : null; } },
+  {
+    key: "meta",
+    ref: (db) => db.doc("meta/status"),
+    apply: (s) => {
+      view.meta = s.exists ? s.data() : null;
+      // board_state.py already worked out which sprint is "today" AND whether the backlog has
+      // anything in it — see resolve_default_sprint() — so this just takes that value verbatim.
+      // Once only: a later meta/status update must not override a filter the viewer has since
+      // changed by hand.
+      if (!sprintFilterDefaulted) {
+        sprintFilterDefaulted = true;
+        if (view.meta && view.meta.default_sprint) ticketFilters.sprint = view.meta.default_sprint;
+      }
+    },
+  },
 ];
 
 // Manual re-read: the same sources, redrawn through the same render() the 30s tick already uses.

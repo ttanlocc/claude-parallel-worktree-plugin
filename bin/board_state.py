@@ -9,6 +9,7 @@ import glob
 import json
 import os
 import re
+from datetime import UTC, date, datetime
 
 from assignments import LEDGER_PATH, PRIORITIES, at_risk, progress, stalled
 from escalations import QUEUE_PATH, classify, current_state, normalize_kind, normalize_options, read_all
@@ -494,7 +495,55 @@ def ticket_docs(tickets: list[dict], pr_by_ticket: dict) -> dict[str, dict]:
     return docs
 
 
-def meta_status(now: float, ado_swept_at=None, sessions_scanned_at=None, manager=None) -> dict:
+def _iter_date(value) -> date | None:
+    """An ADO iteration date ("2026-09-07T00:00:00Z") cut down to its calendar date, or None for
+    anything not shaped like one. ADO's own granularity here is the day — ISO dates always land
+    on midnight UTC — so the time-of-day component carries no information worth keeping."""
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def current_sprint_name(iterations: list[dict], now: float) -> str | None:
+    """The leaf name of whichever ADO iteration's date range contains today, or None.
+
+    None covers two real cases the same way: today falling in the gap between two sprints (this
+    project has one — Sprint 57 ends 09-04, Sprint 58 starts 09-07), and an iteration that has
+    never had dates set at all. Either way there is no honest sprint to default to.
+
+    `iterations` entries are already the leaf shape `dashboard.get_ado_iterations()` returns —
+    {"name", "start", "finish"} — so the value returned here compares equal, with no further
+    reshaping, to `_shape_ado_ticket()`'s own `sprint` field (see resolve_default_sprint()).
+    """
+    today = datetime.fromtimestamp(now, tz=UTC).date()
+    for it in iterations or []:
+        start = _iter_date(it.get("start"))
+        finish = _iter_date(it.get("finish"))
+        if start and finish and start <= today <= finish:
+            name = it.get("name")
+            return str(name) if name else None
+    return None
+
+
+def resolve_default_sprint(iterations: list[dict], tickets: dict[str, dict], now: float) -> str | None:
+    """The sprint the backlog filter should open on, or None to mean "tất cả".
+
+    Today's ADO sprint, but only when the backlog actually has a ticket in it — an empty table
+    under an auto-picked filter reads exactly like a broken board, not a filtered one, and "tất
+    cả" is the honest fallback the page already has a word for.
+    """
+    sprint = current_sprint_name(iterations, now)
+    if sprint is None:
+        return None
+    if not any((t or {}).get("sprint") == sprint for t in (tickets or {}).values()):
+        return None
+    return sprint
+
+
+def meta_status(now: float, ado_swept_at=None, sessions_scanned_at=None, manager=None, default_sprint=None) -> dict:
     """When each source was last read, and who the manager is.
 
     One document, several clocks: the page shows the age of each source separately, because a
@@ -508,6 +557,7 @@ def meta_status(now: float, ado_swept_at=None, sessions_scanned_at=None, manager
         "last_session_scan": sessions_scanned_at,
         "manager_session_id": manager.get("session_id"),
         "manager_started_at": manager.get("started_at"),
+        "default_sprint": default_sprint,
     }
 
 
@@ -522,6 +572,7 @@ def build_writes(
     manager=None,
     assignments=None,
     usage_by_session=None,
+    iterations=None,
 ) -> list[dict]:
     """Every document to write, in the order to write it.
 
@@ -530,10 +581,11 @@ def build_writes(
     a thin courier.
     """
     writes = []
+    tickets_docs = ticket_docs(tickets, pr_by_ticket)
     for collection, docs in (
         ("sessions", session_docs(agents, registry)),
         ("escalations", escalation_docs(escalations)),
-        ("tickets", ticket_docs(tickets, pr_by_ticket)),
+        ("tickets", tickets_docs),
         ("assignments", assignment_docs(assignments, now, registry, usage_by_session)),
     ):
         for doc_id, data in docs.items():
@@ -550,6 +602,7 @@ def build_writes(
                 ado_swept_at=ado_swept_at,
                 sessions_scanned_at=now,
                 manager=manager,
+                default_sprint=resolve_default_sprint(iterations or [], tickets_docs, now),
             ),
         }
     )
@@ -586,6 +639,7 @@ def collect(
     read_manager=dict,
     read_assignments=list,
     read_usage=lambda registry: {},
+    read_iterations=list,
 ) -> list[dict]:
     """Gather every source and return the write set. Readers are injected so this is testable
     without `az`, `gh`, or a live session.
@@ -593,10 +647,12 @@ def collect(
     `read_manager` defaults to `dict` (a zero-arg callable returning `{}`, the same idiom
     `read_prs=dict` already uses elsewhere) so every existing caller that has no manager reader
     to give keeps getting the same null manager fields as before this parameter existed.
-    `read_assignments` defaults to `list` for the same reason. `read_usage` is the one reader
-    that takes an argument — the registry, because the join from a plan step's `owner` to a
-    session transcript runs through it, and reading the registry a second time inside the reader
-    would let the two copies disagree about which task owns which session.
+    `read_assignments` defaults to `list` for the same reason, and so does `read_iterations`:
+    a caller with no iteration reader gets `default_sprint: None` — the page falls back to "tất
+    cả", not an error. `read_usage` is the one reader that takes an argument — the registry,
+    because the join from a plan step's `owner` to a session transcript runs through it, and
+    reading the registry a second time inside the reader would let the two copies disagree about
+    which task owns which session.
     """
     tickets = _safe(read_tickets, None, "tickets")
     registry = _safe(read_registry, {}, "registry")
@@ -615,6 +671,10 @@ def collect(
         # {} on failure, not zeroed totals: every assignment then reads "chưa rõ" rather than
         # claiming a measured spend of nothing.
         usage_by_session=_safe(lambda: read_usage(registry), {}, "usage"),
+        # [] on failure: az being unreachable degrades default_sprint to null, same as no
+        # current sprint at all — it must never blank the sessions/escalations/tickets already
+        # gathered above.
+        iterations=_safe(read_iterations, [], "iterations"),
     )
 
 
@@ -694,6 +754,7 @@ def main() -> int:
         # record AND lets it find the oldest one to measure elapsed time from.
         read_assignments=lambda: read_all(LEDGER_PATH),
         read_usage=read_usage,
+        read_iterations=dashboard.get_ado_iterations,
     )
     json.dump(writes, sys.stdout, ensure_ascii=False)
     return 0

@@ -404,6 +404,78 @@ def test_meta_status_reports_a_source_that_has_never_run_as_null_not_as_now():
     assert doc["written_at"] == 1000.0
 
 
+def test_meta_status_carries_the_default_sprint_field():
+    doc = meta_status(now=1000.0, default_sprint="Sprint 58")
+    assert doc["default_sprint"] == "Sprint 58"
+
+
+def test_meta_status_default_sprint_is_null_by_default():
+    """Every call site written before this parameter existed must keep working unchanged."""
+    doc = meta_status(now=1000.0)
+    assert doc["default_sprint"] is None
+
+
+# --- current_sprint_name / resolve_default_sprint --------------------------------------------
+#
+# board.html cannot know which ADO sprint is "today" — the boundary lives in ADO, not in the
+# sandbox's Date object — so board_state.py must compute it and stamp it onto meta/status for
+# the page to read as the backlog filter's starting value.
+
+from datetime import UTC, datetime
+
+from board_state import current_sprint_name, resolve_default_sprint
+
+
+def _ts(year, month, day):
+    return datetime(year, month, day, 12, tzinfo=UTC).timestamp()
+
+
+# Real dates from this project's own iteration list (verified live 2026-09-08): Sprint 57 runs
+# 08-31..09-04, Sprint 58 runs 09-07..09-11 — a real two-day gap (09-05/09-06) sits between them.
+ITERATIONS = [
+    {"name": "Sprint 57", "start": "2026-08-31T00:00:00Z", "finish": "2026-09-04T00:00:00Z"},
+    {"name": "Sprint 58", "start": "2026-09-07T00:00:00Z", "finish": "2026-09-11T00:00:00Z"},
+    {"name": "Sprint 59", "start": "2026-09-14T00:00:00Z", "finish": "2026-09-18T00:00:00Z"},
+]
+
+
+def test_current_sprint_name_picks_the_iteration_whose_range_contains_today():
+    assert current_sprint_name(ITERATIONS, _ts(2026, 9, 8)) == "Sprint 58"
+
+
+def test_current_sprint_name_is_null_in_the_gap_between_two_sprints():
+    assert current_sprint_name(ITERATIONS, _ts(2026, 9, 5)) is None
+
+
+def test_current_sprint_name_is_null_when_the_iteration_has_no_dates():
+    undated = [{"name": "Sprint 58", "start": None, "finish": None}]
+    assert current_sprint_name(undated, _ts(2026, 9, 8)) is None
+
+
+def test_current_sprint_name_is_null_on_an_empty_iteration_list():
+    """`az` failed (see collect()'s degrade path below) — no iterations to check at all."""
+    assert current_sprint_name([], _ts(2026, 9, 8)) is None
+
+
+def test_resolve_default_sprint_matches_leaf_shape_a_ticket_sprint_already_carries():
+    """`_shape_ado_ticket()` already cuts a ticket's sprint to the leaf name ("Sprint 58", not
+    "AgentIQ\\Sprint 58") — the stamped default must compare equal to that, not to a path."""
+    tickets = {"1": {"sprint": "Sprint 58"}}
+    assert resolve_default_sprint(ITERATIONS, tickets, _ts(2026, 9, 8)) == "Sprint 58"
+
+
+def test_resolve_default_sprint_falls_back_to_all_when_current_sprint_has_no_tickets():
+    """An empty table under an auto-picked filter reads exactly like a broken board — falling
+    back to null ("tất cả") is safer than a technically-correct empty view."""
+    tickets = {"1": {"sprint": "Sprint 57"}}  # nothing in Sprint 58
+    assert resolve_default_sprint(ITERATIONS, tickets, _ts(2026, 9, 8)) is None
+
+
+def test_resolve_default_sprint_is_null_when_there_is_no_current_sprint():
+    tickets = {"1": {"sprint": "Sprint 57"}}
+    assert resolve_default_sprint(ITERATIONS, tickets, _ts(2026, 9, 5)) is None
+
+
 from board_state import build_writes
 
 
@@ -526,6 +598,27 @@ def test_build_writes_leaves_ado_swept_at_null_when_never_swept():
     writes = build_writes(agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1234.0)
 
     assert writes[-1]["data"]["last_ado_sweep"] is None
+
+
+def test_build_writes_stamps_default_sprint_from_iterations_and_tickets():
+    writes = build_writes(
+        agents=[],
+        registry={},
+        escalations=[],
+        tickets=[{"id": "1", "title": "t", "state": "New", "sprint": "Sprint 58", "url": "u"}],
+        pr_by_ticket={},
+        now=_ts(2026, 9, 8),
+        iterations=ITERATIONS,
+    )
+
+    assert writes[-1]["data"]["default_sprint"] == "Sprint 58"
+
+
+def test_build_writes_default_sprint_is_null_without_an_iterations_reader():
+    """Every call site written before this parameter existed must keep working unchanged."""
+    writes = build_writes(agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1000.0)
+
+    assert writes[-1]["data"]["default_sprint"] is None
 
 
 def test_build_writes_emits_exactly_one_entry_per_document_with_no_duplicates_or_drops():
@@ -1415,6 +1508,60 @@ def test_collect_needs_no_assignments_reader_from_an_existing_caller():
     )
     assert not _writes_for(writes, "assignments")
     assert writes[-1]["collection"] == "meta"
+
+
+def test_collect_wires_the_iterations_reader_into_default_sprint():
+    from board_state import collect
+
+    writes = collect(
+        read_agents=list,
+        read_registry=dict,
+        read_escalations=list,
+        read_tickets=lambda: [{"id": "1", "title": "t", "state": "New", "sprint": "Sprint 58", "url": "u"}],
+        read_prs=dict,
+        now=lambda: _ts(2026, 9, 8),
+        read_iterations=lambda: ITERATIONS,
+    )
+    assert writes[-1]["data"]["default_sprint"] == "Sprint 58"
+
+
+def test_collect_degrades_iterations_to_empty_without_blanking_other_sources():
+    """`az` failing on the iteration lookup (not logged in, network down) must not blank the
+    board — same contract as every other reader in collect()."""
+    from board_state import collect
+
+    def boom():
+        raise OSError("az not logged in")
+
+    writes = collect(
+        read_agents=lambda: [{"name": "t1", "state": "idle"}],
+        read_registry=dict, read_escalations=list, read_tickets=list, read_prs=dict,
+        now=lambda: 500.0, read_iterations=boom,
+    )
+    assert _writes_for(writes, "sessions")
+    assert writes[-1]["data"]["default_sprint"] is None
+    assert writes[-1]["collection"] == "meta"
+
+
+def test_collect_needs_no_iterations_reader_from_an_existing_caller():
+    """Every call site written before this parameter existed must keep working unchanged."""
+    from board_state import collect
+
+    writes = collect(
+        read_agents=list, read_registry=dict, read_escalations=list, read_tickets=list,
+        read_prs=dict, now=lambda: 200.0,
+    )
+    assert writes[-1]["data"]["default_sprint"] is None
+
+
+def test_main_wires_an_iterations_reader_for_the_default_sprint():
+    import inspect
+
+    import board_state
+
+    src = inspect.getsource(board_state.main)
+    assert "read_iterations" in src, "main() never wires an iterations reader"
+    assert "get_ado_iterations" in src
 
 
 def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
