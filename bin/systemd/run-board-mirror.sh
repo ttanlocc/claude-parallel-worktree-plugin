@@ -16,8 +16,9 @@
 # for why) — the session downstream still just replays whatever array it's handed, same as before.
 #
 # Failure must be loud: any of {missing env, board_state.py failing, a broken claude -p
-# invocation, a reply that isn't exactly REFRESH_OK} exits non-zero, so a failed run shows up as
-# `systemctl --user status` "failed" and in the journal — not as a quietly stale board.
+# invocation, a reply with no REFRESH_OK line anywhere in it} exits non-zero, so a failed run
+# shows up as `systemctl --user status` "failed" and in the journal — not as a quietly stale
+# board.
 set -euo pipefail
 
 # README step 2 symlinks this script into ~/.config/board-mirror/ — dirname on BASH_SOURCE alone
@@ -110,8 +111,15 @@ if not isinstance(result, str):
 print(result)
 ' <<<"$RAW_OUTPUT")" || exit 1
 
-if [[ "$RESULT" == REFRESH_OK:* ]]; then
-  echo "run-board-mirror: $RESULT"
+# board-mirror.md now asks for a bare one-line reply, but the model isn't guaranteed to comply —
+# a live run answered with a lead-in sentence before the REFRESH_OK line. Match REFRESH_OK: as a
+# substring of any line, not just an exact-match whole string, so a stray prefix doesn't get read
+# as failure (which, via the snapshot-only-on-success write below, would silently defeat the
+# whole diff-instead-of-full-resend point of this script forever). REFRESH_FAILED or no
+# REFRESH_OK anywhere still falls through to the failure branch below.
+OK_LINE="$(grep -m1 'REFRESH_OK:' <<<"$RESULT" || true)"
+if [[ -n "$OK_LINE" ]]; then
+  echo "run-board-mirror: $OK_LINE"
   # Snapshot the FULL write set (not $DIFF_WRITES) only now, after the write actually landed —
   # this is $WRITES, board_state.py's complete output, so next run's diff has every current
   # doc_id to compare against, not just the ones this run happened to send. Updating this before

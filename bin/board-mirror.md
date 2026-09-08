@@ -38,8 +38,9 @@ Refresh the manager board. Do exactly this and nothing else.
 
    <WRITE_ENTRIES_JSON>
 
-2. Report exactly one line, starting with one of these two exact prefixes so a script can tell
-   success from failure without parsing prose:
+2. Reply with exactly one line and nothing else — no lead-in sentence, no summary, no
+   markdown — starting with one of these two exact prefixes so a script can tell success from
+   failure without parsing prose:
    - `REFRESH_OK: wrote <N> documents, last_ado_sweep=<value>` on success.
    - `REFRESH_FAILED: <error>` if the write fails.
 
