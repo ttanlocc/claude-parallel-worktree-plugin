@@ -139,6 +139,14 @@ def test_example_env_is_a_template_not_a_real_config():
     assert "/absolute/path/to/aiquinta-platform" in example_env
 
 
+def test_readme_config_step_covers_the_multi_identity_env_var():
+    readme = _read("systemd", "README.md")
+    # The config step (step 1) only walks through ARTIFACT_URL and PWT_REPO_ROOT by name;
+    # PWR_ADO_ASSIGNED_TO must be called out there too, or installers who don't hold a second
+    # ADO identity themselves will skip it and ship a silently half-empty board for whoever does.
+    assert "PWR_ADO_ASSIGNED_TO" in readme
+
+
 def test_readme_makes_linger_a_mandatory_step_with_the_privilege_it_needs():
     readme = _read("systemd", "README.md")
     assert "enable-linger" in readme

@@ -33,6 +33,11 @@ chmod 600 ~/.config/board-mirror/env
 $EDITOR ~/.config/board-mirror/env   # fill in ARTIFACT_URL and PWT_REPO_ROOT for real
 ```
 
+If you hold more than one ADO identity, also set `PWR_ADO_ASSIGNED_TO` in that file to a
+comma-separated list of all of them. Left unset, the WIQL query falls back to `@Me`, which
+matches only the identity `az` is currently logged in as — tickets under any other identity
+of the same person go missing from the board with no error.
+
 ## 2. Symlink the run script and unit files
 
 ```
