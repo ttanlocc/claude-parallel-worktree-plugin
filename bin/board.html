@@ -301,6 +301,17 @@
   details.collapsed-group[open] > summary::before { content: "▾"; }
   details.collapsed-group > summary:hover { color: var(--ink); }
 
+  /* An assignment card IS its summary line until clicked, so that line carries pills and several
+     facts and has to be allowed to wrap on a narrow board. The card's own padding is the group's,
+     so the details block sits flush inside it. */
+  .esc-card.a-card { padding: 6px 14px; }
+  .a-card > details.collapsed-group { margin-top: 0; }
+  .a-card > details.collapsed-group > summary { flex-wrap: wrap; font-weight: 500; }
+  .a-card .a-title { font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
+  .a-card .a-facts { font-size: var(--fs-sm); color: var(--ink-soft); font-weight: 400; }
+  .a-card > details.collapsed-group[open] > summary { border-bottom: 1px dashed var(--border-soft); }
+  .a-card > details.collapsed-group > :not(summary) { margin-top: 6px; }
+
   @media (max-width: 640px) {
     .app { padding: 14px 14px 44px; }
     .freshness-strip { margin-left: 0; }
@@ -432,15 +443,26 @@ function ageSeconds(unixSeconds) {
   if (unixSeconds == null || !isFinite(unixSeconds)) return null;
   return Math.max(0, Date.now() / 1000 - unixSeconds);
 }
-function ageText(unixSeconds) {
-  const s = ageSeconds(unixSeconds);
-  if (s == null) return null;
+function durationText(s) {
+  if (s == null || !isFinite(s)) return null;
   if (s < 60) return Math.floor(s) + " giây";
   const m = s / 60;
   if (m < 60) return Math.round(m) + " phút";
   const hr = m / 60;
   if (hr < 48) return Math.round(hr) + " giờ";
   return Math.round(hr / 24) + " ngày";
+}
+function ageText(unixSeconds) {
+  return durationText(ageSeconds(unixSeconds));
+}
+// "1,2 tr" / "340 k". A token count printed raw is eight to nine digits — unreadable at a
+// glance, and unreadable is exactly what let a bogus total look plausible. Vietnamese decimal
+// comma, so "1,2" is one point two, not one thousand two hundred.
+function tokenText(n) {
+  if (typeof n !== "number" || !isFinite(n)) return null;
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(".", ",") + " tr";
+  if (n >= 1000) return Math.round(n / 1000) + " k";
+  return String(Math.round(n));
 }
 function numId(id) {
   const n = parseInt(String(id).replace(/\D/g, ""), 10);
@@ -576,25 +598,54 @@ function assignmentCard(a) {
   const known = Object.prototype.hasOwnProperty.call(ASSIGNMENT_STATUS_LABEL, a.status);
   const steps = Array.isArray(a.plan) ? a.plan : [];
   const refs = Array.isArray(a.ado_refs) ? a.ado_refs : [];
-  // progress / at_risk / stalled are computed by board_state.py from these very steps and only
-  // shown here, never recomputed — one derivation, so the number and the step list under it
-  // cannot disagree, and neither can the board and the pump.
+  // progress / at_risk / stalled / elapsed_seconds / tokens / eta are all computed by
+  // board_state.py from these very steps and only shown here, never recomputed — the page cannot
+  // read a ledger or a transcript, and one derivation means the numbers and the step list under
+  // them cannot disagree.
   const pct = typeof a.progress === "number" ? Math.round(a.progress * 100) : null;
   const doneSteps = steps.filter((s) => s.state === "done").length;
+  const tokens = a.tokens && typeof a.tokens === "object" ? a.tokens : null;
+  const eta = a.eta && typeof a.eta === "object" ? a.eta : null;
 
-  return h("div", { class: "esc-card sev-" + sev },
-    h("div", { class: "esc-top" },
-      pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
-      pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
-        known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
-      a.at_risk ? pill("pill-bad", "trễ hạn") : null,
-      a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
-      h("span", { class: "esc-wait mono" },
-        pct == null ? "chưa có kế hoạch" : doneSteps + "/" + steps.length + " bước · " + pct + "%"),
-    ),
-    h("div", { class: "esc-question" }, a.title || "(không có tiêu đề)"),
+  // "chưa rõ", never "0": 0 is a measurement that came back empty, and no transcript is not a
+  // measurement at all. `partial` means some owner session's transcript was unreadable, so the
+  // sum is a floor — "≥" rather than a total presented as complete.
+  const spend = tokens ? tokenText(tokens.spend) : null;
+  const spendText = spend == null ? "chưa rõ" : (tokens.partial ? "≥ " : "") + spend;
+  const cacheText = tokens && tokens.cache_read ? tokenText(tokens.cache_read) + " đọc lại từ cache" : null;
+
+  // Free text a person wrote, shown verbatim — there is no date in "2-3 giờ" or "chờ CTO" to
+  // parse, and pretending otherwise turns a note into a commitment. The projection beside it is
+  // derived from measured pace and is labelled as such every time it appears.
+  const etaParts = [];
+  if (eta) {
+    if (eta.waiting_human) etaParts.push("chờ người" + (eta.owner ? " (" + eta.owner + ")" : ""));
+    if (eta.text) etaParts.push(eta.text);
+    const projected = durationText(eta.projected_seconds);
+    if (projected) etaParts.push("ước lượng suy ra từ tốc độ đã đo: còn ~" + projected);
+  }
+
+  const summary = [
+    pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
+    pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
+      known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
+    a.at_risk ? pill("pill-bad", "trễ hạn") : null,
+    a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
+    h("span", { class: "a-title" }, a.title || "(không có tiêu đề)"),
+    h("span", { class: "a-facts mono" },
+      pct == null ? "chưa có kế hoạch" : doneSteps + "/" + steps.length + " bước · " + pct + "%",
+      " · chạy " + (durationText(a.elapsed_seconds) || "chưa rõ"),
+      " · token " + spendText,
+      " · xong: " + (etaParts.length ? etaParts.join(" · ") : "chưa rõ")),
+  ];
+
+  // Everything below only exists once the card is opened. The note is a paragraph of prose and
+  // the plan is every step — together they are what made one assignment fill the screen.
+  const detail = [
     h("div", { class: "session-row" }, h("span", { class: "k" }, "hạn"),
       h("span", { class: "v" }, a.deadline || "—")),
+    cacheText ? h("div", { class: "session-row" }, h("span", { class: "k" }, "cache"),
+      h("span", { class: "v" }, cacheText)) : null,
     steps.length
       ? h("div", { class: "esc-evidence" }, steps.map((s) => {
           const st = Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
@@ -616,7 +667,13 @@ function assignmentCard(a) {
         : h("span", { class: "chip" }, "AB#" + id);
     })) : null,
     a.note ? h("div", { class: "esc-session" }, "ghi chú: " + a.note) : null,
-  );
+  ];
+
+  // collapsedGroup() already owns <details>/<summary> everywhere else on this page; the card is
+  // wrapped in its own div rather than growing a fourth argument, so the severity styling stays
+  // exactly the rule .esc-card.sev-* already carries. No open hint: condensed by default is the
+  // whole point.
+  return h("div", { class: "esc-card a-card sev-" + sev }, collapsedGroup(summary, detail));
 }
 
 function renderAssignments() {

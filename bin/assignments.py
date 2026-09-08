@@ -49,11 +49,22 @@ def new_assignment(title: str, priority: str = "P1", deadline=None, ado_refs=Non
 
 
 def append(record: dict, path: str = LEDGER_PATH) -> None:
-    """Append one record to the ledger. Delegates to escalations.append so there is exactly one
-    locked writer for both queues — appending by shell redirection instead would skip that lock
-    and risk a torn line, which every reader then silently drops.
+    """Append one record to the ledger, stamped with the moment of the write.
+
+    Delegates to escalations.append so there is exactly one locked writer for both queues —
+    appending by shell redirection instead would skip that lock and risk a torn line, which every
+    reader then silently drops.
+
+    `ts` is the CREATION time and every later revision copies it verbatim (that is what makes
+    stalled() able to ask how long an assignment has gone unplanned). So before this stamp, the
+    ledger recorded no time at all for anything that happened AFTER an assignment was created:
+    every revision of a record carried the identical `ts`, and the difference between the first
+    record and the closing one — how long the work actually took — was exactly zero. `updated_at`
+    is not derived from anything and cannot be recomputed later; only the writer knows when it
+    wrote. It is set here rather than by each caller so the one mandated write path cannot be
+    used without it.
     """
-    _queue_append(path, record)
+    _queue_append(path, {**record, "updated_at": time.time()})
 
 
 def _date_passed(value, now: float) -> bool:

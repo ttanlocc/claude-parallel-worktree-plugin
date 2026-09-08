@@ -1419,8 +1419,10 @@ def test_collect_needs_no_assignments_reader_from_an_existing_caller():
 
 def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
     """open_assignments() would drop every finished assignment off the board the moment it was
-    closed. current_state() folds the append-only ledger keeping all ids, which is what the
-    escalation reader right above it already does for the same reason."""
+    closed. read_all() hands over every record of every id — done included, and every earlier
+    revision of each, which is the only place the start of the work is written down.
+    current_state() would keep all the ids too but fold away those earlier revisions, leaving
+    only a `ts` that says when the manager last touched the assignment."""
     import inspect
 
     import board_state
@@ -1432,7 +1434,7 @@ def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
     # reader, so only an actual call to it counts as the mistake.
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     assert "open_assignments(" not in code
-    assert "current_state(LEDGER_PATH)" in code
+    assert "read_all(LEDGER_PATH)" in code
 
 
 # ---------------------------------------------------------------------------
@@ -1510,3 +1512,479 @@ def test_refresh_strip_never_hands_a_null_child_to_replace_children():
         assert "filter(Boolean)" in body.group(1), (
             "a conditional child must be filtered out before replaceChildren, not passed as null"
         )
+
+
+# ---------------------------------------------------------------------------
+# Elapsed time, token spend and ETA — what a condensed assignment card has to say.
+# ---------------------------------------------------------------------------
+
+
+def _usage(inp=0, out=0, creation=0, cache_read=0):
+    return {
+        "input_tokens": inp,
+        "output_tokens": out,
+        "cache_creation_input_tokens": creation,
+        "cache_read_input_tokens": cache_read,
+    }
+
+
+def test_assignment_docs_measure_elapsed_from_the_oldest_record_for_that_id():
+    """The ledger is append-only and current_state() keeps only the newest record per id, whose
+    `ts` is when it was last UPDATED. Taking that as the start reports a fresh assignment for one
+    that has been running all day."""
+    from board_state import assignment_docs
+
+    ledger = [
+        _assignment(ts=100.0, status="assigned"),
+        _assignment(ts=500.0, status="in_progress"),
+    ]
+
+    doc = assignment_docs(ledger, now=900.0)["a1"]
+
+    assert doc["elapsed_seconds"] == 800.0, "elapsed must run from the oldest record, not the newest"
+
+
+def test_assignment_docs_stop_the_clock_once_the_assignment_is_closed():
+    """A finished assignment took as long as it took. Letting `now` keep running would grow the
+    number forever and make last week's closed work look like the longest job on the board."""
+    from board_state import assignment_docs
+
+    for status in ("done", "cancelled"):
+        ledger = [_assignment(ts=100.0, status="in_progress"), _assignment(ts=500.0, status=status)]
+        doc = assignment_docs(ledger, now=999_999.0)[ "a1"]
+        assert doc["elapsed_seconds"] == 400.0, f"the clock must stop at the last record for {status}"
+
+
+def test_assignment_docs_report_no_elapsed_when_the_ledger_has_no_usable_timestamp():
+    from board_state import assignment_docs
+
+    doc = assignment_docs([_assignment(ts=None)], now=900.0)["a1"]
+
+    assert doc["elapsed_seconds"] is None
+
+
+def test_assignment_docs_report_unknown_token_spend_rather_than_zero():
+    """0 means "measured, and it was nothing". An unreadable transcript means "not measured".
+    Rendering the second as the first is the whole reason this field is nullable."""
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[{"step": "x", "owner": "worker-a", "state": "doing"}])
+
+    doc = assignment_docs([rec], now=900.0, registry={}, usage_by_session={})["a1"]
+
+    assert doc["tokens"] is None, "an owner with no registry entry must read as unmeasured, not zero"
+
+
+def test_assignment_docs_keep_cache_reads_out_of_the_headline_token_number():
+    """Measured on this machine: one session logged 2.2M output against 954M cache-read. Summing
+    all four fields into one "tokens used" number reports ~50x the real spend."""
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[{"step": "x", "owner": "worker-a", "state": "doing"}])
+    registry = {"worker-a": {"session_id": "sid-a"}}
+    usage = {"sid-a": _usage(inp=10, out=20, creation=30, cache_read=9_000_000)}
+
+    doc = assignment_docs([rec], now=900.0, registry=registry, usage_by_session=usage)["a1"]
+
+    assert doc["tokens"]["spend"] == 60, "the headline number is input + output + cache_creation"
+    assert doc["tokens"]["cache_read"] == 9_000_000, "cache reads are reported, but on their own"
+
+
+def test_assignment_docs_sum_tokens_across_every_owner_session_once():
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[
+        {"step": "a", "owner": "worker-a", "state": "done"},
+        {"step": "b", "owner": "worker-b", "state": "doing"},
+        {"step": "c", "owner": "worker-a", "state": "todo"},
+    ])
+    registry = {"worker-a": {"session_id": "sid-a"}, "worker-b": {"session_id": "sid-b"}}
+    usage = {"sid-a": _usage(out=100), "sid-b": _usage(out=5)}
+
+    doc = assignment_docs([rec], now=900.0, registry=registry, usage_by_session=usage)["a1"]
+
+    assert doc["tokens"]["spend"] == 105, "a session owning two steps must not be counted twice"
+    assert doc["tokens"]["partial"] is False
+
+
+def test_assignment_docs_ignore_an_owner_that_is_not_a_worktree_task():
+    """`owner` is free text the manager writes: "self (EM)", "CTO", "chưa giao" are people and
+    placeholders, not sessions. They have no transcript and must not drag the total to unknown."""
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[
+        {"step": "a", "owner": "self (EM)", "state": "done"},
+        {"step": "b", "owner": "worker-a", "state": "doing"},
+    ])
+    registry = {"worker-a": {"session_id": "sid-a"}}
+
+    doc = assignment_docs([rec], now=900.0, registry=registry,
+                          usage_by_session={"sid-a": _usage(out=7)})["a1"]
+
+    assert doc["tokens"]["spend"] == 7
+    assert doc["tokens"]["partial"] is False, "a human owner is not a transcript that failed to read"
+
+
+def test_assignment_docs_flag_a_total_that_is_missing_a_session_transcript():
+    """One worktree deleted, its transcript gone: the remaining sum is real but too low. Marked
+    partial so the page can say "at least this much" instead of presenting it as the full cost."""
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[
+        {"step": "a", "owner": "worker-a", "state": "done"},
+        {"step": "b", "owner": "worker-gone", "state": "doing"},
+    ])
+    registry = {"worker-a": {"session_id": "sid-a"}, "worker-gone": {"session_id": "sid-gone"}}
+
+    doc = assignment_docs([rec], now=900.0, registry=registry,
+                          usage_by_session={"sid-a": _usage(out=7), "sid-gone": None})["a1"]
+
+    assert doc["tokens"]["spend"] == 7
+    assert doc["tokens"]["partial"] is True
+
+
+def test_sum_usage_reads_usage_at_either_nesting_level():
+    """Transcript lines carry usage under `message.usage` (assistant turns) and, on some lines,
+    at the top level. Reading only one shape silently halves the count."""
+    from board_state import sum_usage
+
+    totals = sum_usage([
+        {"message": {"usage": _usage(out=10, cache_read=1)}},
+        {"usage": _usage(out=5, cache_read=2)},
+        {"message": "not a dict"},
+        {"usage": {"output_tokens": "nonsense"}},
+        "not a record",
+    ])
+
+    assert totals["output_tokens"] == 15
+    assert totals["cache_read_input_tokens"] == 3
+
+
+def test_read_session_usage_returns_none_when_the_transcript_is_missing(tmp_path):
+    """None, not an empty total: "no file" and "a file that logged nothing" are different facts
+    and only one of them may render as a number."""
+    from board_state import read_session_usage
+
+    assert read_session_usage("no-such-session", str(tmp_path)) is None
+
+
+def test_read_session_usage_finds_the_transcript_under_any_project_directory(tmp_path):
+    """A worktree session's transcript lives under a project directory named after the WORKTREE
+    path, not the repo root, so the lookup is by session id across all of them."""
+    import json as _json
+
+    from board_state import read_session_usage
+
+    proj = tmp_path / "-home-someone-repo--claude-worktrees-worker-a"
+    proj.mkdir()
+    (proj / "sid-a.jsonl").write_text(
+        _json.dumps({"message": {"usage": _usage(inp=1, out=2, creation=3, cache_read=4)}}) + "\n"
+        + "{ truncated line\n",
+        encoding="utf-8",
+    )
+
+    totals = read_session_usage("sid-a", str(tmp_path))
+
+    assert totals["output_tokens"] == 2
+    assert totals["cache_read_input_tokens"] == 4
+
+
+def test_assignment_docs_surface_the_eta_of_the_step_being_worked():
+    """`eta` is free text a person wrote ("2-3 giờ", "chờ CTO"). It is shown verbatim, never
+    parsed into a date the writer never committed to."""
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[
+        {"step": "a", "owner": "worker-a", "state": "done", "eta": "xong rồi"},
+        {"step": "b", "owner": "worker-a", "state": "doing", "eta": "2-3 giờ"},
+        {"step": "c", "owner": "worker-a", "state": "todo", "eta": "sau khi worker xong"},
+    ])
+
+    doc = assignment_docs([rec], now=900.0, registry={"worker-a": {"session_id": "s"}})["a1"]
+
+    assert doc["eta"]["text"] == "2-3 giờ"
+
+
+def test_assignment_docs_fall_back_to_the_first_unfinished_step_when_nothing_is_being_worked():
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[
+        {"step": "a", "state": "done", "eta": "xong rồi"},
+        {"step": "b", "state": "todo", "eta": "chưa đặt"},
+    ])
+
+    doc = assignment_docs([rec], now=900.0)["a1"]
+
+    assert doc["eta"]["text"] == "chưa đặt"
+
+
+def test_assignment_docs_say_a_step_is_waiting_on_a_person():
+    """An owner with no worktree entry is a human. No machine is burning time on it, so no
+    completion time can be projected — the honest answer is that it is waiting on someone."""
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[{"step": "duyệt", "owner": "CTO", "state": "doing", "eta": "chờ CTO"}])
+
+    doc = assignment_docs([rec], now=900.0, registry={"worker-a": {"session_id": "s"}})["a1"]
+
+    assert doc["eta"]["waiting_human"] is True
+    assert doc["eta"]["owner"] == "CTO"
+    assert doc["eta"]["projected_seconds"] is None, "a human queue has no measured velocity"
+
+
+def test_assignment_docs_project_the_remainder_from_measured_velocity():
+    """Two of four steps done in 800s is 400s a step, so two steps left is ~800s more. Derived,
+    never a promise — the page has to label it as an estimate."""
+    from board_state import assignment_docs
+
+    plan = [
+        {"step": "a", "owner": "worker-a", "state": "done"},
+        {"step": "b", "owner": "worker-a", "state": "done"},
+        {"step": "c", "owner": "worker-a", "state": "doing", "eta": "2 giờ"},
+        {"step": "d", "owner": "worker-a", "state": "todo"},
+    ]
+    ledger = [_assignment(ts=100.0, plan=plan), _assignment(ts=500.0, plan=plan)]
+    registry = {"worker-a": {"session_id": "s"}}
+
+    doc = assignment_docs(ledger, now=900.0, registry=registry)["a1"]
+
+    assert doc["eta"]["projected_seconds"] == 800.0
+
+
+def test_assignment_docs_project_nothing_before_the_first_step_finishes():
+    """Zero steps done is zero measurements. Dividing by it would either crash or invent a rate."""
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[{"step": "a", "owner": "worker-a", "state": "doing"}])
+
+    doc = assignment_docs([rec], now=900.0, registry={"worker-a": {"session_id": "s"}})["a1"]
+
+    assert doc["eta"]["projected_seconds"] is None
+
+
+def test_assignment_docs_report_no_eta_for_a_closed_assignment():
+    from board_state import assignment_docs
+
+    rec = _assignment(status="done", plan=[{"step": "a", "state": "done", "eta": "2 giờ"}])
+
+    assert assignment_docs([rec], now=900.0)["a1"]["eta"] is None
+
+
+def test_build_writes_passes_the_registry_and_usage_through_to_the_assignments():
+    """The join from a plan step's `owner` to a session transcript runs through the registry, so
+    the write set has to carry it — an assignment doc built without it can only ever say "chưa rõ"."""
+    from board_state import build_writes
+
+    rec = _assignment(plan=[{"step": "a", "owner": "worker-a", "state": "doing"}])
+    writes = build_writes(
+        agents=[], registry={"worker-a": {"session_id": "sid-a"}}, escalations=[], tickets=[],
+        pr_by_ticket={}, now=900.0, assignments=[rec],
+        usage_by_session={"sid-a": _usage(out=42)},
+    )
+
+    rows = _writes_for(writes, "assignments")
+    assert rows[0]["data"]["tokens"]["spend"] == 42
+
+
+def test_collect_reads_usage_for_the_sessions_the_registry_names():
+    from board_state import collect
+
+    seen = {}
+
+    def read_usage(registry):
+        seen.update(registry)
+        return {"sid-a": _usage(out=42)}
+
+    writes = collect(
+        read_agents=list, read_registry=lambda: {"worker-a": {"session_id": "sid-a"}},
+        read_escalations=list, read_tickets=list, read_prs=dict, now=lambda: 900.0,
+        read_assignments=lambda: [_assignment(plan=[{"step": "a", "owner": "worker-a", "state": "doing"}])],
+        read_usage=read_usage,
+    )
+
+    assert "worker-a" in seen, "the usage reader must be given the registry to join through"
+    assert _writes_for(writes, "assignments")[0]["data"]["tokens"]["spend"] == 42
+
+
+def test_collect_degrades_usage_to_unknown_without_blanking_the_assignments():
+    from board_state import collect
+
+    def boom(registry):
+        raise RuntimeError("projects dir unreadable")
+
+    writes = collect(
+        read_agents=list, read_registry=lambda: {"worker-a": {"session_id": "sid-a"}},
+        read_escalations=list, read_tickets=list, read_prs=dict, now=lambda: 900.0,
+        read_assignments=lambda: [_assignment(plan=[{"step": "a", "owner": "worker-a", "state": "doing"}])],
+        read_usage=boom,
+    )
+
+    rows = _writes_for(writes, "assignments")
+    assert rows and rows[0]["data"]["tokens"] is None
+
+
+# ---------------------------------------------------------------------------
+# The condensed assignment card.
+# ---------------------------------------------------------------------------
+
+
+def _assignment_card_source():
+    body = re.search(r"function assignmentCard\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "assignmentCard() not found"
+    return body.group(1)
+
+
+def _card_part(name):
+    """The `summary` / `detail` array literal inside assignmentCard, so a test can tell what the
+    collapsed line shows from what only opening the card shows."""
+    card = _assignment_card_source()
+    block = re.search(r"const " + name + r"\s*=\s*\[(.*?)\n  \];", card, re.S)
+    assert block, f"assignmentCard() has no `{name}` list — the summary/detail split is what makes the card condensed"
+    return block.group(1)
+
+
+def test_board_collapses_an_assignment_card_through_the_existing_details_mechanism():
+    """One collapse mechanism on the page, not two: collapsedGroup() already wraps
+    <details>/<summary>, and a second hand-rolled toggle would style and behave differently."""
+    script = _board_html_script()
+    assert "collapsedGroup(" in _assignment_card_source(), "the card must collapse through collapsedGroup()"
+    assert len(re.findall(r'h\("details"', script)) == 1, "only collapsedGroup() may build a <details>"
+
+
+def test_board_leaves_an_assignment_card_closed_until_it_is_clicked():
+    """collapsedGroup()'s third argument is the open hint. The card is condensed by default —
+    that is the entire point — so it must not be passed one."""
+    card = _assignment_card_source()
+    call = re.search(r"collapsedGroup\((.*)\)", card)
+    assert call, "collapsedGroup() call not found in assignmentCard()"
+    assert not re.search(r",\s*(true|1)\s*\)\s*$", call.group(1) + ")"), "the card must not open by default"
+
+
+def test_board_summary_line_carries_progress_elapsed_tokens_and_eta():
+    summary = _card_part("summary")
+    assert "progress" in summary or "pct" in summary, "no progress on the collapsed line"
+    assert "elapsed_seconds" in summary, "no elapsed time on the collapsed line"
+    assert "token" in summary, "no token spend on the collapsed line"
+    assert "eta" in summary, "no ETA on the collapsed line"
+
+
+def test_board_keeps_the_long_note_and_the_step_list_behind_the_toggle():
+    """The note is a paragraph of prose and the plan is every step — together they are what made
+    one card fill the screen. They belong to the opened card, not the summary line."""
+    summary, detail = _card_part("summary"), _card_part("detail")
+    assert "a.note" not in summary, "the note must not be on the collapsed summary line"
+    assert "a.note" in detail, "the note must still be readable once the card is open"
+    assert "steps" in detail, "the step list belongs to the opened card"
+    assert "steps.map" not in summary, "the collapsed line must not render every step"
+
+
+def test_board_formats_token_counts_for_a_reader_not_as_raw_digits():
+    """A 14-digit number is unreadable at a glance and is exactly what made the raw sum look
+    plausible. Counts are shown as "1,2 tr" / "340 k"."""
+    script = _board_html_script()
+    fn = re.search(r"function tokenText\((.*?)\n\}", script, re.S)
+    assert fn, "tokenText() not found"
+    assert "tr" in fn.group(1) and "k" in fn.group(1), "no millions/thousands suffix"
+    assert "1e6" in fn.group(1) or "1000000" in fn.group(1), "millions are never abbreviated"
+
+
+def test_board_says_unknown_rather_than_zero_when_token_spend_was_not_measured():
+    card = _assignment_card_source()
+    assert "chưa rõ" in card, "an unmeasured token total must read 'chưa rõ', never 0"
+
+
+def test_board_marks_a_projected_eta_as_an_estimate_and_never_as_a_commitment():
+    """The derived number comes from steps-done-so-far, which is a crude rate. Presented bare it
+    reads as a delivery time nobody promised."""
+    card = _assignment_card_source()
+    assert "projected_seconds" in card, "the card never shows the derived projection"
+    assert "ước lượng" in card or "suy ra" in card, "a projection must be labelled as an estimate"
+
+
+def test_board_says_an_assignment_is_waiting_on_a_person_instead_of_guessing_a_time():
+    card = _assignment_card_source()
+    assert "waiting_human" in card
+    assert "chờ người" in card, "a human-owned step must say so in Vietnamese"
+
+
+def test_board_labels_a_partial_token_total_as_a_floor():
+    card = _assignment_card_source()
+    assert "partial" in card, "the card never distinguishes a complete total from a partial one"
+
+
+def test_assignment_docs_stop_the_clock_at_the_write_time_not_the_creation_time():
+    """The real ledger, read on this machine: every revision of an id carries the IDENTICAL `ts`,
+    because an update copies the creation record and edits fields. Subtracting the closing
+    record's `ts` from the opening one's is always exactly zero, which reported every finished
+    assignment as having taken no time. `updated_at` is when the write happened."""
+    from board_state import assignment_docs
+
+    ledger = [
+        _assignment(ts=100.0, updated_at=100.0, status="in_progress"),
+        _assignment(ts=100.0, updated_at=700.0, status="done"),
+    ]
+
+    assert assignment_docs(ledger, now=999_999.0)["a1"]["elapsed_seconds"] == 600.0
+
+
+def test_assignment_docs_say_unknown_rather_than_zero_for_a_close_with_no_write_time():
+    """Records written before append() stamped every write carry no close time at all. Zero is
+    the number subtraction produces there, and it is a claim the ledger never made."""
+    from board_state import assignment_docs
+
+    ledger = [_assignment(ts=100.0, status="in_progress"), _assignment(ts=100.0, status="done")]
+
+    assert assignment_docs(ledger, now=999_999.0)["a1"]["elapsed_seconds"] is None
+
+
+def test_the_ledger_write_path_records_when_it_wrote(tmp_path):
+    """End to end over a real file, the way main() reads it: two appends through the one mandated
+    writer, and the board must be able to say how long the work took."""
+    from assignments import append
+    from board_state import assignment_docs
+    from escalations import read_all
+
+    path = str(tmp_path / "assignments.jsonl")
+    append(_assignment(status="in_progress"), path=path)
+    append(_assignment(status="done"), path=path)
+
+    doc = assignment_docs(read_all(path), now=0.0)["a1"]
+
+    assert doc["elapsed_seconds"] is not None, "append() must stamp when it wrote"
+    assert doc["elapsed_seconds"] >= 0.0
+
+
+def test_assignment_docs_never_call_a_retired_worker_a_person():
+    """The registry only holds tasks whose worktree still exists. An owner missing from it may be
+    a finished worker just as easily as a human, and "chờ người (board-systemd-timer)" is a
+    confident wrong answer — the name says plainly that it is a task."""
+    from board_state import assignment_docs
+
+    rec = _assignment(plan=[
+        {"step": "a", "owner": "board-systemd-timer", "state": "done"},
+        {"step": "b", "owner": "board-systemd-timer", "state": "doing", "eta": "2-3 giờ"},
+    ])
+
+    eta = assignment_docs([rec], now=900.0, registry={})["a1"]["eta"]
+
+    assert eta["waiting_human"] is False, "a kebab-case task name is never a person"
+    assert eta["text"] == "2-3 giờ"
+    assert eta["projected_seconds"] is None, "no running worker behind the step means no measured rate"
+
+
+def test_assignment_docs_read_every_placeholder_owner_as_a_person():
+    from board_state import assignment_docs
+
+    for owner in ("CTO", "self (EM)", "chưa giao", "(CTO review)", "EM"):
+        rec = _assignment(plan=[{"step": "x", "owner": owner, "state": "doing"}])
+        eta = assignment_docs([rec], now=900.0)["a1"]["eta"]
+        assert eta["waiting_human"] is True, f"{owner!r} is not a worktree task"
+
+
+def test_board_never_prints_a_formatter_that_gave_up():
+    """tokenText()/durationText() return null for anything they cannot format. Concatenated
+    straight into a string that becomes the word "null" on the card — the same silent-garbage
+    failure renderRefresh() was already bitten by."""
+    card = _assignment_card_source()
+    for expr in re.findall(r'"[^"]*"\s*\+\s*(tokenText|durationText)\(', card):
+        raise AssertionError(f"{expr}() result concatenated without a null check")
