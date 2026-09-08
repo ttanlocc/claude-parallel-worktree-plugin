@@ -8,8 +8,10 @@ import tempfile
 import dashboard
 from dashboard import (
     _find_ado_links,
+    _iteration_leaves,
     _shape_ado_ticket,
     get_ado_backlog,
+    get_ado_iterations,
 )
 
 
@@ -126,6 +128,75 @@ def test_get_ado_backlog_degrades_on_timeout():
     subprocess.run = mock_run
     try:
         result = get_ado_backlog()
+        assert result == []
+    finally:
+        subprocess.run = original_run
+
+
+def test_iteration_leaves_extracts_name_and_date_range():
+    tree = {
+        "name": "AgentIQ",
+        "children": [
+            {
+                "name": "Sprint 57",
+                "children": None,
+                "attributes": {"startDate": "2026-08-31T00:00:00Z", "finishDate": "2026-09-04T00:00:00Z"},
+            },
+            {
+                "name": "Sprint 58",
+                "children": None,
+                "attributes": {"startDate": "2026-09-07T00:00:00Z", "finishDate": "2026-09-11T00:00:00Z"},
+            },
+        ],
+    }
+    assert _iteration_leaves(tree) == [
+        {"name": "Sprint 57", "start": "2026-08-31T00:00:00Z", "finish": "2026-09-04T00:00:00Z"},
+        {"name": "Sprint 58", "start": "2026-09-07T00:00:00Z", "finish": "2026-09-11T00:00:00Z"},
+    ]
+
+
+def test_iteration_leaves_flattens_a_nested_group():
+    """This project's tree is flat today (verified live), but `az` groups iterations under a
+    release node wherever a project chooses to — walking recursively rather than assuming one
+    level deep keeps this from silently dropping half the tree the day that changes."""
+    tree = {
+        "name": "AgentIQ",
+        "children": [
+            {
+                "name": "Release 1",
+                "attributes": None,
+                "children": [
+                    {
+                        "name": "Sprint 1",
+                        "children": None,
+                        "attributes": {"startDate": "2026-01-01T00:00:00Z", "finishDate": "2026-01-07T00:00:00Z"},
+                    },
+                ],
+            },
+        ],
+    }
+    assert _iteration_leaves(tree) == [
+        {"name": "Sprint 1", "start": "2026-01-01T00:00:00Z", "finish": "2026-01-07T00:00:00Z"},
+    ]
+
+
+def test_iteration_leaves_handles_a_leaf_with_no_attributes():
+    """Some iterations (e.g. "Iteration 3" in this project's own tree) have never had dates set —
+    that must come back as a leaf with null dates, not raise or get skipped."""
+    tree = {"name": "Iteration 3", "children": None, "attributes": None}
+    assert _iteration_leaves(tree) == [{"name": "Iteration 3", "start": None, "finish": None}]
+
+
+def test_get_ado_iterations_degrades_on_timeout():
+    original_run = subprocess.run
+    dashboard._CACHE.pop("ado_iterations", None)
+
+    def mock_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired("az", 20)
+
+    subprocess.run = mock_run
+    try:
+        result = get_ado_iterations()
         assert result == []
     finally:
         subprocess.run = original_run

@@ -147,7 +147,16 @@
   .brand .subtitle { margin: 2px 0 0; color: var(--faint); font-size: var(--fs-sm); }
 
   .topbar-row2 { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-  .summary-strip, .freshness-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .summary-strip, .freshness-strip, .refresh-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .refresh-btn {
+    font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
+    padding: 4px 12px; border-radius: var(--radius-s);
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  .refresh-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
+  .refresh-btn:disabled { cursor: default; opacity: .6; }
+  .refresh-age { font-size: var(--fs-sm); color: var(--ink-soft); }
+  .refresh-note { font-size: var(--fs-xs); color: var(--faint); }
   .freshness-strip { margin-left: auto; }
 
   .conn { display: flex; align-items: center; gap: 7px; font-size: var(--fs-sm); color: var(--ink-soft); flex: none; }
@@ -292,6 +301,17 @@
   details.collapsed-group[open] > summary::before { content: "▾"; }
   details.collapsed-group > summary:hover { color: var(--ink); }
 
+  /* An assignment card IS its summary line until clicked, so that line carries pills and several
+     facts and has to be allowed to wrap on a narrow board. The card's own padding is the group's,
+     so the details block sits flush inside it. */
+  .esc-card.a-card { padding: 6px 14px; }
+  .a-card > details.collapsed-group { margin-top: 0; }
+  .a-card > details.collapsed-group > summary { flex-wrap: wrap; font-weight: 500; }
+  .a-card .a-title { font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
+  .a-card .a-facts { font-size: var(--fs-sm); color: var(--ink-soft); font-weight: 400; }
+  .a-card > details.collapsed-group[open] > summary { border-bottom: 1px dashed var(--border-soft); }
+  .a-card > details.collapsed-group > :not(summary) { margin-top: 6px; }
+
   @media (max-width: 640px) {
     .app { padding: 14px 14px 44px; }
     .freshness-strip { margin-left: 0; }
@@ -317,6 +337,7 @@
     <div class="topbar-row2">
       <div class="summary-strip" id="summary"></div>
       <div class="freshness-strip" id="freshness"></div>
+      <div class="refresh-strip" id="refresh"></div>
     </div>
   </header>
 
@@ -351,6 +372,25 @@ const SEVERITY_TONE = { P0: "pill-bad", P1: "pill-warn", P2: "pill-accent" };
 // identified yet can never render as free.
 const STATE_RANK = { waiting: 0, unknown: 1, running: 2, idle: 3, done: 4 };
 const STATE_LABEL = { waiting: "Đang chờ duyệt", running: "Đang chạy", idle: "Rảnh", done: "Đã xong", unknown: "Không rõ trạng thái" };
+
+// The manager's own ledger vocabulary (assignments.py STATUSES). Priorities are NOT restated
+// here: an assignment's P0/P1/P2 means what an escalation's does, so it reuses SEVERITY_RANK /
+// SEVERITY_LABEL / SEVERITY_TONE above rather than growing a second scale that looks identical
+// and could quietly rank differently.
+const ASSIGNMENT_STATUS_LABEL = {
+  assigned: "đã giao", in_progress: "đang làm", blocked: "bị chặn",
+  done: "đã xong", cancelled: "đã huỷ",
+};
+const ASSIGNMENT_STATUS_TONE = {
+  assigned: "pill-neutral", in_progress: "pill-accent", blocked: "pill-bad",
+  done: "pill-good", cancelled: "pill-neutral",
+};
+const ASSIGNMENT_CLOSED_STATUSES = new Set(["done", "cancelled"]);
+// "unknown" is not a state the manager writes — it is what board_state.py returns for a step
+// state it does not recognise (see _STEP_STATES there). It needs a word here for exactly the
+// reason STATE_LABEL needs one: an unlabelled state renders as a bare English slug, or as
+// nothing at all, and "nothing at all" reads as "not started".
+const STEP_STATE_LABEL = { todo: "chưa làm", doing: "đang làm", done: "xong", unknown: "không rõ" };
 
 const RESOLVED_STATUSES = new Set(["answered", "dismissed"]);
 // Same list the localhost dashboard uses for "not done" vs "done" — keep the two boards agreeing
@@ -403,15 +443,26 @@ function ageSeconds(unixSeconds) {
   if (unixSeconds == null || !isFinite(unixSeconds)) return null;
   return Math.max(0, Date.now() / 1000 - unixSeconds);
 }
-function ageText(unixSeconds) {
-  const s = ageSeconds(unixSeconds);
-  if (s == null) return null;
+function durationText(s) {
+  if (s == null || !isFinite(s)) return null;
   if (s < 60) return Math.floor(s) + " giây";
   const m = s / 60;
   if (m < 60) return Math.round(m) + " phút";
   const hr = m / 60;
   if (hr < 48) return Math.round(hr) + " giờ";
   return Math.round(hr / 24) + " ngày";
+}
+function ageText(unixSeconds) {
+  return durationText(ageSeconds(unixSeconds));
+}
+// "1,2 tr" / "340 k". A token count printed raw is eight to nine digits — unreadable at a
+// glance, and unreadable is exactly what let a bogus total look plausible. Vietnamese decimal
+// comma, so "1,2" is one point two, not one thousand two hundred.
+function tokenText(n) {
+  if (typeof n !== "number" || !isFinite(n)) return null;
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(".", ",") + " tr";
+  if (n >= 1000) return Math.round(n / 1000) + " k";
+  return String(Math.round(n));
 }
 function numId(id) {
   const n = parseInt(String(id).replace(/\D/g, ""), 10);
@@ -434,13 +485,20 @@ function sessionLabel(sessionId) {
 }
 
 /* ---------- shared state ---------- */
-const view = { sessions: [], escalations: [], tickets: [], meta: null, db: null };
+const view = { sessions: [], escalations: [], tickets: [], assignments: [], meta: null, db: null };
 // Extra bookkeeping alongside the required `view` shape above — which source has fired at least
 // once (so "empty" and "not loaded yet" never look the same) and which source's listener died.
-view.loaded = { sessions: false, escalations: false, tickets: false, meta: false };
-view.errors = { sessions: false, escalations: false, tickets: false, meta: false };
+view.loaded = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
+view.errors = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
+// Describes the "Làm mới" button, not a data source: whether a manual read is in flight, and
+// why the last one failed.
+view.refresh = { busy: false, error: null };
 
 const ticketFilters = { sprint: "", state: "" };
+// Applied once, the first time meta/status loads — after that the filter is the viewer's to
+// drive. Without this guard, every later meta/status update (the pump ticks every ~15 min) would
+// stomp a manual "tất cả" back to the sprint default.
+let sprintFilterDefaulted = false;
 
 /* ---------- small state-note builders ---------- */
 function loadingNote(text) { return h("p", { class: "state-note is-loading" }, text); }
@@ -562,10 +620,13 @@ function sessionTile(s) {
   );
 }
 
-// One collapsible group of the sessions grouping below: its own count (in the summary text,
-// same "N label" idiom the done-tickets/resolved-escalations subgroups already use) and its own
-// "nothing here" note rather than vanishing when empty — so an operator sees "0 cần bạn xử lý"
-// as a real, checked-and-clear state, not a group that silently failed to render.
+const byStateThenTask = (a, b) =>
+  (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9) || String(a.task).localeCompare(String(b.task));
+
+// One collapsible group of sessions: its own count (in the summary text, same "N label" idiom
+// the done-tickets/resolved-escalations subgroups already use) and its own "nothing here" note
+// rather than vanishing when empty — so an operator sees "0 phiên chưa gắn với việc nào" as a
+// real, checked-and-clear state, not a group that silently failed to render.
 function sessionGroup(label, sessions, emptyText, emptyIsGood, openByDefault) {
   const body = sessions.length
     ? h("div", { class: "session-grid" }, sessions.map(sessionTile))
@@ -578,60 +639,190 @@ function sessionGroup(label, sessions, emptyText, emptyIsGood, openByDefault) {
 // or "idle": both would claim a certainty the mirror doesn't have. Gated on `managed` first: an
 // ad-hoc terminal session (no worktree-registry entry — a spike, a smoke test, someone's own
 // interactive session) is not work the manager dispatched, so an unrecognised or stalled state on
-// it is not the manager's alarm to raise — see the board's unmanaged-sessions group below. Shared
-// by renderSessions()'s section filter and renderSummary()'s topbar chip so the two counts can
-// never drift apart again — that drift (a second copy of this rule going stale) is exactly how the
-// topbar under-counted the section below it.
+// it is not the manager's alarm to raise. Shared by the assignment cards, the leftover group
+// under them and renderSummary()'s topbar chip so those counts can never drift apart again —
+// that drift (a second copy of this rule going stale) is exactly how the topbar under-counted
+// the section this one replaced.
 function needsAttention(s) {
   return s.managed && (s.state === "waiting" || s.state === "unknown");
 }
 
-function renderSessions() {
+// The join from an assignment to the sessions doing it. A plan step's `owner` is a worktree task
+// name and a session document is keyed by that same name (board_state.session_docs) — the same
+// hop board_state.py's token sum already makes through the registry, resolved here on a field
+// the page is handed outright, so there is no second mapping to keep in step with the first.
+function ownersOf(a) {
+  return (Array.isArray(a.plan) ? a.plan : []).map((s) => s.owner).filter(Boolean);
+}
+function sessionsOf(a, sessions) {
+  const owners = ownersOf(a);
+  return sessions.filter((s) => owners.includes(s.task));
+}
+// The other half of that partition, written against the same ownersOf() so the two can never
+// both drop the same session: everything no OPEN assignment claims — an ad-hoc terminal, or a
+// worker whose assignment was closed out from under it. A session claimed by nobody and drawn
+// nowhere is an alarm the topbar chip counts and the board has no way to show.
+function looseSessions(assignments, sessions) {
+  const owned = new Set(assignments.flatMap((a) => ownersOf(a)));
+  return sessions.filter((s) => !owned.has(s.task));
+}
+
+/* ---------- assignments: the ledger, and the sessions working it ---------- */
+function assignmentCard(a, sessions) {
+  const sev = a.priority in SEVERITY_RANK ? a.priority : "P1";
+  const known = Object.prototype.hasOwnProperty.call(ASSIGNMENT_STATUS_LABEL, a.status);
+  const steps = Array.isArray(a.plan) ? a.plan : [];
+  const refs = Array.isArray(a.ado_refs) ? a.ado_refs : [];
+  // at_risk / stalled / elapsed_seconds / tokens / eta are all computed by board_state.py from
+  // these very steps and only shown here, never recomputed — the page cannot read a ledger or a
+  // transcript, and one derivation means the numbers and the step list under them cannot
+  // disagree. `progress` is still published for the localhost dashboard but no longer read here:
+  // it rendered "0%" beside "0/7 bước", which is the same sentence twice.
+  const doneSteps = steps.filter((s) => s.state === "done").length;
+  const tokens = a.tokens && typeof a.tokens === "object" ? a.tokens : null;
+  const eta = a.eta && typeof a.eta === "object" ? a.eta : null;
+  // The sessions actually doing this work, and the ones among them that have stopped and are
+  // waiting for a person. Both drive the card: the collapsed line says so, and the card opens
+  // itself — nobody clicks a card to discover there is an alarm inside it.
+  const mine = sessions || [];
+  const attention = mine.filter(needsAttention);
+
+  // "chưa rõ", never "0": 0 is a measurement that came back empty, and no transcript is not a
+  // measurement at all. `partial` means some owner session's transcript was unreadable, so the
+  // sum is a floor — "≥" rather than a total presented as complete.
+  const spend = tokens ? tokenText(tokens.spend) : null;
+  const spendText = spend == null ? "chưa rõ" : (tokens.partial ? "≥ " : "") + spend;
+  const cacheText = tokens && tokens.cache_read ? tokenText(tokens.cache_read) + " đọc lại từ cache" : null;
+
+  // Free text a person wrote, shown verbatim — there is no date in "2-3 giờ" or "chờ CTO" to
+  // parse, and pretending otherwise turns a note into a commitment. The projection beside it is
+  // derived from measured pace and is labelled as such every time it appears.
+  const etaParts = [];
+  if (eta) {
+    if (eta.waiting_human) etaParts.push("chờ người" + (eta.owner ? " (" + eta.owner + ")" : ""));
+    if (eta.text) etaParts.push(eta.text);
+    const projected = durationText(eta.projected_seconds);
+    if (projected) etaParts.push("ước lượng suy ra từ tốc độ đã đo: còn ~" + projected);
+  }
+
+  const summary = [
+    pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
+    pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
+      known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
+    a.at_risk ? pill("pill-bad", "trễ hạn") : null,
+    a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
+    // The alarm the standalone sessions section used to carry, moved onto the one line that is
+    // visible whether or not this card is open.
+    attention.length ? pill("pill-bad", attention.length + " phiên cần bạn xử lý") : null,
+    h("span", { class: "a-title" }, a.title || "(không có tiêu đề)"),
+    h("span", { class: "a-facts mono" },
+      steps.length ? doneSteps + "/" + steps.length + " bước" : "chưa có kế hoạch",
+      " · chạy " + (durationText(a.elapsed_seconds) || "chưa rõ"),
+      " · token " + spendText,
+      " · xong: " + (etaParts.length ? etaParts.join(" · ") : "chưa rõ")),
+  ];
+
+  // Everything below only exists once the card is opened. The note is a paragraph of prose and
+  // the plan is every step — together they are what made one assignment fill the screen.
+  const detail = [
+    // First thing an opened card shows: who is on it right now. The old standalone section left
+    // a reader matching a worker name to an assignment by hand; here they arrive together.
+    mine.length ? h("div", { class: "session-grid" }, mine.map(sessionTile)) : null,
+    h("div", { class: "session-row" }, h("span", { class: "k" }, "hạn"),
+      h("span", { class: "v" }, a.deadline || "—")),
+    cacheText ? h("div", { class: "session-row" }, h("span", { class: "k" }, "cache"),
+      h("span", { class: "v" }, cacheText)) : null,
+    steps.length
+      ? h("div", { class: "esc-evidence" }, steps.map((s) => {
+          const st = Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
+          const deps = Array.isArray(s.depends_on) ? s.depends_on : [];
+          const extra = [
+            s.owner ? "ai: " + s.owner : null,
+            s.eta ? "hạn: " + s.eta : null,
+            deps.length ? "sau: " + deps.join(", ") : null,
+          ].filter(Boolean).join(" · ");
+          return h("div", { class: "session-row" },
+            h("span", { class: "k" }, STEP_STATE_LABEL[st]),
+            h("span", { class: "v" }, (s.step || "(bước không có mô tả)") + (extra ? " (" + extra + ")" : "")));
+        }))
+      : h("div", { class: "esc-no-options" }, "chưa chia thành bước nào"),
+    refs.length ? h("div", { class: "session-refs" }, refs.map((id) => {
+      const url = ticketUrl(id);
+      return url
+        ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
+        : h("span", { class: "chip" }, "AB#" + id);
+    })) : null,
+    a.note ? h("div", { class: "esc-session" }, "ghi chú: " + a.note) : null,
+  ];
+
+  // collapsedGroup() already owns <details>/<summary> everywhere else on this page; the card is
+  // wrapped in its own div rather than growing a fourth argument, so the severity styling stays
+  // exactly the rule .esc-card.sev-* already carries. Condensed by default is the whole point —
+  // the single exception is a card holding a worker that has stopped and is waiting for a person.
+  // That one opens itself, because a click is precisely what nobody makes before it matters.
+  return h("div", { class: "esc-card a-card sev-" + sev },
+    collapsedGroup(summary, detail, attention.length > 0));
+}
+
+function renderAssignments() {
   const section = h("section", { class: "board-section" });
-  const loaded = view.loaded.sessions;
-
-  const byStateThenTask = (a, b) =>
-    (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9) || String(a.task).localeCompare(String(b.task));
-  const managedSessions = view.sessions.filter((s) => s.managed);
-  const unmanagedSessions = view.sessions.filter((s) => !s.managed).sort(byStateThenTask);
-  // Keeping "unknown" out of every filter here is what silently dropped 8 of 33 sessions off the
-  // whole board (C1) — every MANAGED session must land in exactly one of these three groups.
-  // Unmanaged sessions (no worktree-registry entry — not the manager's dispatched work) never
-  // enter these three; they get their own group below instead.
-  const waiting = managedSessions.filter(needsAttention).sort(byStateThenTask);
-  const running = managedSessions.filter((s) => s.state === "running").sort(byStateThenTask);
-  const finished = managedSessions.filter((s) => s.state === "idle" || s.state === "done").sort(byStateThenTask);
-
-  // "Live" here means not yet filed under Đã xong — idle joins done in that group below, so the
-  // header count (still "what's not settled yet") follows the same split. Computed straight from
-  // the waiting/running arrays the groups below render — not a second filter expression — so
-  // header and body can never drift apart (the same class of bug C1 fixed for the topbar chip).
-  // Scoped to managed sessions only: an unmanaged session is never "settled" or "unsettled" from
-  // the manager's point of view, so it plays no part in this count.
-  const count = loaded ? waiting.length + running.length : null;
-  section.append(sectionHead("Phiên làm việc",
-    "“Đang chờ duyệt” trông giống đang chạy nhưng thực ra đã đứng lại — cần bạn mở khoá.", count));
+  const loaded = view.loaded.assignments;
+  const open = view.assignments.filter((a) => !ASSIGNMENT_CLOSED_STATUSES.has(a.status));
+  // The reason the standalone sessions section existed, kept on the section that absorbed it: a
+  // worker in "đang chờ duyệt" looks exactly like one that is running and has in fact stopped.
+  section.append(sectionHead("Việc đã giao",
+    "Sổ giao việc của manager, kèm phiên đang chạy cho từng việc — “đang chờ duyệt” trông giống " +
+    "đang chạy nhưng thực ra đã đứng lại, cần bạn mở khoá.", loaded ? open.length : null));
 
   if (!view.db) { section.append(loadingNote("Đang kết nối tới dữ liệu…")); return section; }
-  if (!loaded) { section.append(loadingNote("Đang tải phiên làm việc…")); return section; }
-  if (view.errors.sessions) { section.append(errorNote("Không đọc được sessions — kiểm tra console.")); return section; }
+  if (!loaded) { section.append(loadingNote("Đang tải sổ giao việc…")); return section; }
+  if (view.errors.assignments) { section.append(errorNote("Không đọc được sổ giao việc — kiểm tra console.")); return section; }
 
-  // Order is the point: the group that needs a human comes first so it is never below the fold,
-  // then what is actively running, then what needs nobody. Waiting and running default OPEN —
-  // both are "happening right now" and were always visible pre-grouping; Đã xong defaults
-  // collapsed, same as the old done-only subgroup, now also absorbing idle (nothing to act on in
-  // either state). An operator can still collapse "đang chạy" or expand "đã xong" by hand — the
-  // default only controls what greets them on load. Unmanaged sessions render last and start
-  // collapsed regardless of what state they're in — an ad-hoc session sitting in "waiting" is
-  // ordinary (someone's own interactive terminal idling on a prompt), not a stalled worker, so it
-  // does not earn the same default-open treatment as the managed "cần bạn xử lý" group above.
-  section.append(
-    sessionGroup("cần bạn xử lý", waiting, "Không có phiên nào đang chờ duyệt.", true, true),
-    sessionGroup("đang chạy", running, "Không có phiên nào đang chạy.", false, true),
-    sessionGroup("đã xong", finished, "Chưa có phiên nào đã xong.", false, false),
-    sessionGroup("phiên chạy trên máy này nhưng manager chưa giao việc", unmanagedSessions,
-      "Không có phiên nào ngoài phạm vi quản lý.", false, false),
-  );
+  // Same ordering rule as the escalations above: priority first, then whatever is already late,
+  // then oldest. An unrecognised priority sorts last rather than jumping the queue.
+  const byUrgency = (a, b) =>
+    (SEVERITY_RANK[a.priority] ?? 9) - (SEVERITY_RANK[b.priority] ?? 9) ||
+    Number(!!b.at_risk) - Number(!!a.at_risk) ||
+    (a.ts ?? 0) - (b.ts ?? 0);
+  const closed = view.assignments.filter((a) => ASSIGNMENT_CLOSED_STATUSES.has(a.status));
+
+  // Sessions are a second source behind this one section now. An errored or not-yet-loaded
+  // listener must never read as "nothing is running": the cards draw no tiles either way, so the
+  // state is said out loud at the end of the section rather than left to be inferred from
+  // silence — the same rule every other section here already follows.
+  const sessions = view.loaded.sessions && !view.errors.sessions ? view.sessions : [];
+
+  const cards = open.slice().sort(byUrgency).map((a) => ({ a, mine: sessionsOf(a, sessions) }));
+  // Then, above all of it, whatever holds a stopped worker. The group this section absorbed sat
+  // at the top of the page and defaulted open so that alarm could never fall below the fold;
+  // sort() is stable, so byUrgency still decides the order of everything underneath.
+  cards.sort((x, y) => Number(y.mine.some(needsAttention)) - Number(x.mine.some(needsAttention)));
+
+  if (!open.length) section.append(goodNote("Không có việc nào đang mở."));
+  else section.append(h("div", { class: "esc-list" }, cards.map((c) => assignmentCard(c.a, c.mine))));
+
+  // Done and cancelled stay on the board, collapsed — board_state.py deliberately keeps mirroring
+  // them, so dropping them here would throw away the record it went to the trouble of publishing.
+  // Deliberately WITHOUT session tiles: this group is collapsed, so a stopped worker inside one
+  // of these cards would sit two clicks deep. Their sessions fall through to the leftover group
+  // below instead, which opens itself.
+  if (closed.length) {
+    section.append(collapsedGroup(closed.length + " việc đã đóng",
+      [h("div", { class: "esc-list" }, closed.slice().sort(byUrgency).map((a) => assignmentCard(a)))]));
+  }
+
+  // Everything no open assignment claims — an ad-hoc terminal, or a worker whose assignment was
+  // closed under it. Collapsed at the end like every other tail group on this page, unless one of
+  // them needs a human, for exactly the reason a card holding one opens itself.
+  if (view.errors.sessions) {
+    section.append(errorNote("Không đọc được phiên làm việc — kiểm tra console."));
+  } else if (!view.loaded.sessions) {
+    section.append(loadingNote("Đang tải phiên làm việc…"));
+  } else {
+    const loose = looseSessions(open, view.sessions).sort(byStateThenTask);
+    section.append(sessionGroup("phiên chưa gắn với việc nào đang mở", loose,
+      "Không có phiên nào ngoài các việc trên.", true, loose.some(needsAttention)));
+  }
   return section;
 }
 
@@ -651,9 +842,10 @@ function ticketPrChip(pr) {
     ? h("a", { class: "pill " + tone, href, target: "_blank", rel: "noopener", style: "text-decoration:none;" }, label)
     : pill(tone, label);
 }
-function ticketRow(t) {
+function ticketRow(t, opts) {
+  opts = opts || {};
   const href = safeHref(t.url);
-  return h("tr", {},
+  const cells = [
     h("td", { class: "num" }, href
       ? h("a", { href, target: "_blank", rel: "noopener" }, "AB#" + t.id)
       : "AB#" + t.id),
@@ -662,15 +854,21 @@ function ticketRow(t) {
     h("td", {}, t.sprint || "—"),
     h("td", {}, t.type || "—"),
     h("td", {}, ticketPrChip(t.pr) || "—"),
-  );
+  ];
+  if (opts.showHolder) cells.push(h("td", {}, t.handed_off_to || "—"));
+  return h("tr", {}, ...cells);
 }
-function ticketTable(rows) {
+function ticketTable(rows, opts) {
+  opts = opts || {};
+  const headers = [
+    h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
+    h("th", {}, "Sprint"), h("th", {}, "Loại"), h("th", {}, "PR"),
+  ];
+  if (opts.showHolder) headers.push(h("th", {}, "Đang giữ"));
   return h("div", { class: "table-wrap" },
     h("table", { class: "tickets" },
-      h("thead", {}, h("tr", {},
-        h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
-        h("th", {}, "Sprint"), h("th", {}, "Loại"), h("th", {}, "PR"))),
-      h("tbody", {}, rows.map(ticketRow))));
+      h("thead", {}, h("tr", {}, ...headers)),
+      h("tbody", {}, rows.map((r) => ticketRow(r, opts)))));
 }
 
 function renderTickets() {
@@ -710,11 +908,25 @@ function renderTickets() {
 
   if (!filtered.length) { section.append(loadingNote("Không có vé khớp bộ lọc.")); return section; }
 
-  const open = filtered.filter((t) => !TICKET_DONE_STATES.has(t.state)).sort((a, b) => numId(a.id) - numId(b.id));
+  // Closed/Removed keep the old rule below regardless of handoff — a ticket already closed is
+  // done, full stop. Only among what is still OPEN does handed_off carve out its own group: work
+  // the owner finished their part of but does not hold any more, so it must not read as "còn mở
+  // của tôi" (still mine) nor get buried inside "đã xong" (which would call a ticket stuck
+  // Blocked at QC "done" — a lie).
   const done = filtered.filter((t) => TICKET_DONE_STATES.has(t.state)).sort((a, b) => numId(a.id) - numId(b.id));
+  const handedOff = filtered.filter((t) => !TICKET_DONE_STATES.has(t.state) && t.handed_off)
+    .sort((a, b) => numId(a.id) - numId(b.id));
+  const open = filtered.filter((t) => !TICKET_DONE_STATES.has(t.state) && !t.handed_off)
+    .sort((a, b) => numId(a.id) - numId(b.id));
 
   if (open.length) section.append(ticketTable(open));
-  else section.append(goodNote("Không có việc nào đang mở trong bộ lọc này."));
+  else if (!handedOff.length) section.append(goodNote("Không có việc nào đang mở trong bộ lọc này."));
+
+  if (handedOff.length) {
+    section.append(collapsedGroup(
+      handedOff.length + " đã xong phần của bạn — đang chờ người khác xử lý tiếp",
+      [ticketTable(handedOff, { showHolder: true })]));
+  }
 
   if (done.length) {
     const filterIsDoneState = ticketFilters.state && TICKET_DONE_STATES.has(ticketFilters.state);
@@ -817,12 +1029,109 @@ function renderFreshness() {
   renderStaleBanner(adoInfo);
 }
 
+// The "Làm mới" button and the true age of what it re-reads, side by side on purpose.
+//
+// This page is a read-only artifact in a sandbox: no filesystem, no `az`, no way to call back to
+// the machine running the pump timer. The button therefore re-reads the artifact db and NOTHING
+// else — it cannot go fetch newer ADO numbers, and it must never look like it can. The age shown
+// is the pump's own write stamp, so a click that changes nothing leaves the age visibly unchanged
+// too; that is the honest signal, and the note spells it out for anyone who reads it otherwise.
+function renderRefresh() {
+  const box = document.getElementById("refresh");
+  if (!box) return;
+  const writtenAt = view.meta ? view.meta.written_at : null;
+  // The session threshold, not the ADO one: meta_status() stamps written_at and
+  // last_session_scan from the same sweep, so this stamp ages on that cadence. Only
+  // info.text is drawn here — staleness is already shouted by the banner and the chips
+  // beside this strip, and a third copy of that alarm would just be noise.
+  const info = freshnessInfo(writtenAt, SESSION_CADENCE_S * STALE_MULTIPLIER);
+  const clock = writtenAt == null
+    ? null
+    : new Date(writtenAt * 1000).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+  const age = clock == null
+    ? "chưa rõ dữ liệu tính đến lúc nào"
+    : "dữ liệu tính đến " + clock + " (" + info.text + ")";
+
+  // .filter(Boolean), not a bare null in the argument list: h() drops a null child, but
+  // replaceChildren() renders it as the literal text "null" — which is exactly what the topbar
+  // of a perfectly healthy board showed before this filter existed.
+  box.replaceChildren(...[
+    h("button", {
+      class: "refresh-btn",
+      type: "button",
+      disabled: (view.refresh.busy || !view.db) ? "" : null,
+      title: "Đọc lại dữ liệu mà bộ hẹn giờ đã ghi vào bảng. Trang chạy trong hộp cát nên không tự gọi sang ADO được.",
+      onclick: refresh,
+    }, view.refresh.busy ? "Đang tải lại…" : "Làm mới"),
+    h("span", { class: "refresh-age" }, age),
+    h("span", { class: "refresh-note" }, "· chỉ đọc lại dữ liệu bảng, không gọi mới sang ADO"),
+    view.refresh.error ? pill("pill-bad", view.refresh.error) : null,
+  ].filter(Boolean));
+}
+
+/* ---------- data sources ----------
+   One table drives BOTH the live listeners at boot and the manual button above, so a collection
+   can never be wired into one path and forgotten in the other — a "Làm mới" that quietly stopped
+   refreshing one section is the failure this page has no way to show. */
+const docsOf = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+const SOURCES = [
+  { key: "sessions", ref: (db) => db.collection("sessions"), apply: (s) => { view.sessions = docsOf(s); } },
+  { key: "escalations", ref: (db) => db.collection("escalations"), apply: (s) => { view.escalations = docsOf(s); } },
+  { key: "tickets", ref: (db) => db.collection("tickets"), apply: (s) => { view.tickets = docsOf(s); } },
+  { key: "assignments", ref: (db) => db.collection("assignments"), apply: (s) => { view.assignments = docsOf(s); } },
+  {
+    key: "meta",
+    ref: (db) => db.doc("meta/status"),
+    apply: (s) => {
+      view.meta = s.exists ? s.data() : null;
+      // board_state.py already worked out which sprint is "today" AND whether the backlog has
+      // anything in it — see resolve_default_sprint() — so this just takes that value verbatim.
+      // Once only: a later meta/status update must not override a filter the viewer has since
+      // changed by hand.
+      if (!sprintFilterDefaulted) {
+        sprintFilterDefaulted = true;
+        if (view.meta && view.meta.default_sprint) ticketFilters.sprint = view.meta.default_sprint;
+      }
+    },
+  },
+];
+
+// Manual re-read: the same sources, redrawn through the same render() the 30s tick already uses.
+// Deliberately all-or-nothing — if any source throws, none are applied and the board keeps showing
+// the previous read with the failure said out loud, rather than mixing rows from two different
+// moments with nothing on screen marking which is which.
+async function refresh() {
+  if (!view.db || view.refresh.busy) return;
+  view.refresh.busy = true;
+  view.refresh.error = null;
+  render();
+  try {
+    const snaps = await Promise.all(SOURCES.map((s) => s.ref(view.db).get()));
+    SOURCES.forEach((s, i) => {
+      s.apply(snaps[i]);
+      view.loaded[s.key] = true;
+      // A snapshot listener that errors is terminal — it never fires again, so this manual read is
+      // the only way back. Without clearing the flag the board would keep reporting a source as
+      // broken long after a re-read had proved it was not.
+      view.errors[s.key] = false;
+    });
+  } catch (e) {
+    console.error("refresh", e);
+    view.refresh.error = "Không đọc lại được dữ liệu — số liệu bên dưới vẫn là của lần đọc trước.";
+  } finally {
+    view.refresh.busy = false;
+    render();
+  }
+}
+
 /* ---------- render ---------- */
 function render() { /* draw from `view`; called after every snapshot */
   const board = document.getElementById("board");
-  if (board) board.replaceChildren(renderEscalations(), renderSessions(), renderTickets());
+  if (board) board.replaceChildren(
+    renderEscalations(), renderAssignments(), renderTickets());
   renderSummary();
   renderFreshness();
+  renderRefresh();
 }
 
 // Keep "N minutes/seconds ago" honest while the tab just sits open with no new snapshot. Only
@@ -855,17 +1164,15 @@ setInterval(() => { if (view.db) render(); }, 30000);
     render();
   };
 
-  db.collection("sessions").onSnapshot(
-    (snap) => { view.sessions = snap.docs.map(d => ({ id: d.id, ...d.data() })); view.loaded.sessions = true; render(); },
-    onErr("sessions"));
-  db.collection("escalations").onSnapshot(
-    (snap) => { view.escalations = snap.docs.map(d => ({ id: d.id, ...d.data() })); view.loaded.escalations = true; render(); },
-    onErr("escalations"));
-  db.collection("tickets").onSnapshot(
-    (snap) => { view.tickets = snap.docs.map(d => ({ id: d.id, ...d.data() })); view.loaded.tickets = true; render(); },
-    onErr("tickets"));
-  db.doc("meta/status").onSnapshot(
-    (snap) => { view.meta = snap.exists ? snap.data() : null; view.loaded.meta = true; render(); },
-    onErr("meta"));
+  for (const src of SOURCES) {
+    src.ref(db).onSnapshot(
+      (snap) => {
+        src.apply(snap);
+        view.loaded[src.key] = true;
+        view.errors[src.key] = false;
+        render();
+      },
+      onErr(src.key));
+  }
 })();
 </script>

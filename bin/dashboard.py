@@ -267,8 +267,24 @@ _ADO_PROJECT = "AgentIQ"
 _ADO_DONE_WINDOW_DAYS = 14
 
 
+def _ado_identities() -> list[str]:
+    """The board owner's ADO identities, unescaped and comma-split — the one source of "who is
+    the board owner" that _ado_assignee_clause() (WIQL, SQL-escaped) and
+    board_state._ticket_ownership() (compared against AssignedTo/ActivatedBy) both read, so a
+    ticket's handoff status can never disagree with which tickets the backlog query fetched in
+    the first place. Empty when PWR_ADO_ASSIGNED_TO is unset.
+    """
+    raw = os.environ.get("PWR_ADO_ASSIGNED_TO", "").strip()
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
 def _ado_assignee_clause() -> str:
     """Who counts as "me" on this board.
+
+    Matches EITHER System.AssignedTo or Microsoft.VSTS.Common.ActivatedBy, so a ticket the owner
+    started but has since handed off (to QC, to another dev) still reaches the backlog instead of
+    silently disappearing the moment AssignedTo changes — board_state._ticket_ownership() is what
+    turns that into "done, handed off to X" rather than just leaving it there unmarked.
 
     Defaults to WIQL's own @Me, which resolves to the identity `az` is logged in as. That is
     wrong wherever one person holds two ADO identities (a company UPN and a client-tenant one):
@@ -276,19 +292,18 @@ def _ado_assignee_clause() -> str:
     a silently half-empty board, not an error. PWR_ADO_ASSIGNED_TO takes a comma-separated
     list of identities to union instead.
     """
-    raw = os.environ.get("PWR_ADO_ASSIGNED_TO", "").strip()
-    if not raw:
-        return "[System.AssignedTo] = @Me"
-    people = [p.strip().replace("'", "''") for p in raw.split(",") if p.strip()]
+    id_fields = ("[System.AssignedTo]", "[Microsoft.VSTS.Common.ActivatedBy]")
+    people = [p.replace("'", "''") for p in _ado_identities()]
     if not people:
-        return "[System.AssignedTo] = @Me"
+        return "(" + " OR ".join(f"{f} = @Me" for f in id_fields) + ")"
     joined = ", ".join(f"'{p}'" for p in people)
-    return f"[System.AssignedTo] IN ({joined})"
+    return "(" + " OR ".join(f"{f} IN ({joined})" for f in id_fields) + ")"
 
 
 def _ado_backlog_wiql() -> str:
     return (
-        "SELECT [System.Id], [System.Title], [System.State], [System.IterationPath] FROM WorkItems "
+        "SELECT [System.Id], [System.Title], [System.State], [System.IterationPath], "
+        "[System.AssignedTo], [Microsoft.VSTS.Common.ActivatedBy] FROM WorkItems "
         f"WHERE [System.TeamProject] = '{_ADO_PROJECT}' AND {_ado_assignee_clause()} "
         "AND [System.State] <> 'Removed' "
         "AND ([System.State] <> 'Closed' "
@@ -311,6 +326,20 @@ def _shape_ado_ticket(raw: dict) -> dict:
     }
 
 
+def _ado_identity_ref(value) -> dict:
+    """{"email", "name"} off one ADO identity field, or both None.
+
+    `az boards query` omits an identity field's key entirely when it was never set (AssignedTo on
+    a brand-new ticket, ActivatedBy on one never moved to Active) rather than returning it as
+    null, and a set field comes back as a dict carrying GraphProfile/avatar links this board has
+    no use for besides `uniqueName` (the email both WIQL and PWR_ADO_ASSIGNED_TO key on) and
+    `displayName`.
+    """
+    if not isinstance(value, dict):
+        return {"email": None, "name": None}
+    return {"email": value.get("uniqueName"), "name": value.get("displayName")}
+
+
 def get_ado_backlog() -> list[dict]:
     """Tickets assigned to you, not closed — the manager's read-only view into ADO. Any
     failure (az not authenticated, network down) degrades to an empty backlog, same as every
@@ -326,10 +355,66 @@ def get_ado_backlog() -> list[dict]:
         )
         if result.returncode != 0:
             return []
-        return [_shape_ado_ticket(r) for r in json.loads(result.stdout)]
+        rows = json.loads(result.stdout)
+        tickets = []
+        for r in rows:
+            fields = r.get("fields") or {}
+            tickets.append(
+                {
+                    **_shape_ado_ticket(r),
+                    "assigned_to": _ado_identity_ref(fields.get("System.AssignedTo")),
+                    "activated_by": _ado_identity_ref(fields.get("Microsoft.VSTS.Common.ActivatedBy")),
+                }
+            )
+        return tickets
 
     try:
         return _cached("ado_backlog", run, ttl=60.0)
+    except _SUBPROC_ERRORS:
+        return []
+
+
+def _iteration_leaves(node: dict) -> list[dict]:
+    """Every leaf iteration under `node`, walked recursively. This project's tree is flat today
+    (verified live: every child is already a leaf) but a group node is exactly as valid a shape
+    for `az` to hand back, and assuming one level deep would silently drop half the tree the day
+    this project (or another one this ever gets pointed at) organises iterations under a release
+    node. Each leaf keeps only what board_state.py's date math needs — name, start, finish — the
+    date parsing itself stays out of this file, same split as `_shape_ado_ticket` vs. the pure
+    transforms in board_state.py."""
+    children = node.get("children") or []
+    if not children:
+        attrs = node.get("attributes") or {}
+        return [{"name": node.get("name"), "start": attrs.get("startDate"), "finish": attrs.get("finishDate")}]
+    leaves = []
+    for child in children:
+        leaves.extend(_iteration_leaves(child))
+    return leaves
+
+
+def get_ado_iterations() -> list[dict]:
+    """Every sprint/iteration this project defines, with its date range — the ONLY place sprint
+    boundaries live. A ticket's `System.IterationPath` is just a name; ADO never puts a date on
+    the ticket itself, so knowing which sprint is "today" requires this separate lookup. Same
+    degrade-to-empty contract as get_ado_backlog(): `az` failing must not blank the board, it
+    just leaves board_state.py unable to compute a default sprint filter."""
+
+    def run():
+        result = subprocess.run(
+            [
+                "az", "boards", "iteration", "project", "list",
+                "--project", _ADO_PROJECT, "--org", _ADO_ORG, "--depth", "3", "-o", "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            return []
+        return _iteration_leaves(json.loads(result.stdout))
+
+    try:
+        return _cached("ado_iterations", run, ttl=60.0)
     except _SUBPROC_ERRORS:
         return []
 
