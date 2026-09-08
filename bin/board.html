@@ -842,9 +842,10 @@ function ticketPrChip(pr) {
     ? h("a", { class: "pill " + tone, href, target: "_blank", rel: "noopener", style: "text-decoration:none;" }, label)
     : pill(tone, label);
 }
-function ticketRow(t) {
+function ticketRow(t, opts) {
+  opts = opts || {};
   const href = safeHref(t.url);
-  return h("tr", {},
+  const cells = [
     h("td", { class: "num" }, href
       ? h("a", { href, target: "_blank", rel: "noopener" }, "AB#" + t.id)
       : "AB#" + t.id),
@@ -853,15 +854,21 @@ function ticketRow(t) {
     h("td", {}, t.sprint || "—"),
     h("td", {}, t.type || "—"),
     h("td", {}, ticketPrChip(t.pr) || "—"),
-  );
+  ];
+  if (opts.showHolder) cells.push(h("td", {}, t.handed_off_to || "—"));
+  return h("tr", {}, ...cells);
 }
-function ticketTable(rows) {
+function ticketTable(rows, opts) {
+  opts = opts || {};
+  const headers = [
+    h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
+    h("th", {}, "Sprint"), h("th", {}, "Loại"), h("th", {}, "PR"),
+  ];
+  if (opts.showHolder) headers.push(h("th", {}, "Đang giữ"));
   return h("div", { class: "table-wrap" },
     h("table", { class: "tickets" },
-      h("thead", {}, h("tr", {},
-        h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
-        h("th", {}, "Sprint"), h("th", {}, "Loại"), h("th", {}, "PR"))),
-      h("tbody", {}, rows.map(ticketRow))));
+      h("thead", {}, h("tr", {}, ...headers)),
+      h("tbody", {}, rows.map((r) => ticketRow(r, opts)))));
 }
 
 function renderTickets() {
@@ -901,11 +908,25 @@ function renderTickets() {
 
   if (!filtered.length) { section.append(loadingNote("Không có vé khớp bộ lọc.")); return section; }
 
-  const open = filtered.filter((t) => !TICKET_DONE_STATES.has(t.state)).sort((a, b) => numId(a.id) - numId(b.id));
+  // Closed/Removed keep the old rule below regardless of handoff — a ticket already closed is
+  // done, full stop. Only among what is still OPEN does handed_off carve out its own group: work
+  // the owner finished their part of but does not hold any more, so it must not read as "còn mở
+  // của tôi" (still mine) nor get buried inside "đã xong" (which would call a ticket stuck
+  // Blocked at QC "done" — a lie).
   const done = filtered.filter((t) => TICKET_DONE_STATES.has(t.state)).sort((a, b) => numId(a.id) - numId(b.id));
+  const handedOff = filtered.filter((t) => !TICKET_DONE_STATES.has(t.state) && t.handed_off)
+    .sort((a, b) => numId(a.id) - numId(b.id));
+  const open = filtered.filter((t) => !TICKET_DONE_STATES.has(t.state) && !t.handed_off)
+    .sort((a, b) => numId(a.id) - numId(b.id));
 
   if (open.length) section.append(ticketTable(open));
-  else section.append(goodNote("Không có việc nào đang mở trong bộ lọc này."));
+  else if (!handedOff.length) section.append(goodNote("Không có việc nào đang mở trong bộ lọc này."));
+
+  if (handedOff.length) {
+    section.append(collapsedGroup(
+      handedOff.length + " đã xong phần của bạn — đang chờ người khác xử lý tiếp",
+      [ticketTable(handedOff, { showHolder: true })]));
+  }
 
   if (done.length) {
     const filterIsDoneState = ticketFilters.state && TICKET_DONE_STATES.has(ticketFilters.state);

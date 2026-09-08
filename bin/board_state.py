@@ -472,17 +472,52 @@ def assignment_docs(records: list[dict], now: float, registry: dict | None = Non
     return docs
 
 
-def ticket_docs(tickets: list[dict], pr_by_ticket: dict) -> dict[str, dict]:
+def _ticket_ownership(ticket: dict, owners: list[str]) -> dict:
+    """Whose desk a ticket is on right now, from ADO's own AssignedTo/ActivatedBy fields — never
+    a hardcoded ticket list.
+
+    `owners` is the board owner's identities (dashboard._ado_identities()); the backlog query
+    already unions AssignedTo/ActivatedBy over that same list, so anything reaching here matched
+    at least one of them. AssignedTo wins ON PURPOSE: a ticket the owner both started and still
+    holds is their own work regardless of who else's identity also appears on it, and only
+    ActivatedBy pointing at the owner while AssignedTo points elsewhere counts as handed off —
+    which is also what keeps a ticket matching both from ever being counted twice, since it can
+    only land in one branch below. An empty `owners` list (PWR_ADO_ASSIGNED_TO unset, @Me alone)
+    has no email to compare against, so every ticket reads as the owner's own — the behaviour
+    before this existed.
+    """
+    owners_lower = {o.strip().lower() for o in owners or [] if o and o.strip()}
+
+    def email_of(identity) -> str | None:
+        email = (identity or {}).get("email")
+        return email.strip().lower() if isinstance(email, str) and email.strip() else None
+
+    def is_owner(identity) -> bool:
+        email = email_of(identity)
+        return email is not None and email in owners_lower
+
+    if not owners_lower or is_owner(ticket.get("assigned_to")):
+        return {"handed_off": False, "handed_off_to": None}
+    if is_owner(ticket.get("activated_by")):
+        assignee = ticket.get("assigned_to") or {}
+        return {"handed_off": True, "handed_off_to": assignee.get("name") or email_of(assignee)}
+    return {"handed_off": False, "handed_off_to": None}
+
+
+def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | None = None) -> dict[str, dict]:
     """One document per ADO work item, keyed by its id.
 
     "Not started", "in flight" and "done this sprint" are filters over `state` + `sprint` on
-    the page, not three collections here.
+    the page, not three collections here. `handed_off`/`handed_off_to` are a fourth: a ticket the
+    owner activated but no longer holds stays visible instead of vanishing the moment AssignedTo
+    changes — see _ticket_ownership().
     """
     docs = {}
     for ticket in tickets or []:
         ticket_id = ticket.get("id")
         if not ticket_id:
             continue
+        ownership = _ticket_ownership(ticket, owners or [])
         docs[str(ticket_id)] = {
             "id": str(ticket_id),
             "title": ticket.get("title") or "",
@@ -491,6 +526,8 @@ def ticket_docs(tickets: list[dict], pr_by_ticket: dict) -> dict[str, dict]:
             "type": ticket.get("type") or "",
             "url": ticket.get("url") or "",
             "pr": (pr_by_ticket or {}).get(str(ticket_id)),
+            "handed_off": ownership["handed_off"],
+            "handed_off_to": ownership["handed_off_to"],
         }
     return docs
 
@@ -573,6 +610,7 @@ def build_writes(
     assignments=None,
     usage_by_session=None,
     iterations=None,
+    owners=None,
 ) -> list[dict]:
     """Every document to write, in the order to write it.
 
@@ -581,7 +619,7 @@ def build_writes(
     a thin courier.
     """
     writes = []
-    tickets_docs = ticket_docs(tickets, pr_by_ticket)
+    tickets_docs = ticket_docs(tickets, pr_by_ticket, owners)
     for collection, docs in (
         ("sessions", session_docs(agents, registry)),
         ("escalations", escalation_docs(escalations)),
@@ -640,6 +678,7 @@ def collect(
     read_assignments=list,
     read_usage=lambda registry: {},
     read_iterations=list,
+    owners=None,
 ) -> list[dict]:
     """Gather every source and return the write set. Readers are injected so this is testable
     without `az`, `gh`, or a live session.
@@ -652,7 +691,9 @@ def collect(
     cả", not an error. `read_usage` is the one reader that takes an argument — the registry,
     because the join from a plan step's `owner` to a session transcript runs through it, and
     reading the registry a second time inside the reader would let the two copies disagree about
-    which task owns which session.
+    which task owns which session. `owners` is not a reader — dashboard._ado_identities() never
+    fails the way `az`/`gh` can — so it is passed straight through to ticket_docs() via
+    build_writes() rather than wrapped in _safe().
     """
     tickets = _safe(read_tickets, None, "tickets")
     registry = _safe(read_registry, {}, "registry")
@@ -675,6 +716,7 @@ def collect(
         # current sprint at all — it must never blank the sessions/escalations/tickets already
         # gathered above.
         iterations=_safe(read_iterations, [], "iterations"),
+        owners=owners,
     )
 
 
@@ -755,6 +797,7 @@ def main() -> int:
         read_assignments=lambda: read_all(LEDGER_PATH),
         read_usage=read_usage,
         read_iterations=dashboard.get_ado_iterations,
+        owners=dashboard._ado_identities(),
     )
     json.dump(writes, sys.stdout, ensure_ascii=False)
     return 0

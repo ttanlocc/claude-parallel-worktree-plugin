@@ -375,6 +375,157 @@ def test_ticket_docs_carry_type_and_default_it_to_empty_when_absent():
     assert docs["2"]["type"] == ""
 
 
+# ---------------------------------------------------------------------------
+# Handoff tracking — a ticket the owner activated but no longer holds must stay on the board,
+# marked as handed off, instead of vanishing the moment AssignedTo changes. See dashboard.py's
+# _ado_assignee_clause()/_ado_identities()/_ado_identity_ref() for the ADO side of this.
+# ---------------------------------------------------------------------------
+
+
+def _ident(email, name=None):
+    return {"email": email, "name": name}
+
+
+def test_ado_assignee_clause_ors_assignedto_and_activatedby_over_one_shared_identity_source():
+    """The filter clause must match EITHER field, and both sides must read the exact same
+    identity list PWR_ADO_ASSIGNED_TO supplies — a second, separately typed copy of the emails
+    is exactly the drift this ticket exists to prevent."""
+    import os
+
+    import dashboard
+
+    original = os.environ.get("PWR_ADO_ASSIGNED_TO")
+    os.environ["PWR_ADO_ASSIGNED_TO"] = "loc.tran@nois.vn, loc.tran@aiquinta.ai"
+    try:
+        clause = dashboard._ado_assignee_clause()
+        identities = dashboard._ado_identities()
+    finally:
+        if original is None:
+            os.environ.pop("PWR_ADO_ASSIGNED_TO", None)
+        else:
+            os.environ["PWR_ADO_ASSIGNED_TO"] = original
+
+    assert identities == ["loc.tran@nois.vn", "loc.tran@aiquinta.ai"]
+    assert "[System.AssignedTo]" in clause
+    assert "[Microsoft.VSTS.Common.ActivatedBy]" in clause
+    for email in identities:
+        assert email in clause, f"{email!r} (from _ado_identities()) missing from the clause"
+
+
+def test_ado_backlog_wiql_selects_assignedto_and_activatedby_for_the_classifier():
+    """ticket_docs()'s handoff classifier reads these two fields off each raw ticket; dropping
+    either column from the SELECT would silently blank the classification with no error."""
+    import dashboard
+
+    wiql = dashboard._ado_backlog_wiql()
+    assert "[System.AssignedTo]" in wiql
+    assert "[Microsoft.VSTS.Common.ActivatedBy]" in wiql
+
+
+def test_ticket_docs_a_ticket_still_assigned_to_the_owner_is_never_handed_off():
+    """AssignedTo wins: whoever also activated it, the owner still holds this ticket."""
+    docs = ticket_docs(
+        [
+            {
+                "id": "1", "title": "t", "state": "Active", "sprint": "S", "url": "u",
+                "assigned_to": _ident("me@x.com"), "activated_by": _ident("someone-else@x.com"),
+            }
+        ],
+        {},
+        owners=["me@x.com"],
+    )
+    assert docs["1"]["handed_off"] is False
+    assert docs["1"]["handed_off_to"] is None
+
+
+def test_ticket_docs_activated_by_the_owner_but_assigned_elsewhere_is_handed_off_with_the_holders_name():
+    docs = ticket_docs(
+        [
+            {
+                "id": "1", "title": "t", "state": "Resolved", "sprint": "S", "url": "u",
+                "assigned_to": _ident("qc@x.com", "QC Person"), "activated_by": _ident("me@x.com"),
+            }
+        ],
+        {},
+        owners=["me@x.com"],
+    )
+    assert docs["1"]["handed_off"] is True
+    assert docs["1"]["handed_off_to"] == "QC Person"
+
+
+def test_ticket_docs_a_ticket_matching_both_fields_produces_exactly_one_undupped_document():
+    """The overlap case — AssignedTo and ActivatedBy both the owner — must land only in the
+    "mine" branch, never also in the handed-off one, and there is exactly one doc per ticket id
+    regardless of how many of its fields matched the owner."""
+    docs = ticket_docs(
+        [
+            {
+                "id": "1", "title": "t", "state": "Active", "sprint": "S", "url": "u",
+                "assigned_to": _ident("me@x.com"), "activated_by": _ident("me@x.com"),
+            }
+        ],
+        {},
+        owners=["me@x.com"],
+    )
+    assert list(docs) == ["1"]
+    assert docs["1"]["handed_off"] is False
+
+
+def test_ticket_docs_an_empty_activated_by_never_falsely_matches_the_owner():
+    """A ticket never moved to Active has no ActivatedBy at all — dashboard._ado_identity_ref()
+    reports that as {"email": None, ...}, and None must never compare equal to a real identity."""
+    docs = ticket_docs(
+        [
+            {
+                "id": "1", "title": "t", "state": "New", "sprint": "S", "url": "u",
+                "assigned_to": _ident("someone-else@x.com"), "activated_by": _ident(None),
+            }
+        ],
+        {},
+        owners=["me@x.com"],
+    )
+    assert docs["1"]["handed_off"] is False
+    assert docs["1"]["handed_off_to"] is None
+
+
+def test_ticket_docs_with_no_owners_configured_reads_every_ticket_as_the_owners_own():
+    """PWR_ADO_ASSIGNED_TO unset means the classifier has no identity to compare against — the
+    behaviour before handoff tracking existed, not a false positive."""
+    docs = ticket_docs(
+        [
+            {
+                "id": "1", "title": "t", "state": "Resolved", "sprint": "S", "url": "u",
+                "assigned_to": _ident("someone-else@x.com"), "activated_by": _ident("me@x.com"),
+            }
+        ],
+        {},
+    )
+    assert docs["1"]["handed_off"] is False
+
+
+def test_board_handed_off_group_shows_a_count_and_is_collapsed_by_default():
+    """collapsedGroup(label, rows, openHint) collapses by default when openHint is omitted.
+    Pinning the array literal's closing `]` straight to collapsedGroup's own closing `)` proves
+    there is no third argument slipped in — a stray truthy openHint would open this group on
+    every load, defeating the whole point of a group for work that already left the owner's
+    hands."""
+    script = _board_html_script()
+    pattern = re.compile(
+        r"collapsedGroup\(\s*handedOff\.length\s*\+[^,]*,\s*"
+        r"\[\s*ticketTable\(handedOff,\s*\{\s*showHolder:\s*true\s*\}\)\s*\]\s*\)",
+        re.S,
+    )
+    assert pattern.search(script), "handed-off collapsedGroup() must show a count and take no third (openHint) argument"
+
+
+def test_board_reads_handed_off_fields_under_the_same_names_ticket_docs_writes():
+    """A typo in either place (board_state.py's dict keys vs board.html's `t.xxx` reads) fails
+    silently — the field just reads undefined and the group is always empty."""
+    script = _board_html_script()
+    assert "t.handed_off_to" in script
+    assert re.search(r"\bt\.handed_off\b(?!_to)", script), "board.html never reads t.handed_off"
+
+
 from board_state import meta_status
 
 
