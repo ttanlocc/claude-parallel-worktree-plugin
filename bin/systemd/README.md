@@ -33,6 +33,12 @@ chmod 600 ~/.config/board-mirror/env
 $EDITOR ~/.config/board-mirror/env   # fill in ARTIFACT_URL and PWT_REPO_ROOT for real
 ```
 
+`run-board-mirror.sh` also keeps a snapshot of the last successful write at
+`~/.config/board-mirror/last-writes.json`, next to `env` — not something you create, it writes
+itself after the first successful run, and only sends changed documents (plus deletes for ones
+that dropped out) from then on. Delete it to force a full resync on the next run; losing it just
+costs one full-size run, it does not lose data.
+
 If you hold more than one ADO identity, also set `PWR_ADO_ASSIGNED_TO` in that file to a
 comma-separated list of all of them. Left unset, the WIQL query falls back to `@Me`, which
 matches only the identity `az` is currently logged in as — tickets under any other identity

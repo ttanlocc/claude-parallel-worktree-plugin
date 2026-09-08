@@ -7,9 +7,12 @@
   IS the prompt, so edit the instructions with that in mind.
 
   run-board-mirror.sh runs board_state.py itself (it's plain bash — no reason to make a headless
-  LLM session invoke a script the shell can call directly) and substitutes its JSON output into
-  <WRITE_ENTRIES_JSON> below. That keeps this prompt's only job "write this array to the
-  artifact", so `claude -p`'s --allowedTools only ever needs to grant Artifact, never Bash.
+  LLM session invoke a script the shell can call directly), then runs board_mirror_diff.py to cut
+  that full write set down to only what changed since the last successful run (plus `delete` ops
+  for any doc_id that dropped out entirely — board_state.py itself only ever emits `set`), before
+  substituting the result into <WRITE_ENTRIES_JSON> below. That keeps this prompt's only job
+  "write this array to the artifact" — this session never sees the unfiltered set, and never
+  needs Bash to produce it.
 
   What the operator should set before scheduling, because none of it belongs in a shipped file:
     ARTIFACT_URL — the board published from bin/board.html with capabilities {db: {}}
@@ -26,8 +29,9 @@
 Refresh the manager board. Do exactly this and nothing else.
 
 1. Write these entries to the artifact at `<ARTIFACT_URL>` using the Artifact tool's `write_db`
-   with `db_op: "batch"`. Each entry is already shaped as `{op, collection, doc_id, data}` — pass
-   them through unchanged. Do not sort, filter or reorder them: `meta/status` is deliberately
+   with `db_op: "batch"`. Each entry is already shaped as the batch expects — `{op: "set",
+   collection, doc_id, data}` or `{op: "delete", collection, doc_id}` — pass them through
+   unchanged. Do not sort, filter or reorder them: `meta/status` is deliberately
    last, because it asserts the rows beside it are current, and a batch that dies halfway must
    never have already claimed a sweep whose rows never landed. A batch takes at most 50 entries —
    if there are more, split them in order, keeping the `meta/status` entry in the final batch.
