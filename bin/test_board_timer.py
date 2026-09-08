@@ -8,6 +8,9 @@ replaced the session-scoped cron to avoid.
 
 import os
 import re
+import stat
+import subprocess
+import tempfile
 
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 SYSTEMD_DIR = os.path.join(BIN_DIR, "systemd")
@@ -68,6 +71,53 @@ def test_run_script_fails_loudly_on_missing_env():
     # `: "${VAR:?...}"` is bash's fail-loud-with-a-message idiom for a required var.
     assert re.search(r':\s*"\$\{ARTIFACT_URL:\?', run_script)
     assert re.search(r':\s*"\$\{PWT_REPO_ROOT:\?', run_script)
+
+
+def test_run_script_finds_board_mirror_md_when_invoked_through_a_symlink():
+    # README step 2 installs this script as a symlink under ~/.config/board-mirror/, not a copy.
+    # `dirname "${BASH_SOURCE[0]}"` alone resolves against the symlink's own directory rather than
+    # the repo it points into, so a text-only check of the script's source can't catch this —
+    # it has to actually run through a real symlink to reproduce the reported
+    # "sed: can't read .../board-mirror.md: No such file or directory".
+    real_script = os.path.join(SYSTEMD_DIR, "run-board-mirror.sh")
+    with tempfile.TemporaryDirectory() as tmp:
+        symlinked_script = os.path.join(tmp, "run-board-mirror.sh")
+        os.symlink(real_script, symlinked_script)
+
+        fake_claude = os.path.join(tmp, "claude")
+        with open(fake_claude, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/usr/bin/env bash\n"
+                'echo \'{"result": "REFRESH_OK: wrote 0 documents, last_ado_sweep=none"}\'\n'
+            )
+        os.chmod(fake_claude, os.stat(fake_claude).st_mode | stat.S_IEXEC)
+
+        env = dict(os.environ)
+        env["ARTIFACT_URL"] = "https://example.invalid/artifact"
+        env["PWT_REPO_ROOT"] = tmp
+        env["CLAUDE_BIN"] = fake_claude
+
+        proc = subprocess.run(
+            [symlinked_script], env=env, capture_output=True, text=True, timeout=30
+        )
+        assert proc.returncode == 0, (
+            f"run-board-mirror.sh failed when invoked through a symlink: {proc.stderr}"
+        )
+        assert "REFRESH_OK" in proc.stdout
+
+
+def test_run_script_pre_grants_the_artifact_permission_for_headless_runs():
+    # `claude -p` runs non-interactively under the timer — no one can approve the write_db
+    # permission prompt board-mirror.md's step 2 triggers, so without a pre-grant every run dies
+    # with "requires permission approval that was not granted" and no rows ever get written.
+    # Artifact has no finer specifier (unlike Bash's command patterns), so `Artifact` is the
+    # narrowest grant --allowedTools supports; this pins that flag so a future edit can't drop it.
+    run_script = _read("systemd", "run-board-mirror.sh")
+    m = re.search(r'"\$CLAUDE_BIN"\s+-p\s+(.*?)--output-format', run_script)
+    assert m, "expected a `claude -p ... --output-format` invocation in run-board-mirror.sh"
+    assert re.search(r"--allowedTools\s+Artifact\b", m.group(1)), (
+        f"claude -p invocation is missing --allowedTools Artifact: {m.group(1)!r}"
+    )
 
 
 def test_run_script_defaults_claude_bin_to_an_absolute_path():

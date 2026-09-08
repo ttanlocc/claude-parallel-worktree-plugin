@@ -11,7 +11,10 @@
 # shows up as `systemctl --user status` "failed" and in the journal — not as a quietly stale board.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# README step 2 symlinks this script into ~/.config/board-mirror/ — dirname on BASH_SOURCE alone
+# would resolve against the symlink's location, not the repo, and go looking for board-mirror.md
+# next to ~/.config. readlink -f follows the symlink to the real file first.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PLUGIN_BIN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 : "${ARTIFACT_URL:?ARTIFACT_URL is not set — see bin/systemd/board-mirror.env.example}"
@@ -26,7 +29,13 @@ PROMPT="$(
 # usually does NOT include ~/.local/bin. Default to the absolute path rather than bare `claude`.
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 
-if ! RAW_OUTPUT="$("$CLAUDE_BIN" -p --output-format json -- "$PROMPT" 2>&1)"; then
+# `claude -p` is non-interactive: nothing can click "approve" on the write_db permission prompt
+# board-mirror.md's step 2 needs, so without a pre-grant every run dies with "requires permission
+# approval that was not granted" and no rows ever get written. --allowedTools has no finer
+# specifier for the Artifact tool (unlike Bash's command patterns or WebFetch's domain matching),
+# so `Artifact` — covering all of its actions, not just write_db — is the narrowest grant this
+# flag supports.
+if ! RAW_OUTPUT="$("$CLAUDE_BIN" -p --allowedTools Artifact --output-format json -- "$PROMPT" 2>&1)"; then
   echo "run-board-mirror: claude -p exited non-zero: $RAW_OUTPUT" >&2
   exit 1
 fi
