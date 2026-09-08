@@ -504,6 +504,48 @@ def _ticket_ownership(ticket: dict, owners: list[str]) -> dict:
     return {"handed_off": False, "handed_off_to": None}
 
 
+_AB_REF_RE = re.compile(r"\bAB#(\d+)\b", re.IGNORECASE)
+
+# OPEN still needs a human decision; MERGED is done; CLOSED (unmerged) is abandoned or
+# superseded. That is the order a reviewer scanning the board cares about, highest first.
+_PR_STATE_RANK = {"OPEN": 2, "MERGED": 1, "CLOSED": 0}
+
+
+def _pr_priority(pr: dict) -> tuple:
+    """Which of several PRs claiming the same ticket wins the column: state first (see
+    _PR_STATE_RANK), then a non-draft PR over a draft one (a draft isn't asking for review yet),
+    then the higher PR number — the more recent attempt — as the final tiebreak."""
+    return (
+        _PR_STATE_RANK.get(pr.get("state"), -1),
+        0 if pr.get("isDraft") else 1,
+        pr.get("number") or 0,
+    )
+
+
+def prs_by_ticket(prs: list[dict]) -> dict[str, dict]:
+    """`{ticket_id: {"number", "state", "url"}}` from a flat `gh pr list --json
+    number,title,url,state,isDraft` result — the only join ADO and GitHub have, since ADO has no
+    link relation to a PR. CI enforces every PR title carry the work item(s) it closes as
+    `AB#NNNN` (commit 6ace7898e), and a title may name more than one — "(AB#8196, AB#8197)" is a
+    real shape — so every id found in a title maps to that same PR.
+
+    Includes closed and merged PRs on purpose, not just open ones: a merged PR is exactly what a
+    reviewer wants to see on a ticket that is already done. When two PRs name the same ticket
+    (an old attempt superseded by a new one), _pr_priority() picks the one still worth a look;
+    callers only ever see the winner.
+    """
+    winners: dict[str, dict] = {}
+    for pr in prs or []:
+        for ticket_id in _AB_REF_RE.findall(pr.get("title") or ""):
+            current = winners.get(ticket_id)
+            if current is None or _pr_priority(pr) > _pr_priority(current):
+                winners[ticket_id] = pr
+    return {
+        ticket_id: {"number": pr.get("number"), "state": pr.get("state"), "url": pr.get("url")}
+        for ticket_id, pr in winners.items()
+    }
+
+
 def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | None = None) -> dict[str, dict]:
     """One document per ADO work item, keyed by its id.
 
@@ -765,6 +807,13 @@ def main() -> int:
                 usage[sid] = read_session_usage(sid)
         return usage
 
+    def read_prs():
+        # Same repo-root resolution as read_registry() above, and for the same reason: this
+        # entry point never runs dashboard.main(), so dashboard.REPO_DIR would silently stay
+        # frozen at whatever cwd this process happened to import under.
+        repo_root = manager_session.resolve_repo_root()
+        return prs_by_ticket(dashboard.get_github_prs(repo_root))
+
     writes = collect(
         # list_agents lives in manager_daemon, not dashboard.
         read_agents=manager_daemon.list_agents,
@@ -779,7 +828,7 @@ def main() -> int:
         # No `or None`: an empty backlog is a successful sweep that found nothing, and must
         # stamp last_ado_sweep. Only an exception (caught by _safe) means "did not run".
         read_tickets=dashboard.get_ado_backlog,
-        read_prs=dict,
+        read_prs=read_prs,
         now=time.time,
         # _read_state() returns {"session_id", "started_at"} — exactly the shape
         # meta_status(manager=...) reads. Without this, `collect()` had no way at all to pass a

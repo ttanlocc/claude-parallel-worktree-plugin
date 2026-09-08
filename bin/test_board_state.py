@@ -526,6 +526,83 @@ def test_board_reads_handed_off_fields_under_the_same_names_ticket_docs_writes()
     assert re.search(r"\bt\.handed_off\b(?!_to)", script), "board.html never reads t.handed_off"
 
 
+from board_state import prs_by_ticket
+
+
+def test_prs_by_ticket_maps_a_single_ab_ref_in_the_title():
+    prs = [
+        {
+            "number": 720,
+            "title": "fix: derive pack fact and skill file names from list position (AB#5061)",
+            "url": "https://github.com/o/r/pull/720",
+            "state": "MERGED",
+            "isDraft": False,
+        }
+    ]
+
+    assert prs_by_ticket(prs) == {"5061": {"number": 720, "state": "MERGED", "url": "https://github.com/o/r/pull/720"}}
+
+
+def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
+    """"(AB#8196, AB#8197)" is a real title shape — one PR can close more than one ticket."""
+    prs = [
+        {
+            "number": 100,
+            "title": "fix: shared cleanup (AB#8196, AB#8197)",
+            "url": "https://github.com/o/r/pull/100",
+            "state": "OPEN",
+            "isDraft": False,
+        }
+    ]
+
+    docs = prs_by_ticket(prs)
+
+    assert set(docs) == {"8196", "8197"}
+    assert docs["8196"] == {"number": 100, "state": "OPEN", "url": "https://github.com/o/r/pull/100"}
+    assert docs["8197"] == docs["8196"]
+
+
+def test_prs_by_ticket_ignores_a_title_with_no_ab_ref():
+    prs = [{"number": 5, "title": "chore: tidy imports", "url": "u", "state": "OPEN", "isDraft": False}]
+
+    assert prs_by_ticket(prs) == {}
+
+
+def test_prs_by_ticket_reflects_a_merged_pr_state():
+    prs = [{"number": 720, "title": "fix: x (AB#5061)", "url": "u", "state": "MERGED", "isDraft": False}]
+
+    assert prs_by_ticket(prs)["5061"]["state"] == "MERGED"
+
+
+def test_prs_by_ticket_prefers_the_open_pr_over_a_merged_one_for_the_same_ticket():
+    """An OPEN PR still needs a human decision; a MERGED one is already done. The one still
+    asking for attention is what a reviewer scanning the board cares about most."""
+    prs = [
+        {"number": 10, "title": "fix: old attempt (AB#9000)", "url": "u10", "state": "MERGED", "isDraft": False},
+        {"number": 20, "title": "fix: current attempt (AB#9000)", "url": "u20", "state": "OPEN", "isDraft": False},
+    ]
+
+    assert prs_by_ticket(prs)["9000"]["number"] == 20
+
+
+def test_prs_by_ticket_breaks_a_same_state_tie_with_the_higher_pr_number():
+    prs = [
+        {"number": 20, "title": "fix: first (AB#9001)", "url": "u20", "state": "OPEN", "isDraft": False},
+        {"number": 21, "title": "fix: second (AB#9001)", "url": "u21", "state": "OPEN", "isDraft": False},
+    ]
+
+    assert prs_by_ticket(prs)["9001"]["number"] == 21
+
+
+def test_prs_by_ticket_prefers_a_non_draft_pr_over_a_draft_one_in_the_same_state():
+    prs = [
+        {"number": 30, "title": "fix: draft (AB#9002)", "url": "u30", "state": "OPEN", "isDraft": True},
+        {"number": 31, "title": "fix: ready (AB#9002)", "url": "u31", "state": "OPEN", "isDraft": False},
+    ]
+
+    assert prs_by_ticket(prs)["9002"]["number"] == 31
+
+
 from board_state import meta_status
 
 
