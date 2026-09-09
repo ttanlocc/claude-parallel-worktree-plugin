@@ -48,32 +48,180 @@ def normalize_state(raw) -> str:
     return "unknown"
 
 
-def session_docs(agents: list[dict], registry: dict) -> dict[str, dict]:
+# ---------------------------------------------------------------------------
+# What a worker says about itself.
+#
+# Everything else in this file is derived from something observable — a session list, a PR, an
+# ADO field. A claim is the opposite: the one thing only the worker knows (is it writing a
+# failing test, implementing, verifying, or stuck — and if stuck, WHOSE move it is). It is also
+# the only input here authored by an agent about itself, so it is validated at the boundary the
+# way normalize_kind()/_safe_plan() validate theirs: refused, with the reason kept, never
+# coerced into something plausible.
+#
+# Fact still wins wherever the two disagree — see _contradiction() — but the disagreement is
+# published rather than resolved. A board that repeats an unverified claim as though it had
+# checked is confidently wrong, which is worse than saying nothing.
+# ---------------------------------------------------------------------------
+
+# Exactly six words, closed. Closed for the same reason escalations' `kind` is: the page ranks,
+# colours and glosses off this value, so a seventh word invented by a worker is not a harmless
+# label — it is a state nobody agreed to, rendering as a bare English slug.
+CLAIM_PHASES = frozenset({"exploring", "red_test", "implementing", "verifying", "blocked", "reporting"})
+
+# Who can clear a block, by category. `blocked` on its own is the word this whole field exists to
+# replace: a permission prompt, a product decision and an acceptance-criteria ruling are three
+# different asks of three different people, and collapsing them loses the only part that matters.
+BLOCKED_KINDS = frozenset({"permission", "decision", "dependency", "environment"})
+
+# The four phases that assert forward motion. `blocked` and `reporting` claim none, so a stopped
+# session agrees with them; only these four can be contradicted by a session that is not running.
+_ACTIVE_PHASES = frozenset({"exploring", "red_test", "implementing", "verifying"})
+
+# How many pump cadences of silence make a claim too old to present as current. The same number
+# board.html applies to the meta clocks (its STALE_MULTIPLIER) — one definition of "too old to
+# trust", not two that can drift apart. test_board_state.py fails if they ever do.
+CLAIM_STALE_MULTIPLIER = 3
+
+
+def claim_stale_after(pump_period_s) -> float | None:
+    """The freshness window for a worker claim, in seconds, or None when it cannot be sized.
+
+    Derived, never a literal. The pump re-reads these files once per sweep, so a claim is already
+    up to one cadence old purely from sampling; the window is that real cadence — parsed out of
+    the shipped timer unit by timer_period_seconds() — times CLAIM_STALE_MULTIPLIER.
+
+    None when the cadence is unknown, and None makes every claim stale (see validate_claim). That
+    is deliberate and matches what board.html does with an unknown cadence: an unsized window
+    cannot certify anything as fresh, and a guessed one is exactly the fabricated baseline that
+    let this board sit 14 minutes dead while rendering as live.
+    """
+    period = _num(pump_period_s)
+    if period is None or period <= 0:
+        return None
+    return period * CLAIM_STALE_MULTIPLIER
+
+
+def _claim_blocked_on(raw) -> tuple[dict | None, str | None]:
+    """`{kind, what, who}` for a blocked claim, or the reason it was refused."""
+    if not isinstance(raw, dict):
+        return None, "phase là blocked nhưng không có blocked_on"
+    kind = raw.get("kind")
+    if kind not in BLOCKED_KINDS:
+        return None, f"blocked_on.kind không hợp lệ: {kind!r}"
+    who = raw.get("who")
+    if not isinstance(who, str) or not who.strip():
+        return None, "blocked_on không nói ai gỡ được (thiếu `who`)"
+    what = raw.get("what")
+    return {"kind": kind, "what": what if isinstance(what, str) else "", "who": who.strip()}, None
+
+
+def validate_claim(raw, now: float, stale_after: float | None) -> tuple[dict | None, str | None]:
+    """`(claim, None)` for a usable claim, `(None, reason)` for one refused, `(None, None)` for none.
+
+    Those three outcomes are genuinely different and must never be flattened. `raw is None` means
+    the worker never wrote a file — the normal case, and not a complaint to put on a board. A
+    refusal is a complaint: it is how the worker's author finds out their file is being ignored.
+
+    An undated claim is refused rather than stamped with the sweep time: dating it here would make
+    every stale claim look permanently fresh, the same fabricated-baseline failure
+    timer_period_seconds() refuses to commit.
+    """
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict):
+        return None, f"không phải JSON object ({type(raw).__name__})"
+
+    phase = raw.get("phase")
+    if phase not in CLAIM_PHASES:
+        return None, f"phase không hợp lệ: {phase!r}"
+
+    updated_at = _num(raw.get("updated_at"))
+    if updated_at is None:
+        return None, "updated_at không phải mốc thời gian"
+
+    # Only a `blocked` claim carries one. Kept on any other phase it would render a worker that is
+    # happily implementing as waiting on the CTO — so the field goes, not the claim: the phase
+    # itself is still perfectly good information.
+    blocked_on = None
+    if phase == "blocked":
+        blocked_on, reason = _claim_blocked_on(raw.get("blocked_on"))
+        if reason:
+            return None, reason
+
+    age = max(0.0, now - updated_at)
+    ticket = raw.get("ticket")
+    note = raw.get("note")
+    return {
+        # Provenance, on every claim, always. Every other field on a session document is observed
+        # fact; this one is a worker's own account of itself, and a reader that cannot tell them
+        # apart reads "verifying" as though the board had checked.
+        "source": "worker_claim",
+        "ticket": str(ticket) if ticket not in (None, "") else None,
+        "phase": phase,
+        "note": note if isinstance(note, str) else "",
+        "blocked_on": blocked_on,
+        "updated_at": updated_at,
+        "age_seconds": age,
+        # Still published when stale — "the worker last said verifying, an hour ago" is real
+        # information — but flagged, so the page can never print it as the phase it is in now.
+        "stale": stale_after is None or age > stale_after,
+    }, None
+
+
+def _contradiction(claim, state: str) -> dict | None:
+    """The disagreement between a live claim and the observed session state, or None.
+
+    Not resolved into one value: publishing "verifying" alone would repeat a claim nobody checked,
+    and publishing the state alone would throw away the only account of what the work actually is.
+    Both, and the page says which one it trusts.
+
+    "Not running" rather than the narrower blocked/waiting/gone: a session the CLI reports as
+    idle or done, or that has disappeared from the list entirely, is equally not doing the
+    implementing its worker claims. A stale claim contradicts nothing — it is not evidence of
+    anything current, so it cannot disagree with anything current either.
+    """
+    if not claim or claim["stale"] or claim["phase"] not in _ACTIVE_PHASES or state == "running":
+        return None
+    return {"claim_phase": claim["phase"], "session_state": state}
+
+
+def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
+                 now: float = 0.0, stale_after: float | None = None) -> dict[str, dict]:
     """One document per live task, keyed by task name.
 
     Agent-first, not registry-first: a session doing work belongs on the board immediately,
     including one dispatched by any other means, and the registry only fills in branch/worktree
     once parallel-task.sh has provisioned it.
+
+    `claims` is `{task_name: raw_json}` straight off read_worker_claims() — unvalidated on
+    purpose, because validating it here is what keeps the reader a dumb file-getter and the
+    vocabulary in one place. A task with a claim but NO agent still gets a document: a worker
+    saying "verifying" whose session no longer exists is the single most important thing on this
+    board, and agent-first alone would drop it exactly when it matters.
     """
     docs = {}
     registry = registry or {}
-    for agent in agents or []:
-        name = agent.get("name")
-        if not name:
-            # A document id cannot be empty; an unnamed agent has no addressable key.
-            continue
-        reg = registry.get(name) or {}
-        docs[name] = {
+    claims = claims if isinstance(claims, dict) else {}
+
+    def build(name, agent, reg):
+        claim, ignored = validate_claim(claims.get(name), now, stale_after)
+        state = normalize_state(agent.get("state") or agent.get("status"))
+        return {
             "task": name,
             "session_id": agent.get("sessionId"),
             "short_id": reg.get("short_id"),
             # `claude agents --json` has used both spellings; read whichever is present, then
             # translate it — see normalize_state() above.
-            "state": normalize_state(agent.get("state") or agent.get("status")),
+            "state": state,
             "branch": reg.get("branch"),
             "worktree": reg.get("path"),
             "started_at": agent.get("startedAt"),
             "ado_refs": list(reg.get("ado_ids") or []),
+            # What the worker says about itself, why a claim was refused, and where the two
+            # sources disagree. All three are null for the many sessions that never write a file.
+            "claim": claim,
+            "claim_ignored": ignored,
+            "contradiction": _contradiction(claim, state),
             # True iff parallel-task.sh actually dispatched this task — an entry EXISTS in the
             # registry, not "branch happens to be truthy". A registry row with a blank branch
             # field is still work the manager provisioned; `bool(reg)` or `bool(branch)` would
@@ -83,6 +231,16 @@ def session_docs(agents: list[dict], registry: dict) -> dict[str, dict]:
             # registry file, so existence has to be checked explicitly).
             "managed": name in registry,
         }
+
+    for agent in agents or []:
+        name = agent.get("name")
+        if not name:
+            # A document id cannot be empty; an unnamed agent has no addressable key.
+            continue
+        docs[name] = build(name, agent, registry.get(name) or {})
+    for name in claims:
+        if name and name not in docs:
+            docs[name] = build(name, {}, registry.get(name) or {})
     return docs
 
 
@@ -691,6 +849,7 @@ def build_writes(
     iterations=None,
     owners=None,
     pump_period_s=None,
+    claims=None,
 ) -> list[dict]:
     """Every document to write, in the order to write it.
 
@@ -701,7 +860,9 @@ def build_writes(
     writes = []
     tickets_docs = ticket_docs(tickets, pr_by_ticket, owners)
     for collection, docs in (
-        ("sessions", session_docs(agents, registry)),
+        # The claim window is sized off the very cadence stamped onto meta/status below, so the
+        # page and the pump can never disagree about how old is too old.
+        ("sessions", session_docs(agents, registry, claims, now, claim_stale_after(pump_period_s))),
         ("escalations", escalation_docs(escalations)),
         ("tickets", tickets_docs),
         ("assignments", assignment_docs(assignments, now, registry, usage_by_session)),
@@ -761,6 +922,7 @@ def collect(
     read_iterations=list,
     owners=None,
     read_timer_period=lambda: None,
+    read_claims=lambda registry: {},
 ) -> list[dict]:
     """Gather every source and return the write set. Readers are injected so this is testable
     without `az`, `gh`, or a live session.
@@ -803,7 +965,44 @@ def collect(
         # reason to distrust the data, which is the right answer when the unit file that defines
         # the pump's schedule cannot even be read.
         pump_period_s=_safe(read_timer_period, None, "timer"),
+        # {} on failure: every session keeps its observed state and simply carries no claim,
+        # which is what the great majority of them look like anyway. `read_claims` takes the
+        # registry for the same reason `read_usage` does — the registry is what says where each
+        # worker's worktree is, and reading it twice would let the two copies disagree.
+        claims=_safe(lambda: read_claims(registry), {}, "claims"),
     )
+
+
+WORKER_CLAIM_PATH = os.path.join(".claude", "worker-status.json")
+
+
+def read_worker_claims(registry: dict) -> dict:
+    """`{task_name: raw_json}` from each worktree's own `.claude/worker-status.json`.
+
+    One file per worker, inside that worker's own worktree: each worker owns exactly one file, so
+    there is no lock to take and nothing two workers can tear. The same filesystem-first pattern
+    the registry itself uses.
+
+    A worktree with no file is simply absent from the result — "no claim", not an empty one. A
+    file that will not parse is returned as its RAW TEXT instead: validate_claim() then refuses it
+    with a reason the board can show, which is what tells a worker's author their file is being
+    ignored. Dropping it here would look identical to never having written one.
+    """
+    claims = {}
+    for name, entry in (registry or {}).items():
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not name or not path:
+            continue
+        try:
+            with open(os.path.join(path, WORKER_CLAIM_PATH), encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        try:
+            claims[name] = json.loads(text)
+        except json.JSONDecodeError:
+            claims[name] = text
+    return claims
 
 
 def _timer_unit_path() -> str:
@@ -904,6 +1103,7 @@ def main() -> int:
         read_iterations=dashboard.get_ado_iterations,
         owners=dashboard._ado_identities(),
         read_timer_period=read_timer_period,
+        read_claims=read_worker_claims,
     )
     json.dump(writes, sys.stdout, ensure_ascii=False)
     return 0

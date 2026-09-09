@@ -278,6 +278,11 @@
   .session-row { font-size: var(--fs-sm); color: var(--ink-soft); display: flex; gap: 6px; }
   .session-row .k { color: var(--faint); flex: none; }
   .session-row .v { font-family: var(--font-mono); word-break: break-word; }
+  /* A worker's claim disagreeing with its observed session state. Loud on purpose: it is the one
+     row on the tile saying the two sources of truth do not match, and it must not read as just
+     another field. */
+  .session-row.claim-conflict .v { font-family: inherit; color: var(--bad); font-weight: 600; }
+  .session-row.claim-note .v { font-family: inherit; }
   .session-refs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
 
   /* ============ Tickets ============ */
@@ -407,6 +412,27 @@ const ASSIGNMENT_CLOSED_STATUSES = new Set(["done", "cancelled"]);
 // reason STATE_LABEL needs one: an unlabelled state renders as a bare English slug, or as
 // nothing at all, and "nothing at all" reads as "not started".
 const STEP_STATE_LABEL = { todo: "chưa làm", doing: "đang làm", done: "xong", unknown: "không rõ" };
+
+// The worker's own six-word vocabulary (board_state.CLAIM_PHASES), glossed. Everything else on a
+// session tile is observed fact; this is what the worker SAYS about itself, so it is always drawn
+// under its own "worker nói" label and never folded into the state badge. An unlisted phase can
+// never arrive — board_state refuses one — but the render falls back to the raw slug rather than
+// to a plausible word, same as STATE_LABEL.
+const PHASE_LABEL = {
+  exploring: "đang tìm hiểu", red_test: "đang viết test đỏ", implementing: "đang code",
+  verifying: "đang kiểm chứng", blocked: "đang kẹt", reporting: "đang viết báo cáo",
+};
+const PHASE_TONE = {
+  exploring: "pill-neutral", red_test: "pill-accent", implementing: "pill-accent",
+  verifying: "pill-accent", blocked: "pill-bad", reporting: "pill-good",
+};
+// Who can clear a block (board_state.BLOCKED_KINDS). "Bị chặn" alone is exactly the word this
+// replaces: a permission prompt, a product decision and a dependency are three different asks of
+// three different people.
+const BLOCKED_KIND_LABEL = {
+  permission: "chờ duyệt quyền", decision: "chờ quyết định",
+  dependency: "chờ việc khác", environment: "vướng môi trường",
+};
 
 const RESOLVED_STATUSES = new Set(["answered", "dismissed"]);
 // Same list the localhost dashboard uses for "not done" vs "done" — keep the two boards agreeing
@@ -612,6 +638,56 @@ function renderEscalations() {
   return section;
 }
 
+/* ---------- what a worker says about itself ---------- */
+// The rows a claim adds to a session tile, or none at all — most workers never write one.
+//
+// Never merged into the state badge above it. The badge is observed fact (`claude agents --json`);
+// this is a worker's own account, and board_state tags it `source: "worker_claim"` precisely so
+// the two can never be confused. Where they disagree, board_state publishes BOTH and this prints
+// both: picking a side is how a board ends up confidently wrong, and today three workers reported
+// work as verified when at least one had not run the failing-test check.
+function claimRow(s) {
+  const rows = [];
+  // A refused claim is shown, not swallowed. Silence here is how a worker keeps writing a file
+  // nobody reads — this line is what tells its author the shape is wrong.
+  if (s.claim_ignored) {
+    rows.push(h("div", { class: "session-row claim-note" }, h("span", { class: "k" }, "khai báo"),
+      h("span", { class: "v" }, "bị bỏ qua — " + s.claim_ignored)));
+  }
+  const claim = s.claim;
+  if (claim) {
+    const known = Object.prototype.hasOwnProperty.call(PHASE_LABEL, claim.phase);
+    const age = ageText(claim.updated_at);
+    rows.push(h("div", { class: "session-row" }, h("span", { class: "k" }, "worker nói"),
+      h("span", { class: "v" },
+        // A stale claim keeps its words but loses its colour and gains "(đã cũ)": it is the last
+        // thing the worker said, not what it is doing now, and those must never look alike.
+        pill(claim.stale ? "pill-neutral" : (PHASE_TONE[claim.phase] || "pill-neutral"),
+          (known ? PHASE_LABEL[claim.phase] : String(claim.phase)) + (claim.stale ? " (đã cũ)" : ""),
+          claim.stale ? "khai báo cũ — đây là lần cuối worker tự nói, không phải trạng thái hiện tại" : null),
+        age ? " · " + age + " trước" : null)));
+    if (claim.note) {
+      rows.push(h("div", { class: "session-row claim-note" }, h("span", { class: "k" }, "ghi chú"),
+        h("span", { class: "v" }, claim.note)));
+    }
+    const b = claim.blocked_on;
+    if (b) {
+      rows.push(h("div", { class: "session-row claim-note" }, h("span", { class: "k" }, "ai gỡ được"),
+        h("span", { class: "v" }, b.who + " — " + (BLOCKED_KIND_LABEL[b.kind] || b.kind)
+          + (b.what ? ": " + b.what : ""))));
+    }
+  }
+  const c = s.contradiction;
+  if (c) {
+    rows.push(h("div", { class: "session-row claim-conflict" }, h("span", { class: "k" }, "lệch"),
+      h("span", { class: "v" },
+        "worker nói " + (PHASE_LABEL[c.claim_phase] || c.claim_phase)
+        + ", nhưng phiên đang: " + (STATE_LABEL[c.session_state] || c.session_state)
+        + " — bảng tin phiên, không tin khai báo")));
+  }
+  return rows;
+}
+
 /* ---------- sessions ---------- */
 function sessionTile(s) {
   const state = STATE_RANK.hasOwnProperty(s.state) ? s.state : "unknown";
@@ -627,6 +703,7 @@ function sessionTile(s) {
       h("span", { class: "v" }, s.started_at ? ageText(s.started_at / 1000) + " trước" : "—")),
     s.short_id ? h("div", { class: "session-row" }, h("span", { class: "k" }, "id"),
       h("span", { class: "v" }, s.short_id)) : null,
+    claimRow(s),
     refs.length ? h("div", { class: "session-refs" }, refs.map((id) => {
       const url = ticketUrl(id);
       return url
