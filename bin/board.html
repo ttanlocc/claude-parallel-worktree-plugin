@@ -318,6 +318,13 @@
   .a-card > details.collapsed-group > summary { flex-wrap: wrap; font-weight: 500; }
   .a-card .a-title { font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
   .a-card .a-facts { font-size: var(--fs-sm); color: var(--ink-soft); font-weight: 400; }
+  /* Detail parked on title=: the owner/hạn/sau of a step not started yet, and the names of the
+     steps already behind us. Hover was the CTO's own suggestion, so the cursor and a dotted rule
+     have to say the hover is there — neither property moves a box, so nothing here can widen the
+     card on a narrow window. Touch, which has no hover, reads the same steps in the open card. */
+  .a-card .a-facts [title], .a-card .session-row .v[title], .a-card .session-row .v [title] {
+    cursor: help; text-decoration: underline dotted var(--border); text-underline-offset: 2px;
+  }
   .a-card > details.collapsed-group[open] > summary { border-bottom: 1px dashed var(--border-soft); }
   .a-card > details.collapsed-group > :not(summary) { margin-top: 6px; }
 
@@ -791,7 +798,40 @@ function assignmentCard(a, sessions) {
   // transcript, and one derivation means the numbers and the step list under them cannot
   // disagree. `progress` is still published for the localhost dashboard but no longer read here:
   // it rendered "0%" beside "0/7 bước", which is the same sentence twice.
-  const doneSteps = steps.filter((s) => s.state === "done").length;
+  // Bucketed once, rendered three times — the count on the collapsed line, the hover hint beside
+  // it and the rows inside the card are one derivation, so they cannot come to disagree. The
+  // normalisation is sessionTile()'s: a state nobody listed is "unknown" and gets said as such,
+  // never quietly folded into "chưa làm", because that would read as "not started yet".
+  const stepState = (s) => Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
+  const doneList = steps.filter((s) => stepState(s) === "done");
+  const doing = steps.filter((s) => stepState(s) === "doing");
+  const todo = steps.filter((s) => stepState(s) === "todo");
+  const unclear = steps.filter((s) => stepState(s) === "unknown");
+  const doneSteps = doneList.length;
+  const stepText = (s) => s.step || "(bước không có mô tả)";
+  // Who, by when, and after what. Real detail, but secondary to "where is this work" by
+  // definition — so it hangs off title= instead of sitting on the row: no JS, no layout, and the
+  // opened card still names every step for a touch device that can never hover.
+  const stepDetail = (s) => {
+    const deps = Array.isArray(s.depends_on) ? s.depends_on : [];
+    return [
+      s.owner ? "ai: " + s.owner : null,
+      s.eta ? "hạn: " + s.eta : null,
+      deps.length ? "sau: " + deps.join(", ") : null,
+    ].filter(Boolean).join(" · ") || null;
+  };
+  // Said, never inferred. A missing "đang làm" row would read as "nothing left to run" — the same
+  // mistake renderAssignments() refuses to make when the sessions listener is down.
+  const noRunner = "chưa có bước nào đang chạy";
+  const stepRow = (k, v, title) => h("div", { class: "session-row" },
+    h("span", { class: "k" }, k), h("span", { class: "v", title: title || null }, v));
+  // The answer the opened card gives, one hover away. The CTO asked for it on expand OR hover,
+  // and hover is the one a collapsed board gets for nothing.
+  const stepHint = !steps.length ? null
+    : (doing.length ? "đang làm: " + doing.map(stepText).join(" · ")
+      : todo.length || unclear.length ? noRunner
+      : "tất cả các bước đã xong")
+      + (todo.length ? " · còn lại " + todo.length + " bước" : "");
   const tokens = a.tokens && typeof a.tokens === "object" ? a.tokens : null;
   const eta = a.eta && typeof a.eta === "object" ? a.eta : null;
   // The sessions actually doing this work, and the ones among them that have stopped and are
@@ -818,8 +858,11 @@ function assignmentCard(a, sessions) {
     if (projected) etaParts.push("ước lượng suy ra từ tốc độ đã đo: còn ~" + projected);
   }
 
+  // No priority pill. It opened every card and was the least useful thing on it — the CTO does not
+  // triage by P0/P1/P2 ("tôi ko quan tâm P1 hay quan trọng mức thấp gì hết"), the manager does.
+  // `priority` itself is untouched: it still tints this card's left edge, still decides the order
+  // in renderAssignments(), and board_state.py still publishes it for the localhost dashboard.
   const summary = [
-    pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
     pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
       known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
     a.at_risk ? pill("pill-bad", "trễ hạn") : null,
@@ -837,7 +880,9 @@ function assignmentCard(a, sessions) {
         : h("span", { class: "chip" }, "AB#" + id);
     })) : null,
     h("span", { class: "a-facts mono" },
-      steps.length ? doneSteps + "/" + steps.length + " bước" : "chưa có kế hoạch",
+      steps.length
+        ? h("span", { title: stepHint }, doneSteps + "/" + steps.length + " bước")
+        : "chưa có kế hoạch",
       " · chạy " + (durationText(a.elapsed_seconds) || "chưa rõ"),
       " · token " + spendText,
       " · xong: " + (etaParts.length ? etaParts.join(" · ") : "chưa rõ")),
@@ -853,19 +898,29 @@ function assignmentCard(a, sessions) {
       h("span", { class: "v" }, a.deadline || "—")),
     cacheText ? h("div", { class: "session-row" }, h("span", { class: "k" }, "cache"),
       h("span", { class: "v" }, cacheText)) : null,
+    // Where the work is, not a transcript of how it got there. One row per bucket instead of one
+    // per step: the finished ones collapse to a count (their names are on the hover — nobody needs
+    // to re-read what is already behind them), the running one is spelled out with the owner and
+    // date a manager would actually act on, and what is left is named so "what is left" is legible
+    // without reading a row each. A row per step was this card's previous shape and the verdict on
+    // it was "mở ra 1 nùi thông tin bên trong đọc ko hiểu gì".
     steps.length
-      ? h("div", { class: "esc-evidence" }, steps.map((s) => {
-          const st = Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
-          const deps = Array.isArray(s.depends_on) ? s.depends_on : [];
-          const extra = [
-            s.owner ? "ai: " + s.owner : null,
-            s.eta ? "hạn: " + s.eta : null,
-            deps.length ? "sau: " + deps.join(", ") : null,
-          ].filter(Boolean).join(" · ");
-          return h("div", { class: "session-row" },
-            h("span", { class: "k" }, STEP_STATE_LABEL[st]),
-            h("span", { class: "v" }, (s.step || "(bước không có mô tả)") + (extra ? " (" + extra + ")" : "")));
-        }))
+      ? h("div", { class: "esc-evidence" },
+          doneSteps
+            ? stepRow("đã xong", doneSteps + "/" + steps.length + " bước",
+                doneList.map(stepText).join(" · "))
+            : null,
+          doing.length
+            ? stepRow("đang làm", doing.map((s) => {
+                const d = stepDetail(s);
+                return stepText(s) + (d ? " (" + d + ")" : "");
+              }).join(" · "))
+            : (todo.length || unclear.length ? stepRow("đang làm", noRunner) : null),
+          todo.length
+            ? stepRow("còn lại", todo.map((s, i) =>
+                h("span", { title: stepDetail(s) }, (i ? " · " : "") + stepText(s))))
+            : null,
+          unclear.length ? stepRow("không rõ", unclear.map(stepText).join(" · ")) : null)
       : h("div", { class: "esc-no-options" }, "chưa chia thành bước nào"),
     a.note ? h("div", { class: "esc-session" }, "ghi chú: " + a.note) : null,
   ];

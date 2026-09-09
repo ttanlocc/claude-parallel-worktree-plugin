@@ -3553,12 +3553,6 @@ def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
 # ---------------------------------------------------------------------------
 
 
-def _assignment_card_source():
-    body = re.search(r"function assignmentCard\((.*?)\n\}\n", _board_html_script(), re.S)
-    assert body, "assignmentCard() not found in board.html"
-    return body.group(1)
-
-
 def test_assignment_card_does_not_open_with_a_priority_pill():
     """The pill was the first thing the eye landed on and the least useful thing on the card.
     No P-word label anywhere in it."""
@@ -3620,6 +3614,4 @@ def test_the_collapsed_step_count_answers_where_the_work_is_on_hover():
 def test_assignment_summary_keeps_the_ticket_chip():
     """The one thing the CTO said he actually wants on this card. It was already correct — dropping
     the pill in front of it must not take it along."""
-    summary = re.search(r"const summary = \[(.*?)\n  \];", _assignment_card_source(), re.S)
-    assert summary, "the card's summary array not found"
-    assert '"AB#"' in summary.group(1), "the ADO ticket chip left the summary line"
+    assert '"AB#"' in _card_part("summary"), "the ADO ticket chip left the summary line"
