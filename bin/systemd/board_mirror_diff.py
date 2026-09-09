@@ -74,9 +74,51 @@ def diff_writes(previous: dict, writes: list[dict]) -> list[dict]:
     deletes = [
         {"op": "delete", "collection": key.split("/", 1)[0], "doc_id": key.split("/", 1)[1]}
         for key in previous
-        if key not in current_keys
+        if key not in current_keys and not _unswept(key, meta)
     ]
+    _warn_on_bulk_delete(previous, deletes)
     return changed + deletes + [meta]
+
+
+def _unswept(key: str, meta: dict) -> bool:
+    """True when `key` belongs to a collection this run did not authoritatively sweep, so its
+    absence from `writes` means "not reported", not "gone".
+
+    Only `tickets` has such a signal, and it already exists: meta/status.last_ado_sweep is null
+    exactly when board_state._safe() caught the ADO reader failing. Absent that guard, a sweep
+    that did not run published zero tickets and every previously-known ticket row read as
+    deleted — 140 rows off the CTO's board from one failed `az` call, with the deletes and the
+    real thing looking identical from here.
+
+    Deliberately keyed to that one flag rather than a general "collection is empty in this run"
+    rule: sessions legitimately drop to zero whenever no worker is running, and refusing to
+    reconcile an empty collection would strand those rows forever. Absence is only ambiguous
+    where a reader can fail; it is `tickets` that carries the evidence of which happened.
+    """
+    return key.startswith("tickets/") and (meta.get("data") or {}).get("last_ado_sweep") is None
+
+
+# A whole-collection wipe is the shape every silent-truncation bug takes here, and nothing in the
+# pump ever said it happened: run-board-mirror.sh's journal line counts sets and deletes together
+# as "wrote N documents", so 140 deleted tickets and 140 refreshed ones logged identically. This
+# does not gate anything — a real bulk removal must still go through, and a threshold that
+# refused would wedge, since the next run compares against the same unchanged snapshot and would
+# refuse again forever. It just makes the event greppable in the journal.
+# ponytail: log-only. Make it a gate only with a signal that clears itself — e.g. requiring the
+# drop to repeat on a second consecutive run — never a bare fraction.
+_BULK_DELETE_FRACTION = 0.5
+
+
+def _warn_on_bulk_delete(previous: dict, deletes: list[dict]) -> None:
+    for collection in {d["collection"] for d in deletes}:
+        was = sum(1 for k in previous if k.split("/", 1)[0] == collection)
+        now = sum(1 for d in deletes if d["collection"] == collection)
+        if was and now >= was * _BULK_DELETE_FRACTION:
+            print(
+                f"board_mirror_diff: deleting {now} of {was} {collection} documents "
+                f"— verify this is a real removal and not a truncated read",
+                file=sys.stderr,
+            )
 
 
 def _sendable(writes: list[dict]) -> list[dict]:

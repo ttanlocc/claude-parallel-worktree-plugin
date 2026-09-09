@@ -151,6 +151,14 @@ def test_run_script_finds_board_mirror_md_when_invoked_through_a_symlink():
 # for writes that never happened (that snapshot is what tells the next real run "already synced").
 
 FAKE_CLAUDE = """#!/usr/bin/env bash
+# board_state.py resolves the CLI through $CLAUDE_BIN as well now (manager_session.claude_bin),
+# so this stand-in serves `claude agents` besides the `-p` refresh. It must answer that like the
+# real CLI and NOT count it: counting would shift FAKE_CLAUDE_FAIL_ON onto a different batch than
+# the test names, and every batch-boundary assertion below would be measuring the wrong run.
+if [[ "${1:-}" == "agents" ]]; then
+  echo '[]'
+  exit 0
+fi
 n=$(( $(cat "$FAKE_CLAUDE_COUNT" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$FAKE_CLAUDE_COUNT"
 if [[ "$n" == "${FAKE_CLAUDE_FAIL_ON:-}" ]]; then
@@ -205,8 +213,14 @@ def _seed_stale_snapshot(env, n):
     into a `delete`, so the run has n+1 entries to send (meta/status last) no matter how much real
     state this machine happens to have — the alternative, leaning on board_state.py's own output,
     makes the batch count depend on whatever sessions and tickets exist when the suite runs.
+
+    `sessions`, not `tickets`: _mirror_env pins HOME to a scratch dir, so `az` has no credentials
+    and the ADO sweep genuinely cannot run here — and diff_writes deliberately withholds ticket
+    deletes when last_ado_sweep is null, so ticket ids would produce zero deletes and these
+    batching assertions would silently prove nothing. Sessions carry no such gate, which is what
+    keeps the count exact regardless of whether the suite's machine can reach ADO at all.
     """
-    stale = {f"tickets/stale-{i}": {"n": i} for i in range(n)}
+    stale = {f"sessions/stale-{i}": {"n": i} for i in range(n)}
     with open(env["BOARD_MIRROR_SNAPSHOT"], "w", encoding="utf-8") as f:
         json.dump(stale, f)
     return set(stale)

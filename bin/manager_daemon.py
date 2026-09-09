@@ -92,14 +92,18 @@ def list_agents(run=subprocess.run) -> list[dict]:
     """
     try:
         proc = run(
-            ["claude", "agents", "--json", "--all"],
+            [manager_session.claude_bin(), "agents", "--json", "--all"],
             capture_output=True,
             text=True,
             check=True,
             timeout=30,
         )
         agents = json.loads(proc.stdout)
-    except SUBPROC_ERRORS:
+    except SUBPROC_ERRORS as exc:
+        # Named, not swallowed. "Could not look" and "nothing is running" were the same empty
+        # list here, and the pump ran for days on the first while everything downstream read the
+        # second — see claude_bin() for what that cost.
+        print(f"manager_daemon: list_agents failed, reporting no sessions: {exc}", file=sys.stderr)
         return []
     return agents if isinstance(agents, list) else []
 
