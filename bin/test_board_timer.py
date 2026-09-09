@@ -293,6 +293,30 @@ def test_a_stopped_run_leaves_meta_status_unwritten_so_the_board_admits_it_is_st
         assert "PARTIAL:" in proc.stdout, "a partial run must still say so in the journal"
 
 
+def test_a_second_concurrent_run_refuses_instead_of_racing_the_first():
+    # Type=oneshot stops systemd starting a second instance; it does NOT stop a person running the
+    # script by hand while the timer is enabled, which README's "force one run" step invites. Two
+    # runs then read the same snapshot, compute the same diff, and write over each other — the
+    # timer's run computing its diff against a snapshot the manual run has already moved on from.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(tmp, _write_fake_claude(tmp))
+        os.makedirs(os.path.dirname(env["BOARD_MIRROR_SNAPSHOT"]) or ".", exist_ok=True)
+        lock = env["BOARD_MIRROR_SNAPSHOT"] + ".lock"
+
+        # Hold the lock the way a run in flight would, then start a second run.
+        holder = subprocess.Popen(["flock", lock, "sleep", "30"])
+        try:
+            proc = _run_mirror(env)
+        finally:
+            holder.terminate()
+            holder.wait(timeout=10)
+
+        assert "another run" in (proc.stdout + proc.stderr).lower(), (
+            f"second run said nothing about the first: {proc.stdout!r} {proc.stderr!r}"
+        )
+        assert proc.returncode == 0, "stepping aside for a run already in flight is not a failure"
+
+
 def test_the_caller_splits_batches_so_the_prompt_never_asks_the_model_to():
     # The 50-entry cap is the write_db batch limit. It used to be the model's job to split, which
     # meant one REFRESH_OK covered several batches and the script could not tell which of them

@@ -167,3 +167,42 @@ def test_steady_state_costs_one_batch_and_nothing_extra():
 
     assert len(batches) == 1
     assert len(batches[0]) == 6  # the five changed documents plus meta/status
+
+
+# --- an id write_db cannot accept must never be sent, and never recorded -------------------------
+# doc_id must match ^[A-Za-z0-9_\-.~:@+]{1,200}$. write_db validates before writing anything, so a
+# batch carrying one bad id lands NOTHING — the failure is not "that row is skipped", it is "every
+# other document in the batch is lost too". Two real session names ("code review verification",
+# "git checkout test verification") hit this live. Worse, they were then RECORDED in the snapshot,
+# which is impossible: an id the validator rejects cannot exist in the db. The snapshot was being
+# inferred from "the run ended" instead of confirmed per document.
+
+BAD = "code review verification"
+
+
+def test_a_doc_id_write_db_would_reject_is_never_sent():
+    writes = [_set("sessions", BAD, {"state": "running"}), _set("sessions", "ok", {"n": 1}), META]
+
+    result = diff_writes({}, writes)
+
+    assert [w["doc_id"] for w in result] == ["ok", "status"]
+
+
+def test_a_bad_id_already_in_the_snapshot_does_not_become_an_undeletable_delete():
+    # The wedge that had to be undone by hand: the snapshot remembered a bad id, the session went
+    # away, diff turned it into a `delete` carrying that same rejected id, and every batch from
+    # then on was refused — permanently, with no run able to make progress.
+    previous = {f"sessions/{BAD}": {"state": "running"}, "sessions/ok": {"n": 1}}
+    writes = [_set("sessions", "ok", {"n": 1}), META]
+
+    result = diff_writes(previous, writes)
+
+    assert all(w["op"] != "delete" for w in result), f"emitted a delete that cannot succeed: {result}"
+
+
+def test_apply_batch_refuses_to_record_a_document_that_cannot_exist():
+    # Property 1, in the direction that is unrecoverable. An id the validator rejects was never
+    # written, so recording it would make the next diff call it unchanged and skip it forever.
+    snapshot = apply_batch({}, [_set("sessions", BAD, {"state": "running"}), _set("sessions", "ok", {"n": 1})])
+
+    assert set(snapshot) == {"sessions/ok"}

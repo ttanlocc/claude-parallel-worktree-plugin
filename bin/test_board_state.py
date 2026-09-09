@@ -656,6 +656,54 @@ def test_build_writes_emits_one_set_per_document_across_all_four_collections():
     assert writes[-1]["collection"] == "meta"
 
 
+def test_build_writes_never_mints_a_doc_id_write_db_will_reject():
+    # Session names are written by Claude in natural English, so they contain spaces; doc_id must
+    # match ^[A-Za-z0-9_\-.~:@+]{1,200}$. write_db rejects the WHOLE batch on one bad id — "batch
+    # rejected before any write, no documents landed" — so a single badly-named session used to
+    # stop every other document in the run from landing too. Two real names did exactly that.
+    agents = [
+        {"name": "code review verification", "state": "running"},
+        {"name": "git checkout test verification", "state": "running"},
+    ]
+
+    writes = build_writes(
+        agents=agents, registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=1788900000.0, assignments=[],
+    )
+
+    sessions = [w for w in writes if w["collection"] == "sessions"]
+    assert len(sessions) == 2, "a badly-named session must still reach the board, not be dropped"
+    for w in writes:
+        assert re.fullmatch(r"[A-Za-z0-9_\-.~:@+]{1,200}", w["doc_id"]), (
+            f"{w['collection']}/{w['doc_id']!r} would have write_db reject the entire batch"
+        )
+    # The human name is what the board shows; only the key is normalized.
+    assert {s["data"]["task"] for s in sessions} == {
+        "code review verification", "git checkout test verification",
+    }
+
+
+def test_build_writes_drops_a_name_with_no_usable_characters_at_all():
+    # Nothing legal left to key on. Skipped, loudly-nothing rather than an empty doc_id, which
+    # write_db rejects just as hard as one with spaces.
+    writes = build_writes(
+        agents=[{"name": "   ", "state": "running"}, {"name": "real-task", "state": "running"}],
+        registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1788900000.0,
+        assignments=[],
+    )
+
+    assert [w["doc_id"] for w in writes if w["collection"] == "sessions"] == ["real-task"]
+
+
+def test_build_writes_truncates_a_doc_id_past_the_200_character_limit():
+    writes = build_writes(
+        agents=[{"name": "x" * 250, "state": "running"}], registry={}, escalations=[],
+        tickets=[], pr_by_ticket={}, now=1788900000.0, assignments=[],
+    )
+
+    assert [len(w["doc_id"]) for w in writes if w["collection"] == "sessions"] == [200]
+
+
 def test_build_writes_puts_meta_status_last():
     """`meta/status` claims the data alongside it is current. Written first, a batch that dies
     halfway would advertise a sweep whose rows never landed."""
