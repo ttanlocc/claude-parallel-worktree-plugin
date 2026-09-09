@@ -566,6 +566,60 @@ def test_meta_status_default_sprint_is_null_by_default():
     assert doc["default_sprint"] is None
 
 
+# --- pump cadence on meta/status --------------------------------------------------------------
+#
+# The board is a published artifact: no filesystem, no way to read a systemd unit, no way to ask
+# the machine whether the timer is even enabled. So it cannot know how often it is SUPPOSED to be
+# fed, and every staleness threshold it computed was a literal copied off a unit file by hand.
+# That literal rotted — board.html said 15 minutes for months after the timer was retuned to 5.
+# The cadence therefore travels as data, parsed off the unit and stamped onto meta/status.
+
+from board_state import timer_period_seconds
+
+
+def test_timer_period_seconds_reads_the_oncalendar_minute_step():
+    """`*:2/5:00` means "every 5 minutes, starting at :02" — the 5 is the cadence, not the 2."""
+    assert timer_period_seconds("[Timer]\nOnCalendar=*-*-* *:2/5:00\nPersistent=false\n") == 300
+
+
+def test_timer_period_seconds_follows_the_unit_when_the_cadence_changes():
+    """The whole point: retuning the unit retunes the page, with no second place to edit."""
+    assert timer_period_seconds("OnCalendar=*-*-* *:7/15:00") == 900
+    assert timer_period_seconds("OnCalendar=*-*-* *:1/3:00") == 180
+
+
+def test_timer_period_seconds_is_none_for_a_unit_it_cannot_read():
+    """None means "cadence unknown". It must never guess a number — a wrong baseline is exactly
+    the failure this replaces, and the page treats an unknown cadence as its own alarm."""
+    assert timer_period_seconds("OnCalendar=hourly") is None
+    assert timer_period_seconds("[Timer]\nPersistent=false\n") is None
+    assert timer_period_seconds("") is None
+    assert timer_period_seconds(None) is None
+    assert timer_period_seconds("OnCalendar=*-*-* *:2/0:00") is None
+
+
+def test_shipped_timer_unit_parses_to_the_cadence_the_docs_state():
+    """Parse the REAL unit file this repo ships, not a fixture — if the operator retunes it, this
+    is the test that proves the page's threshold moved with it."""
+    import pathlib
+
+    unit = (pathlib.Path(__file__).parent / "systemd" / "board-mirror.timer").read_text(encoding="utf-8")
+    assert timer_period_seconds(unit) == 5 * 60
+
+
+def test_meta_status_carries_the_pump_cadence():
+    """The page reads this to size its own staleness threshold."""
+    doc = meta_status(now=1000.0, pump_period_s=300)
+    assert doc["pump_period_s"] == 300
+
+
+def test_meta_status_pump_period_is_null_by_default():
+    """Null, not a guessed default: every call site written before this parameter existed keeps
+    working, and the page falls back explicitly rather than being handed a fabricated cadence."""
+    doc = meta_status(now=1000.0)
+    assert doc["pump_period_s"] is None
+
+
 # --- current_sprint_name / resolve_default_sprint --------------------------------------------
 #
 # board.html cannot know which ADO sprint is "today" — the boundary lives in ADO, not in the
@@ -1117,6 +1171,43 @@ def test_collect_wires_the_manager_reader_into_meta_status():
     assert meta["manager_started_at"] == 100.0
 
 
+def test_collect_stamps_the_pump_cadence_from_the_injected_timer_reader():
+    """The unit file is read like any other source — injected, so this is testable without
+    touching a live systemd unit."""
+    writes = collect(
+        read_agents=list,
+        read_registry=dict,
+        read_escalations=list,
+        read_tickets=list,
+        read_prs=dict,
+        now=lambda: 500.0,
+        read_timer_period=lambda: 300,
+    )
+
+    assert writes[-1]["data"]["pump_period_s"] == 300
+
+
+def test_collect_reports_an_unreadable_timer_as_an_unknown_cadence_not_a_guess():
+    """A missing or renamed unit file must degrade to null, the same way every other reader
+    degrades through _safe() — and never to a fabricated cadence, which would size the page's
+    staleness threshold off a number nobody wrote down."""
+
+    def boom():
+        raise FileNotFoundError("board-mirror.timer")
+
+    writes = collect(
+        read_agents=list,
+        read_registry=dict,
+        read_escalations=list,
+        read_tickets=list,
+        read_prs=dict,
+        now=lambda: 500.0,
+        read_timer_period=boom,
+    )
+
+    assert writes[-1]["data"]["pump_period_s"] is None
+
+
 def test_collect_defaults_manager_fields_to_null_when_no_reader_is_given():
     """Every `collect()` call in this file predating this parameter omits `read_manager` — the
     default must keep producing the same null fields those tests were already written against."""
@@ -1168,27 +1259,81 @@ def _board_html_script():
     return "\n".join(blocks)
 
 
-def test_ado_cadence_matches_the_real_15_minute_cron():
-    """The cron that fills this board's db runs every 15 min (see board_state.py's sweep loop).
-    board.html previously hard-coded 30 min here, so every staleness check below was computed
-    from a baseline twice as long as reality."""
-    script = _board_html_script()
-    m = re.search(r"const ADO_CADENCE_S\s*=\s*([0-9]+)\s*\*\s*([0-9]+)", script)
-    assert m, "ADO_CADENCE_S declaration not found"
-    assert int(m.group(1)) * int(m.group(2)) == 15 * 60
+def _timer_period_s():
+    """The cadence the shipped unit actually runs at. Every threshold assertion below is written
+    against THIS, never against a number typed into the test — a test that hard-codes 15 minutes
+    is how the page came to hard-code 15 minutes."""
+    import pathlib
+
+    unit = (pathlib.Path(__file__).parent / "systemd" / "board-mirror.timer").read_text(encoding="utf-8")
+    period = timer_period_seconds(unit)
+    assert period, "board-mirror.timer has no readable OnCalendar minute step"
+    return period
 
 
-def test_ado_stale_threshold_is_30_minutes_not_90():
-    """A dead cron must be flagged after 30 min, not the old 90-minute (30min cadence x3)
-    threshold this page shipped with — 90 minutes of silently-stale data on a board people
-    trust at a glance is the actual bug being fixed here."""
+def test_board_html_sizes_its_stale_threshold_from_the_stamped_cadence():
+    """The live threshold must come from meta/status.pump_period_s — the value board_state.py
+    parsed out of the unit file — not from a constant in the page. This is the whole fix: the
+    page previously carried `ADO_CADENCE_S = 15 * 60` while the timer had been running every 5
+    minutes for weeks, so a board could sit 14 minutes dead and still render as fresh."""
     script = _board_html_script()
-    cadence_m = re.search(r"const ADO_CADENCE_S\s*=\s*([0-9]+)\s*\*\s*([0-9]+)", script)
-    multiplier_m = re.search(r"const ADO_STALE_MULTIPLIER\s*=\s*([0-9]+)", script)
-    assert cadence_m and multiplier_m, "ADO cadence/multiplier constants not found"
-    cadence_s = int(cadence_m.group(1)) * int(cadence_m.group(2))
-    threshold_s = cadence_s * int(multiplier_m.group(1))
-    assert threshold_s == 30 * 60
+    assert "pump_period_s" in script, "board.html never reads meta/status.pump_period_s"
+    m = re.search(r"function staleThreshold\s*\(", script)
+    assert m, "no single staleThreshold() seam — every caller must size off the same rule"
+    # And the retired literals must be gone, not merely unused: a leftover ADO_CADENCE_S is the
+    # next thing someone wires back in by accident.
+    assert "ADO_CADENCE_S" not in script
+    assert "SESSION_CADENCE_S" not in script
+
+
+def test_board_html_fallback_cadence_matches_the_shipped_timer_unit():
+    """A meta doc written before pump_period_s existed still has to produce a sane threshold, so
+    there is exactly one fallback literal left in the page. It cannot rot silently: this test
+    reads the unit file and fails the moment the two disagree."""
+    script = _board_html_script()
+    m = re.search(r"const PUMP_CADENCE_FALLBACK_S\s*=\s*([0-9]+)\s*\*\s*([0-9]+)", script)
+    assert m, "PUMP_CADENCE_FALLBACK_S declaration not found"
+    assert int(m.group(1)) * int(m.group(2)) == _timer_period_s()
+
+
+def test_stale_threshold_is_a_multiple_of_the_real_cadence_not_a_flat_number():
+    """Three cadences of silence: one slow or coalesced run is normal, two consecutive fires that
+    wrote nothing means the pump is not running. Expressed as a multiplier so retuning the timer
+    retunes this with it — at the shipped 5-minute cadence that is 15 minutes, and at the old
+    15-minute cadence it would have been 45."""
+    script = _board_html_script()
+    m = re.search(r"const STALE_MULTIPLIER\s*=\s*([0-9]+)", script)
+    assert m, "STALE_MULTIPLIER declaration not found"
+    assert int(m.group(1)) == 3
+    assert _timer_period_s() * 3 == 15 * 60
+
+
+def test_freshness_info_treats_an_unparseable_timestamp_as_stale():
+    """`ts` that is present but not a finite number — a string, a NaN, a half-written doc — used
+    to be the WORST case: ageSeconds() returned null, ageText() returned null, the text fell
+    through to "0 giây trước" (freshest possible reading) and `null > threshold` evaluated false,
+    so it was reported fresh too. Unreadable must mean stale."""
+    script = _board_html_script()
+    body = re.search(r"function freshnessInfo\(([^)]*)\)\s*\{(.*?)\n\}", script, re.S)
+    assert body, "freshnessInfo() not found"
+    guard = re.search(
+        r'if \(s == null\) return \{ text: "[^"]*", stale: (true|false), never: (true|false) \};',
+        body.group(2),
+    )
+    assert guard, "freshnessInfo has no guard for a non-numeric timestamp"
+    assert guard.group(1) == "true", "an unreadable timestamp must be reported as stale"
+
+
+def test_the_as_of_line_itself_changes_when_the_data_stops_arriving():
+    """The banner alone is not enough. Someone glancing at the header reads the "dữ liệu tính
+    đến HH:MM" line — if that keeps rendering in the same quiet grey while the data is three days
+    old, the page still reads as current at a glance. The number itself has to react."""
+    script = _board_html_script()
+    assert "refresh-age-stale" in script, "the as-of line never takes a stale style"
+    assert re.search(r"info\.stale\s*\?", script), "renderRefresh does not branch on staleness"
+    css = re.search(r"\.refresh-age-stale\s*\{([^}]*)\}", _board_html())
+    assert css, ".refresh-age-stale CSS rule not found"
+    assert "--bad-ink" in css.group(1), "the stale as-of line must use the alarm tone"
 
 
 def test_stale_banner_markup_starts_hidden():
