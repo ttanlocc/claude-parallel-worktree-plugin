@@ -97,3 +97,6 @@ rows that have not landed yet. Several `PARTIAL` runs in a row are expected afte
 one run can drain it.
 
 To force one run without waiting for the timer: `systemctl --user start board-mirror.service`.
+If a run is already in flight, the second one logs `another run holds ... — stepping aside` and
+exits 0 rather than racing it: two runs reading the same snapshot compute their diffs against
+states that have already moved apart, and write over each other.
