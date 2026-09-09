@@ -917,8 +917,8 @@ def test_github_pr_query_attaches_check_state_to_open_prs_only():
                 cmd, 0, stdout=json.dumps([{"number": 7, "statusCheckRollup": rollup}]), stderr=""
             )
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps([
-            {"number": 7, "title": "a (AB#1)", "state": "OPEN", "url": "u", "isDraft": False},
-            {"number": 6, "title": "b (AB#2)", "state": "MERGED", "url": "v", "isDraft": False},
+            {"number": 7, "title": "an open one", "state": "OPEN", "url": "u", "isDraft": False},
+            {"number": 6, "title": "a merged one", "state": "MERGED", "url": "v", "isDraft": False},
         ]), stderr="")
 
     subprocess.run = mock_run
