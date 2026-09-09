@@ -253,9 +253,11 @@ def test_repeated_interrupted_runs_drain_the_backlog_and_then_go_quiet():
         for _ in range(12):
             proc = _run_mirror(env)
             assert proc.returncode == 0, f"interrupted-but-progressing run failed: {proc.stderr}"
-            m = re.search(r"(\d+) remaining", proc.stdout)
-            assert m, f"every run must report how much backlog is left: {proc.stdout!r}"
-            remaining.append(int(m.group(1)))
+            m = re.search(r"(\d+) batches remaining", proc.stdout)
+            # A run that finished prints the plain REFRESH_OK line and nothing about a backlog —
+            # that line is the "board is fully current" signal and must keep meaning exactly that.
+            assert m or "REFRESH_OK" in proc.stdout, f"run said nothing usable: {proc.stdout!r}"
+            remaining.append(int(m.group(1)) if m else 0)
             if remaining[-1] == 0:
                 break
 

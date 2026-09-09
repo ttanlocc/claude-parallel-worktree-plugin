@@ -196,12 +196,13 @@ if ((REMAINING > 0)); then
   # and the next timer fire picks up the rest, so this is not a failed run — but meta/status is in
   # the final batch and did not land, so nothing here may read as a completed refresh to the
   # journal or to anything watching for staleness.
-  echo "run-board-mirror: PARTIAL: wrote $WROTE documents in $DONE_BATCHES of ${#BATCHES[@]} batches, $REMAINING remaining for the next run"
+  echo "run-board-mirror: PARTIAL: wrote $WROTE documents in $DONE_BATCHES of ${#BATCHES[@]} batches, $REMAINING batches remaining for the next run"
   exit 0
 fi
 
-# The full-refresh signature the journal and the staleness check look for. last_ado_sweep comes
-# from the final batch — the one carrying meta/status — so it is only ever printed by a run that
-# actually finished.
+# Unchanged from before checkpointing, on purpose: this is the line the journal and anything
+# watching for staleness read as "the board is fully current", and only a run that got through
+# every batch — meta/status included, it is in the last one — may print it. last_ado_sweep comes
+# from that final batch's own reply.
 SWEEP="$(sed -n 's/.*last_ado_sweep=\([^ ,]*\).*/\1/p' <<<"$LAST_OK_LINE")"
-echo "run-board-mirror: REFRESH_OK: wrote $WROTE documents, last_ado_sweep=${SWEEP:-unknown}, 0 remaining"
+echo "run-board-mirror: REFRESH_OK: wrote $WROTE documents, last_ado_sweep=${SWEEP:-unknown}"
