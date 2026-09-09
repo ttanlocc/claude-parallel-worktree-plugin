@@ -783,7 +783,9 @@ def test_build_writes_emits_one_set_per_document_across_all_four_collections():
     assert _writes_for(writes, "sessions")[0]["doc_id"] == "t1"
     assert _writes_for(writes, "escalations")[0]["doc_id"] == "e1"
     assert _writes_for(writes, "tickets")[0]["doc_id"] == "8311"
-    assert _writes_for(writes, "meta")[0]["doc_id"] == "status"
+    # Two meta documents now, at opposite ends: the pump heartbeat leads, the completeness
+    # stamp trails. See test_build_writes_puts_the_pump_heartbeat_first_and_meta_status_last.
+    assert [w["doc_id"] for w in _writes_for(writes, "meta")] == ["pump", "status"]
     # Sessions, escalations AND tickets are all non-empty here — unlike the dedicated
     # "meta last" test below (which only populates sessions), this actually discriminates
     # "last overall" from "last among the only populated collection".
@@ -899,8 +901,7 @@ def test_build_writes_on_empty_sources_still_writes_meta():
     from a sweep that never ran, and only meta/status can say which."""
     writes = build_writes(agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1000.0)
 
-    assert len(writes) == 1
-    assert writes[0]["doc_id"] == "status"
+    assert [w["doc_id"] for w in writes] == ["pump", "status"]
 
 
 # --- Coverage added beyond the brief -----------------------------------------------------
@@ -949,7 +950,7 @@ def test_build_writes_data_matches_the_underlying_transform_for_each_collection(
     assert _writes_for(writes, "sessions")[0]["data"] == session_docs(agents, registry)["t1"]
     assert _writes_for(writes, "escalations")[0]["data"] == escalation_docs(escalations)["e1"]
     assert _writes_for(writes, "tickets")[0]["data"] == ticket_docs(tickets, pr_by_ticket)["8311"]
-    assert _writes_for(writes, "meta")[0]["data"] == meta_status(
+    assert _writes_for(writes, "meta")[-1]["data"] == meta_status(
         now=1234.0, ado_swept_at=999.0, sessions_scanned_at=1234.0, manager=manager
     )
 
@@ -1007,11 +1008,11 @@ def test_build_writes_emits_exactly_one_entry_per_document_with_no_duplicates_or
         now=1000.0,
     )
 
-    assert len(writes) == 7
+    assert len(writes) == 8
     assert len(_writes_for(writes, "sessions")) == 2
     assert len(_writes_for(writes, "escalations")) == 2
     assert len(_writes_for(writes, "tickets")) == 2
-    assert len(_writes_for(writes, "meta")) == 1
+    assert len(_writes_for(writes, "meta")) == 2  # pump heartbeat + completeness stamp
     assert {w["doc_id"] for w in _writes_for(writes, "sessions")} == {"t1", "t2"}
     assert {w["doc_id"] for w in _writes_for(writes, "escalations")} == {"e1", "e2"}
     assert {w["doc_id"] for w in _writes_for(writes, "tickets")} == {"1", "2"}

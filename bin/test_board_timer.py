@@ -218,9 +218,11 @@ def test_a_failed_batch_records_the_batches_that_landed_and_nothing_after_them()
     # and died identically. Batch 1 lands, batch 2 fails -> exactly batch 1 is recorded, batches
     # 3+ are never sent, and the run still fails loudly.
     with tempfile.TemporaryDirectory() as tmp:
+        # Batch 1 is the meta/pump heartbeat, batch 2 the first delete, so failing on call 3
+        # leaves exactly one deletion landed and everything after it untouched.
         env = _mirror_env(
             tmp, _write_fake_claude(tmp),
-            BOARD_MIRROR_BATCH_LIMIT="1", FAKE_CLAUDE_FAIL_ON="2",
+            BOARD_MIRROR_BATCH_LIMIT="1", FAKE_CLAUDE_FAIL_ON="3",
         )
         stale = _seed_stale_snapshot(env, 4)
 
@@ -249,7 +251,7 @@ def test_repeated_interrupted_runs_drain_the_backlog_and_then_go_quiet():
         )
         stale = _seed_stale_snapshot(env, 4)
 
-        remaining = []
+        remaining, left = [], []
         for _ in range(12):
             proc = _run_mirror(env)
             assert proc.returncode == 0, f"interrupted-but-progressing run failed: {proc.stderr}"
@@ -258,13 +260,18 @@ def test_repeated_interrupted_runs_drain_the_backlog_and_then_go_quiet():
             # that line is the "board is fully current" signal and must keep meaning exactly that.
             assert m or "REFRESH_OK" in proc.stdout, f"run said nothing usable: {proc.stdout!r}"
             remaining.append(int(m.group(1)) if m else 0)
+            # Documents, not batches: the meta/pump heartbeat takes a slot in every first batch,
+            # so the batch count is a coarse proxy that can hold steady across a run that really
+            # did drain something. What must shrink every single run is the backlog itself.
+            left.append(len(stale & _snapshot_keys(env)))
             if remaining[-1] == 0:
                 break
 
         assert len(remaining) > 1, "fixture produced a single batch — this proves nothing"
         assert remaining[-1] == 0, f"backlog never drained: {remaining}"
-        assert remaining == sorted(remaining, reverse=True), f"backlog grew: {remaining}"
-        assert len(set(remaining)) == len(remaining), f"a run made no progress: {remaining}"
+        assert remaining == sorted(remaining, reverse=True), f"batch backlog grew: {remaining}"
+        assert left == sorted(left, reverse=True), f"documents left grew: {left}"
+        assert left[0] > left[-1] == 0, f"the backlog never actually drained: {left}"
 
         final = _snapshot_keys(env)
         assert stale.isdisjoint(final), f"documents left un-deleted after draining: {final}"

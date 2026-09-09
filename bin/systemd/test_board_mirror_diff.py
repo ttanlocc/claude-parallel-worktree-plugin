@@ -215,13 +215,14 @@ PUMP = {"op": "set", "collection": "meta", "doc_id": "pump", "data": {"ran_at": 
 
 def test_chunk_stamps_the_backlog_size_onto_the_heartbeat_in_the_first_batch():
     # Only the chunker knows how many batches there are, and the board needs "still N to go" to
-    # tell a pump that is draining from one that has stopped.
+    # tell a pump that is draining from one that has stopped. One number, because the heartbeat
+    # rides batch 1: all it can honestly report is how much this run found to do.
     entries = [PUMP] + [_set("tickets", str(i), {"n": i}) for i in range(120)] + [META]
 
     batches = chunk_writes(entries, 50)
     stamped = stamp_heartbeat(batches)
 
-    assert stamped[0][0]["data"] == {"ran_at": 1, "batches_total": 3, "batches_remaining": 3}
+    assert stamped[0][0]["data"] == {"ran_at": 1, "batches_pending": 3}
     # Nothing else moved: the rest of batch 1 and every later batch are untouched.
     assert stamped[0][1:] == batches[0][1:]
     assert stamped[1:] == batches[1:]
