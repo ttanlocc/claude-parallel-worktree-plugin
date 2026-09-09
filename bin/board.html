@@ -244,6 +244,17 @@
   .esc-session { font-size: var(--fs-sm); color: var(--faint); }
   .esc-options { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
   .esc-no-options { font-size: var(--fs-sm); color: var(--faint); font-style: italic; }
+  /* An answer button is the one control on this page that changes anything, so it reads as a
+     button rather than as a .chip the options used to be — same shape as .refresh-btn. */
+  .esc-answer {
+    font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
+    padding: 4px 12px; border-radius: var(--radius-s);
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  .esc-answer:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
+  .esc-answer:disabled { cursor: default; opacity: .6; }
+  .esc-answer-picked { border-color: var(--accent); color: var(--accent-strong); background: var(--surface-2); }
+  .esc-answer-error { color: var(--bad-ink); font-weight: 600; }
   /* Supporting detail (reason/evidence/tier), always last in the card, set off from the
      question+options above it by a thin rule so the card stays scannable at a glance. */
   .esc-evidence { display: flex; flex-direction: column; gap: 3px; padding-top: 5px; border-top: 1px dashed var(--border-soft); }
@@ -547,11 +558,13 @@ function sessionLabel(sessionId) {
 }
 
 /* ---------- shared state ---------- */
-const view = { sessions: [], escalations: [], tickets: [], assignments: [], meta: null, db: null };
+// `answers` is the only collection this page WRITES (see sendAnswer) — it is read back too, so a
+// card can say a choice is recorded but not yet in the manager's ledger.
+const view = { sessions: [], escalations: [], tickets: [], assignments: [], answers: [], meta: null, db: null };
 // Extra bookkeeping alongside the required `view` shape above — which source has fired at least
 // once (so "empty" and "not loaded yet" never look the same) and which source's listener died.
-view.loaded = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
-view.errors = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
+view.loaded = { sessions: false, escalations: false, tickets: false, assignments: false, answers: false, meta: false };
+view.errors = { sessions: false, escalations: false, tickets: false, assignments: false, answers: false, meta: false };
 // Describes the "Làm mới" button, not a data source: whether a manual read is in flight, and
 // why the last one failed.
 view.refresh = { busy: false, error: null };
@@ -581,6 +594,62 @@ function collapsedGroup(label, rows, openHint) {
 }
 
 /* ---------- escalations ---------- */
+// Answering, from the board itself. The chosen option is written to `escalation_answers/<id>` —
+// deliberately NOT into `escalations`, which is the pump's own write set: anything put there
+// would be overwritten by the next mirror run, or deleted outright once the document dropped out
+// of board_state.py's output. The pump reads this collection back on its next run and
+// bin/systemd/board_mirror_answers.py decides what may be appended to the manager's ledger, so
+// nothing here is the decision — this only records what the CTO picked. One pump cycle later the
+// escalation's own status flips to "answered" and the card moves to the resolved group below.
+const ANSWERS_COLLECTION = "escalation_answers";
+const answerState = new Map();   // escalation id -> "busy" while a write is in flight, else why it failed
+
+async function sendAnswer(esc, option) {
+  if (!view.db || answerState.get(esc.id) === "busy") return;
+  answerState.set(esc.id, "busy");
+  render();
+  try {
+    // set(), not update(): this is the whole document, and the first pick has nothing to merge
+    // into. A second pick before the pump runs simply replaces it — last click wins, one document.
+    await view.db.doc(ANSWERS_COLLECTION + "/" + esc.id).set({ answer: option, at: Date.now() });
+    answerState.delete(esc.id);
+  } catch (e) {
+    console.error("sendAnswer", e);
+    answerState.set(esc.id, "Không ghi được lựa chọn — thử lại, hoặc trả lời ở dashboard cục bộ (cổng 4400).");
+  }
+  render();
+}
+
+// Buttons only for a record genuinely waiting on a human, and only for options the worker itself
+// offered — board_mirror_answers.py accepts nothing else, so anything wider here would be a
+// control that silently does nothing. `open` is excluded on purpose: the manager daemon is still
+// deciding those, and answering one here would race it.
+function answerControls(esc, options) {
+  const answerable = view.db && esc.status === "needs_human" && esc.answer == null && options.length > 0;
+  if (!answerable) {
+    return [
+      options.length
+        ? h("div", { class: "esc-options" }, options.map((opt) => h("span", { class: "chip" }, opt)))
+        : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
+      h("div", { class: "esc-session" }, "chưa trả lời được ở đây — dùng dashboard cục bộ (cổng 4400)."),
+    ];
+  }
+  const state = answerState.get(esc.id);
+  const picked = view.answers.find((a) => a.id === esc.id);
+  return [
+    h("div", { class: "esc-options" }, options.map((opt) => h("button", {
+      class: picked && picked.answer === opt ? "esc-answer esc-answer-picked" : "esc-answer",
+      type: "button",
+      disabled: state === "busy" ? "" : null,
+      onclick: () => sendAnswer(esc, opt),
+    }, opt))),
+    picked
+      ? h("div", { class: "esc-session" }, "đã chọn: " + picked.answer + " — chờ bơm ghi vào sổ escalation (≤ 1 chu kỳ).")
+      : null,
+    state && state !== "busy" ? h("div", { class: "esc-session esc-answer-error" }, state) : null,
+  ].filter(Boolean);
+}
+
 function escalationCard(esc) {
   const sev = esc.severity in SEVERITY_RANK ? esc.severity : "P2";
   const drift = esc.kind !== esc.kind_raw;
@@ -609,13 +678,7 @@ function escalationCard(esc) {
     ),
     h("div", { class: "esc-question" }, esc.question || "(không có nội dung câu hỏi)"),
     h("div", { class: "esc-session" }, "phiên: " + sessionLabel(esc.session)),
-    // Read-only mirror (step 1 of the migration): these are the options the worker offered, not
-    // buttons — nothing here can deliver an answer to the worker yet, so a clickable-looking
-    // button would be a dead end. The line below says where answering actually still works.
-    options.length
-      ? h("div", { class: "esc-options" }, options.map((opt) => h("span", { class: "chip" }, opt)))
-      : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
-    h("div", { class: "esc-session" }, "chỉ xem ở đây — trả lời tại dashboard cục bộ (cổng 4400)."),
+    answerControls(esc, options),
     // Supporting detail — why this reached a human, and what it touches — always last so the
     // question and options above stay the first thing scanned.
     esc.reason ? h("div", { class: "esc-session" }, "vì sao: " + esc.reason) : null,
@@ -1218,6 +1281,9 @@ const SOURCES = [
   { key: "escalations", ref: (db) => db.collection("escalations"), apply: (s) => { view.escalations = docsOf(s); } },
   { key: "tickets", ref: (db) => db.collection("tickets"), apply: (s) => { view.tickets = docsOf(s); } },
   { key: "assignments", ref: (db) => db.collection("assignments"), apply: (s) => { view.assignments = docsOf(s); } },
+  // The page's own writes, read back: an answer stays here until the pump appends it to the
+  // ledger, and that round trip is the only thing a card can show to prove a click landed.
+  { key: "answers", ref: (db) => db.collection(ANSWERS_COLLECTION), apply: (s) => { view.answers = docsOf(s); } },
   {
     key: "meta",
     ref: (db) => db.doc("meta/status"),

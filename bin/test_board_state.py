@@ -3537,3 +3537,58 @@ def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
     body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
     assert body, "ticketRow() not found"
     assert "t.state" in body.group(1) and "t.derived_status" in body.group(1)
+
+
+# ---------- the board's write path (bin/systemd/board_mirror_answers.py is the other half) ----------
+
+
+def _answers_collection():
+    """The one collection name the page writes and the pump's return path reads. Imported rather
+    than typed twice here: a rename on either side would otherwise leave the two halves pointing
+    at different collections, with a click that lands in storage nobody ever reads."""
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd"))
+    from board_mirror_answers import ANSWERS_COLLECTION
+
+    return ANSWERS_COLLECTION
+
+
+def test_board_writes_a_chosen_option_to_the_collection_the_return_path_reads():
+    script = _board_html_script()
+    assert re.search(
+        r'const ANSWERS_COLLECTION\s*=\s*"' + re.escape(_answers_collection()) + r'"', script
+    ), "board.html does not write to the collection board_mirror_answers.py reads back"
+    assert re.search(
+        r'view\.db\.doc\(ANSWERS_COLLECTION \+ "/" \+ esc\.id\)\.set\(', script
+    ), "the page has no write path — an option click records nothing"
+
+
+def test_board_never_writes_into_the_collections_the_pump_owns():
+    """`escalations` is board_state.py's write set: the next mirror run replays it, so anything
+    the page put there is overwritten — or deleted once the doc leaves board_state.py's output."""
+    script = _board_html_script()
+    for owned in ("escalations", "sessions", "tickets", "assignments", "meta"):
+        # Reading these is the whole point of the page (SOURCES does exactly that) — only a write
+        # verb chained onto one is the failure.
+        assert not re.search(
+            r'\.doc\("' + owned + r'/[^)]*\)\.(set|update|delete)\(', script
+        ), f"the page writes into the pump's own {owned}"
+    # Every document ref the page builds off the live db handle, so a second write anywhere fails
+    # this rather than quietly aiming at a collection the pump replays over.
+    refs = re.findall(r"view\.db\.doc\(([^)]*)\)", script)
+    assert refs == ['ANSWERS_COLLECTION + "/" + esc.id'], f"unexpected db document writes: {refs}"
+
+
+def test_board_only_offers_an_answer_control_on_a_record_still_waiting_for_a_human():
+    """The same gate board_mirror_answers.accepted_answers() applies. Offering a button any wider
+    than that gate is a control that looks live and is silently discarded on the way down —
+    `open` records are still the daemon's to decide, and one already carrying an answer may
+    already have been acted on."""
+    body = re.search(r"function answerControls\(([^)]*)\)\s*\{(.*?)\n\}", _board_html_script(), re.S)
+    assert body, "answerControls() not found"
+    guard = re.search(r"const answerable =([^;]*);", body.group(2))
+    assert guard, "answerControls() has no single answerable guard"
+    for required in ('esc.status === "needs_human"', "esc.answer == null", "options.length"):
+        assert required in guard.group(1), f"the answer gate does not check {required}"
