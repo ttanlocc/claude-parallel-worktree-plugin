@@ -541,7 +541,8 @@ def test_prs_by_ticket_maps_a_single_ab_ref_in_the_title():
         }
     ]
 
-    assert prs_by_ticket(prs) == {"5061": {"number": 720, "state": "MERGED", "url": "https://github.com/o/r/pull/720"}}
+    assert prs_by_ticket(prs) == {"5061": {"number": 720, "state": "MERGED", "url": "https://github.com/o/r/pull/720",
+                              "review": None, "checks": None}}
 
 
 def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
@@ -559,7 +560,8 @@ def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
     docs = prs_by_ticket(prs)
 
     assert set(docs) == {"8196", "8197"}
-    assert docs["8196"] == {"number": 100, "state": "OPEN", "url": "https://github.com/o/r/pull/100"}
+    assert docs["8196"] == {"number": 100, "state": "OPEN", "url": "https://github.com/o/r/pull/100",
+                           "review": None, "checks": None}
     assert docs["8197"] == docs["8196"]
 
 
@@ -1994,7 +1996,8 @@ def test_main_actually_wires_the_real_pr_reader_into_the_collect_call(monkeypatc
 
     writes = json.loads(capsys.readouterr().out)
     tickets = [w for w in writes if w["collection"] == "tickets"]
-    assert tickets[0]["data"]["pr"] == {"number": 1, "state": "OPEN", "url": "pu"}
+    assert tickets[0]["data"]["pr"] == {"number": 1, "state": "OPEN", "url": "pu",
+                                       "review": None, "checks": None}
 
 
 def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
@@ -3199,3 +3202,290 @@ def test_board_marks_a_stale_claim_as_stale():
 def test_board_says_why_a_claim_was_ignored():
     script = _board_html_script()
     assert re.search(r"\bs\.claim_ignored\b", script), "a refused claim is dropped silently on the page"
+
+
+# ---------------------------------------------------------------------------
+# Derived per-ticket status: whose move is it now.
+#
+# The complaint this answers: five tickets all reading "Active" while being in five genuinely
+# different situations — one needing the CTO to click merge, one waiting on a reviewer, one on a
+# product decision, one never pushed. "Active" is a true ADO field and a useless one, because it
+# does not say who has to act next. Every status below is named for exactly that.
+# ---------------------------------------------------------------------------
+
+
+def _pr_title(text, *ticket_ids):
+    """A PR title carrying the work item(s) it closes, the way this repo's CI requires.
+
+    Assembled rather than written out literally: a committed `AB#<number>` is picked up by ADO as
+    a real work-item link, and a test fixture must not mint one. The ids here are synthetic.
+    """
+    return text + " (" + ", ".join("AB#" + t for t in ticket_ids) + ")"
+
+
+def _pr(**over):
+    pr = {"number": 700, "state": "OPEN", "url": "https://example.test/pr/700",
+          "review": None, "checks": None}
+    pr.update(over)
+    return pr
+
+
+def test_a_pr_carries_its_review_decision_and_check_rollup_onto_the_ticket():
+    from board_state import prs_by_ticket
+
+    out = prs_by_ticket([{
+        "number": 718, "title": _pr_title("fix: something", "1001"), "url": "u", "state": "OPEN",
+        "isDraft": False, "reviewDecision": "APPROVED",
+        "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }])
+
+    assert out["1001"]["review"] == "APPROVED"
+    assert out["1001"]["checks"] == "passing"
+
+
+def test_a_repo_that_requires_no_review_reports_no_decision_rather_than_an_empty_string():
+    from board_state import prs_by_ticket
+
+    out = prs_by_ticket([{"number": 1, "title": _pr_title("x", "1001"), "url": "u", "state": "OPEN",
+                          "isDraft": False, "reviewDecision": ""}])
+
+    assert out["1001"]["review"] is None
+    assert out["1001"]["checks"] is None, "no rollup at all is not a green rollup"
+
+
+def test_one_failing_check_makes_the_whole_rollup_failing():
+    from board_state import check_rollup
+
+    assert check_rollup([
+        {"conclusion": "SUCCESS"}, {"conclusion": "FAILURE"}, {"conclusion": "SUCCESS"},
+    ]) == "failing"
+
+
+def test_a_check_still_running_holds_the_rollup_at_pending():
+    from board_state import check_rollup
+
+    assert check_rollup([{"conclusion": "SUCCESS"}, {"status": "IN_PROGRESS", "conclusion": None}]) == "pending"
+    assert check_rollup([{"state": "PENDING"}]) == "pending"
+
+
+def test_a_check_conclusion_nobody_recognises_is_pending_and_never_green():
+    """The same fail-toward-caution rule normalize_state() uses: an unrecognised word must never
+    become the answer that says "merge it". Pending neither shouts nor clears."""
+    from board_state import check_rollup
+
+    assert check_rollup([{"conclusion": "SOME_NEW_GITHUB_WORD"}]) == "pending"
+
+
+def test_skipped_and_neutral_checks_do_not_hold_a_pr_back():
+    from board_state import check_rollup
+
+    assert check_rollup([{"conclusion": "SUCCESS"}, {"conclusion": "SKIPPED"}, {"conclusion": "NEUTRAL"}]) == "passing"
+    assert check_rollup([]) is None
+    assert check_rollup(None) is None
+
+
+def test_status_says_nobody_has_picked_up_a_ticket_no_assignment_references():
+    from board_state import ticket_status
+
+    assert ticket_status("Active", None, claimed=False, escalated=False) == "unclaimed"
+
+
+def test_status_says_a_claimed_ticket_with_no_pr_is_waiting_to_be_pushed():
+    from board_state import ticket_status
+
+    assert ticket_status("Active", None, claimed=True, escalated=False) == "waiting_push"
+
+
+def test_status_says_an_open_unapproved_pr_is_waiting_for_review():
+    from board_state import ticket_status
+
+    assert ticket_status("Active", _pr(review="REVIEW_REQUIRED"), claimed=True, escalated=False) == "waiting_review"
+
+
+def test_status_says_an_approved_green_pr_is_waiting_for_someone_to_click_merge():
+    """The one the CTO actually wants to find: code done, reviewed, CI green, and the only thing
+    left is a click nobody has made."""
+    from board_state import ticket_status
+
+    pr = _pr(review="APPROVED", checks="passing")
+    assert ticket_status("Active", pr, claimed=True, escalated=False) == "waiting_merge"
+
+
+def test_an_approved_pr_on_a_repo_with_no_checks_is_still_waiting_to_merge():
+    from board_state import ticket_status
+
+    assert ticket_status("Active", _pr(review="APPROVED", checks=None), claimed=True, escalated=False) == "waiting_merge"
+
+
+def test_an_approved_pr_whose_checks_are_still_running_is_not_yet_waiting_to_merge():
+    from board_state import ticket_status
+
+    pr = _pr(review="APPROVED", checks="pending")
+    assert ticket_status("Active", pr, claimed=True, escalated=False) == "waiting_review"
+
+
+def test_status_says_checks_failing_even_when_the_pr_is_already_approved():
+    """Precedence, and the expensive half of it: an approval and a red check coexist all the time
+    (a reviewer approves, a later push breaks CI). Calling that "chờ bấm merge" sends the CTO to
+    click a button GitHub will refuse."""
+    from board_state import ticket_status
+
+    pr = _pr(review="APPROVED", checks="failing")
+    assert ticket_status("Active", pr, claimed=True, escalated=False) == "checks_failing"
+
+
+def test_an_open_escalation_outranks_every_pr_state():
+    """The hard stop. Every other status names work that can proceed; an open escalation names
+    work that cannot, and it is the only one here a machine can never clear."""
+    from board_state import ticket_status
+
+    pr = _pr(review="APPROVED", checks="passing")
+    assert ticket_status("Active", pr, claimed=True, escalated=True) == "waiting_decision"
+    assert ticket_status("Active", _pr(checks="failing"), claimed=True, escalated=True) == "waiting_decision"
+
+
+def test_status_says_a_merged_pr_on_a_ticket_nobody_closed():
+    from board_state import ticket_status
+
+    pr = _pr(state="MERGED")
+    assert ticket_status("Active", pr, claimed=True, escalated=False) == "merged_not_closed"
+
+
+def test_a_merged_pr_on_a_closed_ticket_has_nothing_left_to_say():
+    from board_state import ticket_status
+
+    assert ticket_status("Closed", _pr(state="MERGED"), claimed=True, escalated=False) is None
+
+
+def test_a_finished_ticket_is_never_reported_as_nobody_has_picked_it_up():
+    """"Chưa ai nhận" on a Closed ticket is a lie with an action attached — it invites the
+    manager to dispatch a worker at work that is already finished."""
+    from board_state import ticket_status
+
+    assert ticket_status("Closed", None, claimed=False, escalated=False) is None
+
+
+def test_an_abandoned_pr_falls_back_to_whoever_owns_the_ticket():
+    """A CLOSED-unmerged PR is a superseded attempt. Whose move it is now is exactly the same as
+    if it had never existed: somebody has to push a new one."""
+    from board_state import ticket_status
+
+    assert ticket_status("Active", _pr(state="CLOSED"), claimed=True, escalated=False) == "waiting_push"
+    assert ticket_status("Active", _pr(state="CLOSED"), claimed=False, escalated=False) == "unclaimed"
+
+
+def test_board_state_and_board_html_agree_on_which_ticket_states_mean_done():
+    from board_state import TICKET_DONE_STATES
+
+    block = re.search(r"const TICKET_DONE_STATES = new Set\(\[(.*?)\]\);", _board_html_script(), re.S)
+    assert block, "board.html no longer declares TICKET_DONE_STATES"
+    assert set(re.findall(r'"([^"]+)"', block.group(1))) == set(TICKET_DONE_STATES)
+
+
+# --- the derived status on the ticket document ---
+
+
+def test_ticket_docs_publish_the_derived_status_beside_the_ado_state():
+    """Beside, never instead of. The ADO state is a real field a person maintains; the derived
+    status is what the board worked out. Replacing one with the other would hide a disagreement
+    that is itself worth seeing."""
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1001", "title": "x", "state": "Active"}],
+        {"1001": _pr(review="APPROVED", checks="passing")},
+        assignment_refs={"1001"},
+    )
+
+    assert docs["1001"]["state"] == "Active"
+    assert docs["1001"]["derived_status"] == "waiting_merge"
+
+
+def test_ticket_docs_read_an_open_escalation_through_the_session_that_filed_it():
+    """Escalation records carry no ticket field at all — only `session_id`. The registry is what
+    knows which tickets a session's worktree was provisioned for, so that is the join."""
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1001", "title": "x", "state": "Active"}],
+        {"1001": _pr(review="APPROVED", checks="passing")},
+        assignment_refs={"1001"},
+        escalated_refs={"1001"},
+    )
+
+    assert docs["1001"]["derived_status"] == "waiting_decision"
+
+
+def test_build_writes_joins_assignments_and_open_escalations_onto_the_tickets():
+    writes = build_writes(
+        agents=[],
+        registry={"w1": {"session_id": "s1", "ado_ids": ["1002"]}},
+        escalations=[{"id": "e1", "session_id": "s1", "kind": "scope_question", "question": "?"}],
+        tickets=[{"id": "1001", "title": "a", "state": "Active"},
+                 {"id": "1002", "title": "b", "state": "Active"},
+                 {"id": "1003", "title": "c", "state": "Active"}],
+        pr_by_ticket={},
+        now=1000.0,
+        assignments=[{"id": "a1", "ts": 1.0, "ado_refs": ["1001"], "status": "in_progress"},
+                     {"id": "a2", "ts": 1.0, "ado_refs": ["1002"], "status": "in_progress"}],
+    )
+
+    by_id = {w["doc_id"]: w["data"] for w in _writes_for(writes, "tickets")}
+    assert by_id["1001"]["derived_status"] == "waiting_push"
+    assert by_id["1002"]["derived_status"] == "waiting_decision", "the open escalation must reach the ticket"
+    assert by_id["1003"]["derived_status"] == "unclaimed"
+
+
+def test_a_cancelled_assignment_does_not_keep_a_ticket_looking_picked_up():
+    """Cancelled is abandoned work. Counting it would tell the manager a ticket has an owner when
+    what it actually needs is dispatching again."""
+    writes = build_writes(
+        agents=[], registry={}, escalations=[],
+        tickets=[{"id": "1001", "title": "a", "state": "Active"}],
+        pr_by_ticket={}, now=1000.0,
+        assignments=[{"id": "a1", "ts": 1.0, "ado_refs": ["1001"], "status": "cancelled"}],
+    )
+
+    assert _writes_for(writes, "tickets")[0]["data"]["derived_status"] == "unclaimed"
+
+
+def test_an_answered_escalation_stops_blocking_the_ticket():
+    writes = build_writes(
+        agents=[], registry={"w1": {"session_id": "s1", "ado_ids": ["1001"]}},
+        escalations=[{"id": "e1", "session_id": "s1", "kind": "scope_question",
+                      "question": "?", "status": "answered"}],
+        tickets=[{"id": "1001", "title": "a", "state": "Active"}],
+        pr_by_ticket={}, now=1000.0,
+        assignments=[{"id": "a1", "ts": 1.0, "ado_refs": ["1001"], "status": "in_progress"}],
+    )
+
+    assert _writes_for(writes, "tickets")[0]["data"]["derived_status"] == "waiting_push"
+
+
+# --- the page ---
+
+
+def test_board_gives_the_derived_status_its_own_ticket_column():
+    script = _board_html_script()
+    assert re.search(r"\bt\.derived_status\b", script), "board.html never reads the derived status"
+    assert "DERIVED_STATUS_LABEL" in script, "no Vietnamese gloss for the derived statuses"
+
+
+def test_board_labels_every_derived_status():
+    from board_state import TICKET_STATUSES
+
+    script = _board_html_script()
+    for name in ("DERIVED_STATUS_LABEL", "DERIVED_STATUS_TONE"):
+        block = re.search(r"const " + name + r" = \{(.*?)\};", script, re.S)
+        assert block, f"board.html has no {name} map"
+        for status in TICKET_STATUSES:
+            assert re.search(rf"\b{status}\b", block.group(1)), f"{status} is missing from {name}"
+
+
+def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
+    """Both columns, always. The derived status answers "whose move"; the ADO state is what a
+    person put there, and a board that quietly replaces one with the other hides the case where
+    they disagree."""
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "ticketRow() not found"
+    assert "t.state" in body.group(1) and "t.derived_status" in body.group(1)

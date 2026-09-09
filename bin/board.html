@@ -434,6 +434,26 @@ const BLOCKED_KIND_LABEL = {
   dependency: "chờ việc khác", environment: "vướng môi trường",
 };
 
+// What the board WORKED OUT about a ticket, as opposed to the ADO state a person maintains
+// (board_state.TICKET_STATUSES, in that file's precedence order). Every word here answers one
+// question and only that question: whose move is it now. "Active" answers it for nobody, which is
+// how five tickets — one needing a merge click, one a reviewer, one a product decision, one a
+// push — all read identically.
+const DERIVED_STATUS_LABEL = {
+  waiting_decision: "chờ quyết định", checks_failing: "CI đang đỏ",
+  waiting_merge: "chờ bấm merge", waiting_review: "chờ review",
+  merged_not_closed: "đã merge, vé chưa đóng", waiting_push: "chờ đẩy code lên",
+  unclaimed: "chưa ai nhận",
+};
+// `waiting_merge` is green and not merely "another state": it is the only one of these whose next
+// move belongs to the person reading the board, so it has to be findable at a glance.
+const DERIVED_STATUS_TONE = {
+  waiting_decision: "pill-bad", checks_failing: "pill-bad",
+  waiting_merge: "pill-good", waiting_review: "pill-accent",
+  merged_not_closed: "pill-warn", waiting_push: "pill-warn",
+  unclaimed: "pill-neutral",
+};
+
 const RESOLVED_STATUSES = new Set(["answered", "dismissed"]);
 // Same list the localhost dashboard uses for "not done" vs "done" — keep the two boards agreeing
 // on what "done" means for a ticket.
@@ -945,7 +965,15 @@ function ticketRow(t, opts) {
       ? h("a", { href, target: "_blank", rel: "noopener" }, "AB#" + t.id)
       : "AB#" + t.id),
     h("td", { class: "title-cell" }, t.title || "(không có tiêu đề)"),
+    // Both columns, side by side. The ADO state is a field a person maintains; the one after it
+    // is what the board derived from the evidence — and where the two disagree, that is itself
+    // the thing worth seeing. A null derived status means there is genuinely nothing left to
+    // chase (a closed ticket whose PR merged), never "unknown".
     h("td", {}, pill(ticketStateTone(t.state), t.state || "—")),
+    h("td", {}, t.derived_status
+      ? pill(DERIVED_STATUS_TONE[t.derived_status] || "pill-neutral",
+             DERIVED_STATUS_LABEL[t.derived_status] || t.derived_status)
+      : "—"),
     h("td", {}, t.sprint || "—"),
     h("td", {}, t.type || "—"),
     h("td", {}, ticketPrChip(t.pr) || "—"),
@@ -957,6 +985,8 @@ function ticketTable(rows, opts) {
   opts = opts || {};
   const headers = [
     h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
+    h("th", { title: "Việc này đang chờ ai ra tay — bảng tự suy ra từ PR, escalation và sổ giao việc" },
+      "Chờ ai"),
     h("th", {}, "Sprint"), h("th", {}, "Loại"), h("th", {}, "PR"),
   ];
   if (opts.showHolder) headers.push(h("th", {}, "Đang giữ"));

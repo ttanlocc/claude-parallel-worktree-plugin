@@ -272,7 +272,14 @@ def get_github_prs(repo_root: str) -> list[dict]:
 
     def run():
         result = subprocess.run(
-            ["gh", "pr", "list", "--state", "all", "--json", "number,title,url,state,isDraft", "--limit", "500"],
+            # `reviewDecision` and `statusCheckRollup` ride along on the call that was already
+            # being made — `gh` returns them for free and a second call would double the sweep's
+            # latency AND be able to disagree with the first about which PRs exist. They are what
+            # lets the board tell "waiting for review" from "waiting for someone to click merge",
+            # which is the whole difference between a ticket needing a person and a ticket needing
+            # the CTO. See board_state.prs_by_ticket()/ticket_status().
+            ["gh", "pr", "list", "--state", "all", "--limit", "500", "--json",
+             "number,title,url,state,isDraft,reviewDecision,statusCheckRollup"],
             capture_output=True,
             text=True,
             check=True,

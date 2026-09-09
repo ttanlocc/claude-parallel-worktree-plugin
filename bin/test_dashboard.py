@@ -861,3 +861,50 @@ def test_manager_prefs_fall_back_to_the_defaults_when_the_file_is_unusable(tmp_p
         "effort": manager_session.MANAGER_EFFORT,
     }
     assert manager_session.read_prefs(str(tmp_path / "missing.json"))["effort"] == manager_session.MANAGER_EFFORT
+
+
+def test_github_pr_query_asks_for_the_review_and_check_state_in_the_same_call():
+    """Review decision and check rollup arrive on the SAME `gh pr list` the board already runs.
+    A second call would double the latency of every sweep and could disagree with the first about
+    which PRs exist — and `gh` returns both fields for free."""
+    original_run = subprocess.run
+    dashboard._CACHE.pop("github_prs:/repo", None)
+    calls = []
+
+    def mock_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    subprocess.run = mock_run
+    try:
+        dashboard.get_github_prs("/repo")
+    finally:
+        subprocess.run = original_run
+        dashboard._CACHE.pop("github_prs:/repo", None)
+
+    assert len(calls) == 1, "the board must not grow a second gh call"
+    fields = calls[0][calls[0].index("--json") + 1].split(",")
+    for wanted in ("number", "title", "url", "state", "isDraft", "reviewDecision", "statusCheckRollup"):
+        assert wanted in fields, f"gh pr list no longer asks for {wanted}"
+
+
+def test_github_pr_query_keeps_its_existing_cache_tier():
+    """The enrich tier, not the 1.5s local one: PR review state changes on human timescales, and
+    a 20s subprocess per board render is what that tier exists to prevent."""
+    original_run = subprocess.run
+    dashboard._CACHE.pop("github_prs:/repo", None)
+    calls = []
+
+    def mock_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    subprocess.run = mock_run
+    try:
+        dashboard.get_github_prs("/repo")
+        dashboard.get_github_prs("/repo")
+    finally:
+        subprocess.run = original_run
+        dashboard._CACHE.pop("github_prs:/repo", None)
+
+    assert len(calls) == 1, "the second call was not served from the cache"

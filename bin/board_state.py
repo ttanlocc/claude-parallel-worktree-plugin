@@ -699,33 +699,155 @@ def prs_by_ticket(prs: list[dict]) -> dict[str, dict]:
             if current is None or _pr_priority(pr) > _pr_priority(current):
                 winners[ticket_id] = pr
     return {
-        ticket_id: {"number": pr.get("number"), "state": pr.get("state"), "url": pr.get("url")}
+        ticket_id: {
+            "number": pr.get("number"),
+            "state": pr.get("state"),
+            "url": pr.get("url"),
+            # "" is what `gh` returns when the repo requires no review at all; that is "no
+            # decision", not a decision, and it must not read as one.
+            "review": pr.get("reviewDecision") or None,
+            "checks": check_rollup(pr.get("statusCheckRollup")),
+        }
         for ticket_id, pr in winners.items()
     }
 
 
-def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | None = None) -> dict[str, dict]:
+# GitHub's own words, split three ways. A CheckRun reports `conclusion` once it has finished; a
+# StatusContext reports `state`. Read whichever is present.
+_CHECK_FAILING = frozenset({"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"})
+# NEUTRAL and SKIPPED are green enough to merge on — GitHub's own branch protection treats them
+# that way, and a skipped job holding a PR at "not ready" would park every conditional workflow.
+_CHECK_PASSING = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
+
+
+def check_rollup(rollup) -> str | None:
+    """"failing" / "pending" / "passing" for a PR's checks, or None when it has none.
+
+    None, never "passing": a repo with no CI has nothing to be green, and calling that green
+    would be a claim nobody measured — the same distinction read_session_usage() draws between
+    "no transcript" and "a transcript that recorded nothing".
+
+    Anything GitHub says that is in neither list — a word added after this was written, or a
+    check run with no conclusion yet — is "pending". That is the fail-toward-caution default
+    normalize_state() uses: an unrecognised word must never become the answer that tells the CTO
+    to click merge, and it must not shout "failing" either.
+    """
+    if not isinstance(rollup, list) or not rollup:
+        return None
+    verdicts = []
+    for check in rollup:
+        if not isinstance(check, dict):
+            continue
+        verdicts.append(check.get("conclusion") or check.get("state"))
+    if not verdicts:
+        return None
+    if any(v in _CHECK_FAILING for v in verdicts):
+        return "failing"
+    if all(v in _CHECK_PASSING for v in verdicts):
+        return "passing"
+    return "pending"
+
+
+# Same list board.html uses to split "not done" from "done" (its TICKET_DONE_STATES), and the same
+# one the localhost dashboard uses — kept here so ticket_status() can reason about it, with a test
+# that fails the moment the two copies disagree.
+TICKET_DONE_STATES = frozenset({"Closed", "Removed", "Done"})
+
+# Every derived status, in the precedence order ticket_status() applies them. The order IS the
+# argument, so it lives here rather than being implied by the shape of an if-chain:
+#
+#  1. waiting_decision  — an open escalation is a HARD STOP. Every other status names work that
+#     can proceed; this one names work that cannot, and it is the only one on this list a machine
+#     can never clear. Showing "waiting for review" on a ticket whose scope is still in dispute
+#     sends a reviewer to read a diff that may be thrown away.
+#  2. checks_failing    — beats waiting_merge because approval and a red check coexist constantly
+#     (a reviewer approves, a later push breaks CI). If waiting_merge won, the board would tell
+#     the CTO to click a button GitHub will refuse. The reverse mistake is cheap and
+#     self-correcting: a mergeable PR reads as failing until the rollup settles.
+#  3. waiting_merge     — approved and green. The one the CTO is looking for.
+#  4. waiting_review    — open, not yet approved. Mutually exclusive with 3 in practice; ordered
+#     under it so the strongest positive claim wins if `gh` ever reports both.
+#  5. merged_not_closed — only reachable once no OPEN PR claims the ticket, because
+#     _pr_priority() already hands this function the single most interesting PR per ticket.
+#  6. waiting_push      — some assignment owns it, nothing has been pushed.
+#  7. unclaimed         — nothing references it at all. Exclusive with 6 by construction.
+#
+# Only two of those orderings are genuinely contested (1 over everything, and 2 over 3); the rest
+# are near-exclusive and ordered for determinism rather than for judgement.
+TICKET_STATUSES = (
+    "waiting_decision", "checks_failing", "waiting_merge", "waiting_review",
+    "merged_not_closed", "waiting_push", "unclaimed",
+)
+
+
+def ticket_status(ticket_state, pr: dict | None, claimed: bool, escalated: bool) -> str | None:
+    """Whose move is it now — or None when there is nothing left to chase.
+
+    None is a real answer and not a gap: a Closed ticket whose PR merged has no next move, and
+    "chưa ai nhận" printed against it would be a lie with an action attached (it invites a manager
+    to dispatch a worker at finished work).
+
+    `claimed` is "some non-cancelled assignment lists this ticket". It is deliberately NOT "there
+    are commits on the branch": answering that needs a subprocess per worktree, against branches
+    whose worktrees are routinely removed, and it would not change whose move it is — pushed or
+    not, the ticket's owner is the one who has to act. See the report for that trade.
+    """
+    if escalated:
+        return "waiting_decision"
+    pr = pr or {}
+    if pr.get("state") == "OPEN":
+        if pr.get("checks") == "failing":
+            return "checks_failing"
+        # A repo with no checks at all (None) is not held back; one whose checks have not
+        # finished (pending) is — "waiting to merge" must mean it can actually be merged.
+        if pr.get("review") == "APPROVED" and pr.get("checks") != "pending":
+            return "waiting_merge"
+        return "waiting_review"
+    if ticket_state in TICKET_DONE_STATES:
+        return None
+    if pr.get("state") == "MERGED":
+        return "merged_not_closed"
+    # A CLOSED-unmerged PR is a superseded attempt; whose move it is now is the same as if it had
+    # never existed, so it falls through rather than getting a status of its own.
+    return "waiting_push" if claimed else "unclaimed"
+
+
+def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | None = None,
+                assignment_refs=None, escalated_refs=None) -> dict[str, dict]:
     """One document per ADO work item, keyed by its id.
 
     "Not started", "in flight" and "done this sprint" are filters over `state` + `sprint` on
     the page, not three collections here. `handed_off`/`handed_off_to` are a fourth: a ticket the
     owner activated but no longer holds stays visible instead of vanishing the moment AssignedTo
     changes — see _ticket_ownership().
+
+    `derived_status` is published BESIDE `state`, never instead of it. `state` is a real ADO field
+    a person maintains; the derived one is what this board worked out from the evidence. Five
+    tickets reading "Active" while one needed a merge click, one a reviewer, one a product
+    decision and one a push is exactly why both are needed — and where the two disagree, that
+    disagreement is worth seeing rather than hiding.
     """
+    assignment_refs = assignment_refs or set()
+    escalated_refs = escalated_refs or set()
     docs = {}
     for ticket in tickets or []:
         ticket_id = ticket.get("id")
         if not ticket_id:
             continue
         ownership = _ticket_ownership(ticket, owners or [])
-        docs[str(ticket_id)] = {
-            "id": str(ticket_id),
+        key = str(ticket_id)
+        pr = (pr_by_ticket or {}).get(key)
+        docs[key] = {
+            "id": key,
             "title": ticket.get("title") or "",
             "state": ticket.get("state") or "",
             "sprint": ticket.get("sprint") or "",
             "type": ticket.get("type") or "",
             "url": ticket.get("url") or "",
-            "pr": (pr_by_ticket or {}).get(str(ticket_id)),
+            "pr": pr,
+            "derived_status": ticket_status(
+                ticket.get("state") or "", pr, key in assignment_refs, key in escalated_refs
+            ),
             "handed_off": ownership["handed_off"],
             "handed_off_to": ownership["handed_off_to"],
         }
@@ -835,6 +957,42 @@ def meta_status(
     }
 
 
+def _assignment_refs(assignments_docs: dict) -> set[str]:
+    """Every ticket some live assignment owns.
+
+    Cancelled is excluded and done is not: cancelled means the work was abandoned, so the ticket
+    genuinely needs dispatching again, while a finished assignment is proof somebody DID pick the
+    ticket up — calling it "chưa ai nhận" the moment the work completes would be worse than
+    useless.
+    """
+    return {
+        ref
+        for doc in assignments_docs.values()
+        if doc.get("status") != "cancelled"
+        for ref in doc.get("ado_refs") or []
+    }
+
+
+def _escalated_refs(escalations_docs: dict, registry: dict) -> set[str]:
+    """Every ticket sitting behind an escalation nobody has answered yet.
+
+    An escalation record carries no ticket field at all — only `session_id` — so the join runs
+    through the registry, which is what knows the tickets a session's worktree was provisioned
+    for. The same hop the token sum already makes, in the other direction.
+    """
+    by_session = {}
+    for entry in (registry or {}).values():
+        sid = entry.get("session_id") if isinstance(entry, dict) else None
+        if sid:
+            by_session.setdefault(sid, []).extend(str(r) for r in entry.get("ado_ids") or [])
+    return {
+        ref
+        for doc in escalations_docs.values()
+        if doc.get("status") not in ("answered", "dismissed")
+        for ref in by_session.get(doc.get("session"), [])
+    }
+
+
 def build_writes(
     agents,
     registry,
@@ -858,14 +1016,24 @@ def build_writes(
     a thin courier.
     """
     writes = []
-    tickets_docs = ticket_docs(tickets, pr_by_ticket, owners)
+    # Built before the tickets, because the tickets' derived status is a join over both: which
+    # tickets an assignment owns, and which are stuck behind an escalation nobody has answered.
+    # Reusing the folded documents rather than re-walking the raw ledgers is what keeps the
+    # assignment card and the ticket row from ever disagreeing about the same record.
+    assignments_docs = assignment_docs(assignments, now, registry, usage_by_session)
+    escalations_docs = escalation_docs(escalations)
+    tickets_docs = ticket_docs(
+        tickets, pr_by_ticket, owners,
+        assignment_refs=_assignment_refs(assignments_docs),
+        escalated_refs=_escalated_refs(escalations_docs, registry),
+    )
     for collection, docs in (
         # The claim window is sized off the very cadence stamped onto meta/status below, so the
         # page and the pump can never disagree about how old is too old.
         ("sessions", session_docs(agents, registry, claims, now, claim_stale_after(pump_period_s))),
-        ("escalations", escalation_docs(escalations)),
+        ("escalations", escalations_docs),
         ("tickets", tickets_docs),
-        ("assignments", assignment_docs(assignments, now, registry, usage_by_session)),
+        ("assignments", assignments_docs),
     ):
         for doc_id, data in docs.items():
             writes.append({"op": "set", "collection": collection, "doc_id": doc_id, "data": data})
