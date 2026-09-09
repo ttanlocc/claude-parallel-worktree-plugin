@@ -3646,6 +3646,238 @@ def test_assignment_summary_keeps_the_ticket_chip():
     """The one thing the CTO said he actually wants on this card. It was already correct — dropping
     the pill in front of it must not take it along."""
     assert '"AB#"' in _card_part("summary"), "the ADO ticket chip left the summary line"
+
+
+def test_assignment_card_reads_title_before_status_before_duration_before_token_before_ticket_before_steps_before_estimate():
+    """The CTO read the card back to us in this order: "tên task đang làm, light tip status, chạy
+    bao lâu rồi, token nếu có, ticket relevant, qua những step nào rồi... còn những step nào?
+    estimate?". The summary line's DOM order must match, not just contain the same facts."""
+    summary = _card_part("summary")
+    markers = ["a-title", "ASSIGNMENT_STATUS_TONE", '"chạy"', '"token"', "ticketUrl", '"bước"', '"xong"']
+    positions = [summary.index(m) for m in markers]
+    assert positions == sorted(positions), f"reading order is wrong: {list(zip(markers, positions))}"
+
+
+def test_assignment_card_hides_an_unmeasured_token_row_instead_of_repeating_chua_ro():
+    """"token chưa rõ" on every single card is noise, not information — the CTO's own complaint
+    about anything that repeats the same non-answer on every tile."""
+    summary = _card_part("summary")
+    assert re.search(r"spend\s*!=\s*null\s*\?", summary), (
+        "the token row must be conditional on a measured spend, not always rendered"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section order — Backlog leads unless something is actually open ("Cần quyết định").
+# ---------------------------------------------------------------------------
+
+
+def _js_const(name, src=None):
+    src = _board_html_script() if src is None else src
+    m = re.search(r"const " + name + r"\s*=\s*(.*?;)", src, re.S)
+    assert m, f"const {name} not found in board.html"
+    return "const " + name + " = " + m.group(1)
+
+
+def _run_node(snippet):
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover - node is present in this repo's dev env
+        pytest.skip("node is not installed")
+    out = subprocess.run([node, "-e", snippet], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+def test_escalations_go_first_only_while_something_is_actually_open():
+    src = _board_html_script()
+    prelude = "\n".join([_js_const("RESOLVED_STATUSES", src), _js_function("escalationsGoFirst", src)])
+    cases = """
+    console.log(JSON.stringify([
+      escalationsGoFirst(true, false, []),
+      escalationsGoFirst(true, false, [{status: "open"}]),
+      escalationsGoFirst(true, false, [{status: "answered"}, {status: "dismissed"}]),
+      escalationsGoFirst(false, false, []),
+      escalationsGoFirst(true, true, []),
+    ]));
+    """
+    out = _run_node(prelude + "\n" + cases)
+    assert out == "[false,true,false,true,true]", out
+
+
+def test_render_promotes_the_backlog_when_nothing_is_open_but_keeps_escalations_first_otherwise():
+    """Textual check on render() itself — the pure decision function above is exercised in node,
+    this proves render() actually branches on it rather than always drawing one fixed order."""
+    script = _board_html_script()
+    body = re.search(r"function render\(\)\s*\{(.*?)\n\}\n", script, re.S)
+    assert body, "render() not found"
+    assert "escalationsGoFirst(" in body.group(1), "render() never consults the ordering decision"
+    assert re.search(r"renderTickets\(\),\s*renderAssignments\(\),\s*renderEscalations\(\)", body.group(1)), (
+        "no branch puts Backlog ahead of both other sections"
+    )
+    assert re.search(r"renderEscalations\(\),\s*renderTickets\(\),\s*renderAssignments\(\)", body.group(1)), (
+        "no branch keeps escalations first when something is open"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backlog row -> the assignment card working it ("Chờ ai" links down, "Đang làm gì" is new).
+# ---------------------------------------------------------------------------
+
+
+def test_assignment_for_ticket_matches_on_ado_refs_and_is_pure():
+    prelude = _js_function("assignmentForTicket")
+    out = _run_node(
+        prelude
+        + """
+        const assignments = [
+          { id: "a1", ado_refs: ["100", "200"] },
+          { id: "a2", ado_refs: ["300"] },
+        ];
+        console.log(JSON.stringify([
+          (assignmentForTicket("200", assignments) || {}).id || null,
+          (assignmentForTicket("999", assignments) || {}).id || null,
+        ]));
+        """
+    )
+    assert out == '["a1",null]', out
+
+
+def test_ticket_current_action_reads_the_running_step_from_a_claiming_assignment():
+    script = _board_html_script()
+    prelude = "\n".join(_js_function(name, script) for name in
+                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
+    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
+    prelude += "\n" + _js_function("ticketCurrentAction", script)
+    out = _run_node(
+        prelude
+        + """
+        const assignments = [{
+          id: "a1", ado_refs: ["100"],
+          plan: [{ step: "viết test đỏ", state: "done" }, { step: "chạy Playwright verify", state: "doing" }],
+        }];
+        console.log(ticketCurrentAction({ id: "100" }, assignments));
+        """
+    )
+    assert out == "chạy Playwright verify", out
+
+
+def test_ticket_current_action_says_no_runner_when_the_claiming_assignment_has_no_running_step():
+    """The exact same sentence the assignment card itself uses (NO_RUNNER_TEXT) — two places on
+    one page must never describe "nobody is running a step right now" differently."""
+    script = _board_html_script()
+    prelude = "\n".join(_js_function(name, script) for name in
+                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
+    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
+    prelude += "\n" + _js_function("ticketCurrentAction", script)
+    out = _run_node(
+        prelude
+        + """
+        const assignments = [{ id: "a1", ado_refs: ["100"], plan: [{ step: "x", state: "todo" }] }];
+        console.log(ticketCurrentAction({ id: "100" }, assignments));
+        """
+    )
+    assert out == _js_const("NO_RUNNER_TEXT", script).split('"')[1], out
+
+
+def test_ticket_current_action_infers_the_next_move_when_nobody_has_claimed_the_ticket():
+    script = _board_html_script()
+    prelude = "\n".join(_js_function(name, script) for name in
+                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
+    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
+    prelude += "\n" + _js_function("ticketCurrentAction", script)
+    out = _run_node(
+        prelude
+        + """
+        const rows = [
+          { id: "1", state: "Blocked" },
+          { id: "2", pr: { state: "OPEN" } },
+          { id: "3", derived_status: "unclaimed" },
+          { id: "4", state: "Active" },
+        ];
+        console.log(JSON.stringify(rows.map((t) => ticketCurrentAction(t, []))));
+        """
+    )
+    assert out == '["đang bị chặn — chờ người xử lý","chờ review / merge PR","cần giao việc",null]', out
+
+
+def test_ticket_row_links_the_waiting_cell_to_the_claiming_assignments_card():
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "ticketRow() not found"
+    src = body.group(1)
+    assert "assignmentForTicket(" in src, "ticketRow never looks up who claimed the ticket"
+    assert re.search(r'href:\s*"#assign-"\s*\+\s*claimant\.id', src), (
+        "the claimed-ticket link must anchor to the assignment card's stable id"
+    )
+    assert "jumpToAssignment(" in src, "the link never opens/highlights the target card"
+    assert re.search(r"claimant\s*\?", src), "an unclaimed ticket must fall back to plain text, not a dead link"
+
+
+def test_ticket_row_gains_a_dedicated_dang_lam_gi_column():
+    src = _board_html_script()
+    assert "Đang làm gì" in src, "no 'Đang làm gì' header"
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", src, re.S)
+    assert body and "ticketCurrentAction(" in body.group(1), "ticketRow never renders the current-action cell"
+
+
+def test_assignment_card_has_a_stable_anchor_id():
+    card = _assignment_card_source()
+    assert re.search(r'id:\s*a\.id\s*!=\s*null\s*\?\s*"assign-"\s*\+\s*a\.id', card), (
+        "the card has no stable id an outside link can jump to"
+    )
+
+
+def test_jump_to_assignment_opens_the_closed_details_and_flashes_the_card():
+    src = _board_html_script()
+    fn = re.search(r"function jumpToAssignment\((.*?)\n\}", src, re.S)
+    assert fn, "jumpToAssignment() not found"
+    assert "details.open = true" in fn.group(1) or ".open = true" in fn.group(1), (
+        "jumping to a card must open its closed <details>"
+    )
+    assert "classList.add" in fn.group(1), "jumping to a card must flash it so the eye finds it"
+
+
+# ---------------------------------------------------------------------------
+# "Việc đã giao" as a grid of square tiles, not a full-width stack.
+# ---------------------------------------------------------------------------
+
+
+def _board_html_style():
+    import pathlib
+
+    html = (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+    blocks = re.findall(r"<style[^>]*>(.*?)</style>", html, re.S)
+    assert blocks, "board.html has no <style> block"
+    return "\n".join(blocks)
+
+
+def test_assignment_grid_uses_css_grid_not_a_full_width_stack():
+    style = _board_html_style()
+    rule = re.search(r"\.assignment-grid\s*\{(.*?)\}", style, re.S)
+    assert rule, "no .assignment-grid rule in board.html's <style>"
+    assert "display: grid" in rule.group(1)
+    assert "auto-fill" in rule.group(1), "the grid must collapse to fewer columns on a narrow board"
+
+
+def test_assignment_grid_does_not_stretch_every_tile_to_the_tallest_open_card():
+    """A card that auto-opens (needsAttention) is taller than its closed neighbours — grid's
+    default stretch would force every tile in that row to match it."""
+    style = _board_html_style()
+    rule = re.search(r"\.assignment-grid\s*\{(.*?)\}", style, re.S)
+    assert rule, "no .assignment-grid rule in board.html's <style>"
+    assert "align-items: start" in rule.group(1), (
+        "grid tiles must size to their own content (align-items: start), not stretch to match the row"
+    )
+
+
+def test_render_assignments_draws_open_cards_through_the_grid_container():
+    body = re.search(r"function renderAssignments\(\)\s*\{(.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "renderAssignments() not found"
+    assert '"assignment-grid"' in body.group(1), "the open assignment cards are not drawn in the grid container"
 # ---------- the board's write path (bin/systemd/board_mirror_answers.py is the other half) ----------
 
 
