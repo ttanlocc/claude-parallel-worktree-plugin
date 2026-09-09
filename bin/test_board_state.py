@@ -3784,6 +3784,49 @@ def test_ticket_current_action_says_no_runner_when_the_claiming_assignment_has_n
     assert out == _js_const("NO_RUNNER_TEXT", script).split('"')[1], out
 
 
+def test_ticket_current_action_names_who_and_what_blocks_a_stalled_assignment():
+    """A blocked assignment must say WHO is blocking and ON WHAT, not "no step is running".
+
+    "chưa có bước nào đang chạy" is true of a blocked ticket and useless: it describes the board's
+    own bookkeeping instead of the thing the reader has to act on. When the manager has recorded a
+    reason, that reason is the answer — the generic sentence stays only for an assignment that has
+    genuinely stalled with nothing written down."""
+    script = _board_html_script()
+    prelude = "\n".join(_js_function(name, script) for name in
+                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
+    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
+    prelude += "\n" + _js_function("ticketCurrentAction", script)
+    out = _run_node(
+        prelude
+        + """
+        const blocked = [{ id: "a1", ado_refs: ["100"], status: "blocked",
+                           note: "CHẶN BỞI: Minh — chờ chốt quy tắc sản phẩm",
+                           plan: [{ step: "x", state: "todo" }] }];
+        console.log(ticketCurrentAction({ id: "100" }, blocked));
+        """
+    )
+    assert out == "CHẶN BỞI: Minh — chờ chốt quy tắc sản phẩm", out
+
+
+def test_ticket_current_action_still_says_no_runner_when_a_block_has_no_recorded_reason():
+    """A blocked assignment with no note is a gap in the manager's own record, and must keep
+    reading as one rather than inventing a reason or rendering an empty cell."""
+    script = _board_html_script()
+    prelude = "\n".join(_js_function(name, script) for name in
+                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
+    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
+    prelude += "\n" + _js_function("ticketCurrentAction", script)
+    out = _run_node(
+        prelude
+        + """
+        const blocked = [{ id: "a1", ado_refs: ["100"], status: "blocked", note: "   ",
+                           plan: [{ step: "x", state: "todo" }] }];
+        console.log(ticketCurrentAction({ id: "100" }, blocked));
+        """
+    )
+    assert out == _js_const("NO_RUNNER_TEXT", script).split('"')[1], out
+
+
 def test_ticket_current_action_infers_the_next_move_when_nobody_has_claimed_the_ticket():
     script = _board_html_script()
     prelude = "\n".join(_js_function(name, script) for name in

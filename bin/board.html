@@ -1125,7 +1125,16 @@ function ticketCurrentAction(t, assignments) {
     const steps = planSteps(claimant);
     if (!steps.length) return "chưa ai chia bước";
     const doing = doingSteps(claimant);
-    return doing.length ? doing.map(stepText).join(" · ") : NO_RUNNER_TEXT;
+    if (doing.length) return doing.map(stepText).join(" · ");
+    // A blocked assignment's whole point is WHO is blocking and ON WHAT. Saying "no step is
+    // running" there describes the board's own bookkeeping and leaves the reader to open the
+    // ticket and read comments to learn the one thing they came for. The note is the manager's
+    // recorded reason; falling through to NO_RUNNER_TEXT when there is none keeps a gap in that
+    // record reading as a gap rather than as an empty cell.
+    if (claimant.status === "blocked" && String(claimant.note || "").trim()) {
+      return String(claimant.note).trim();
+    }
+    return NO_RUNNER_TEXT;
   }
   if (t.pr && t.pr.state === "OPEN") return "chờ review / merge PR";
   if (t.state === "Blocked") return "đang bị chặn — chờ người xử lý";
