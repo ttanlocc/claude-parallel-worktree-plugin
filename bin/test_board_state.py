@@ -3570,6 +3570,102 @@ def test_state_drift_is_null_when_state_and_derived_status_agree():
     assert docs["5061"]["state_drift"] is None
 
 
+# ---------------------------------------------------------------------------
+# Rule B — a Blocked ticket must say who is blocking and on what. The ledger is the only
+# writable place (ADO tags: `TF401289: The current user does not have permissions to create
+# tags`), so the convention is a non-cancelled assignment naming the ticket whose note carries
+# `CHẶN BỞI:`. Folded into the same state_drift concept: same shape, proposes nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_real_case_a_blocked_ticket_with_no_ledger_note_is_drift():
+    """Three tickets sat Blocked today with the reason recorded nowhere machine-readable — the
+    board was asserting a block it could not explain."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Blocked", "Task", "unclaimed", has_block_reason=False)
+    assert drift is not None
+    assert drift["proposed_state"] is None, "the fix is a human writing the reason, not a state moving"
+    assert drift["fixable"] is False
+
+
+def test_a_blocked_ticket_with_a_ledger_note_is_not_drift():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Blocked", "Task", "unclaimed", has_block_reason=True) is None
+
+
+def test_blocked_reason_check_is_skipped_when_not_computed():
+    """`has_block_reason=None` means "not checked" — the caller has no ledger data at all — and
+    must never be treated as a positive finding of absence. Callers who never pass it (every
+    pre-existing one) must see the exact same behaviour as before this rule existed."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Blocked", "Task", "unclaimed") is None
+    assert ticket_state_drift("Blocked", "Task", "unclaimed", has_block_reason=None) is None
+
+
+def test_blocked_reason_rule_applies_to_bugs_too():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Blocked", "Bug", "unclaimed", has_block_reason=False)
+    assert drift is not None and drift["fixable"] is False
+
+
+def test_blocked_reason_refs_collects_tickets_a_live_assignment_explains():
+    from board_state import _blocked_reason_refs, assignment_docs
+
+    docs = assignment_docs(
+        [
+            {"id": "a1", "ts": 1.0, "ado_refs": ["100"], "status": "blocked", "note": "CHẶN BỞI: CTO — chờ duyệt scope"},
+            {"id": "a2", "ts": 1.0, "ado_refs": ["200"], "status": "blocked", "note": "đang chờ, chưa rõ vì sao"},
+            {"id": "a3", "ts": 1.0, "ado_refs": ["300"], "status": "cancelled", "note": "CHẶN BỞI: CTO"},
+        ],
+        now=2.0,
+    )
+
+    assert _blocked_reason_refs(docs) == {"100"}
+
+
+def test_ticket_docs_flags_a_blocked_ticket_the_ledger_never_explains():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1", "title": "x", "state": "Blocked", "type": "Task"}],
+        {},
+        blocked_reason_refs=set(),
+    )
+    assert docs["1"]["state_drift"]["fixable"] is False
+    assert docs["1"]["state_drift"]["proposed_state"] is None
+
+
+def test_ticket_docs_leaves_a_blocked_ticket_alone_once_the_ledger_explains_it():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1", "title": "x", "state": "Blocked", "type": "Task"}],
+        {},
+        blocked_reason_refs={"1"},
+    )
+    assert docs["1"]["state_drift"] is None
+
+
+def test_build_writes_wires_the_ledger_note_check_onto_blocked_tickets():
+    writes = build_writes(
+        agents=[], registry={}, escalations=[],
+        tickets=[{"id": "1", "title": "explained", "state": "Blocked", "type": "Task"},
+                 {"id": "2", "title": "unexplained", "state": "Blocked", "type": "Task"}],
+        pr_by_ticket={}, now=1000.0,
+        assignments=[
+            {"id": "a1", "ts": 1.0, "ado_refs": ["1"], "status": "blocked", "note": "CHẶN BỞI: CTO"},
+            {"id": "a2", "ts": 1.0, "ado_refs": ["2"], "status": "blocked", "note": ""},
+        ],
+    )
+    by_id = {w["doc_id"]: w["data"] for w in _writes_for(writes, "tickets")}
+    assert by_id["1"]["state_drift"] is None
+    assert by_id["2"]["state_drift"]["fixable"] is False
+
+
 # --- the derived status on the ticket document ---
 
 

@@ -1093,6 +1093,22 @@ def _assignment_refs(assignments_docs: dict) -> set[str]:
     }
 
 
+def _blocked_reason_refs(assignments_docs: dict) -> set[str]:
+    """Every ticket a live assignment has already explained being Blocked on.
+
+    `CHẶN BỞI:` in the note is the only machine-readable record of why a ticket is blocked — ADO
+    tags are unwritable for this account (`TF401289: The current user does not have permissions
+    to create tags`). Cancelled is excluded for the same reason _assignment_refs() excludes it: an
+    abandoned assignment's old note explains nothing about why the ticket is blocked today.
+    """
+    return {
+        ref
+        for doc in assignments_docs.values()
+        if doc.get("status") != "cancelled" and "CHẶN BỞI:" in str(doc.get("note") or "")
+        for ref in doc.get("ado_refs") or []
+    }
+
+
 def _escalated_refs(escalations_docs: dict, registry: dict) -> set[str]:
     """Every ticket sitting behind an escalation nobody has answered yet.
 
@@ -1154,6 +1170,7 @@ def build_writes(
         tickets, pr_by_ticket, owners,
         assignment_refs=_assignment_refs(assignments_docs),
         escalated_refs=_escalated_refs(escalations_docs, registry),
+        blocked_reason_refs=_blocked_reason_refs(assignments_docs),
     )
     for collection, docs in (
         # The claim window is sized off the very cadence stamped onto meta/status below, so the
