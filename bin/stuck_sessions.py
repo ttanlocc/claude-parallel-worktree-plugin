@@ -207,9 +207,16 @@ def scan(path: str, agents, registry, probe, now: float, stale_after, stuck=None
     return actions
 
 
-def _unit_path() -> str:
-    """This watch's own timer, which is what sizes the stuck window — no constant to go stale."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd", "stuck-session-watch.timer")
+def _unit_path(module_file: str = __file__) -> str:
+    """This watch's own timer, which is what sizes the stuck window — no constant to go stale.
+
+    realpath, not abspath: bin/systemd/README.md installs this script as a SYMLINK under
+    ~/.config, and abspath keeps the symlink's own directory — which has no `systemd/` beside it,
+    so every scheduled run died at "cannot read .../stuck-session-watch.timer" while the same
+    script worked by hand from the repo. Python already resolves the link for sys.path, so the
+    imports gave no hint. Resolving it here is what makes the shipped install path work.
+    """
+    return os.path.join(os.path.dirname(os.path.realpath(module_file)), "systemd", "stuck-session-watch.timer")
 
 
 def main() -> int:

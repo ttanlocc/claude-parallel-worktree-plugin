@@ -10,7 +10,7 @@ import re
 import tempfile
 
 from escalations import CANONICAL_KINDS, append, classify, current_state, new_record, normalize_kind
-from stuck_sessions import KIND, last_tool_use, scan, stuck_now
+from stuck_sessions import KIND, _unit_path, last_tool_use, scan, stuck_now
 
 NOW = 1788940000.0
 STALE = 900.0  # 15 minutes — a 5-minute cadence times CLAIM_STALE_MULTIPLIER
@@ -319,6 +319,18 @@ def test_the_watch_unit_fires_on_its_own_grid_and_names_a_cadence_board_state_ca
     window = claim_stale_after(period)
     assert f"stuck past {window / 60:.0f}m" in readme, "the README's sample log line names a stale window"
     assert f"silent for at least {int(CLAIM_STALE_MULTIPLIER)} timer periods" in readme
+
+
+def test_the_unit_path_survives_being_reached_through_a_symlink():
+    """bin/systemd/README.md installs this script as a symlink under ~/.config. `abspath` keeps
+    the symlink's own directory, which has no `systemd/` beside it — so every scheduled run
+    failed to size its window while running it by hand from the repo worked."""
+    link_dir = tempfile.mkdtemp(prefix="stuck-symlink-")
+    link = os.path.join(link_dir, "stuck_sessions.py")
+    os.symlink(os.path.join(os.path.dirname(os.path.abspath(__file__)), "stuck_sessions.py"), link)
+
+    assert _unit_path(link) == _unit_path()
+    assert os.path.exists(_unit_path(link))
 
 
 if __name__ == "__main__":
