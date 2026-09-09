@@ -783,7 +783,9 @@ def test_build_writes_emits_one_set_per_document_across_all_four_collections():
     assert _writes_for(writes, "sessions")[0]["doc_id"] == "t1"
     assert _writes_for(writes, "escalations")[0]["doc_id"] == "e1"
     assert _writes_for(writes, "tickets")[0]["doc_id"] == "8311"
-    assert _writes_for(writes, "meta")[0]["doc_id"] == "status"
+    # Two meta documents now, at opposite ends: the pump heartbeat leads, the completeness
+    # stamp trails. See test_build_writes_puts_the_pump_heartbeat_first_and_meta_status_last.
+    assert [w["doc_id"] for w in _writes_for(writes, "meta")] == ["pump", "status"]
     # Sessions, escalations AND tickets are all non-empty here — unlike the dedicated
     # "meta last" test below (which only populates sessions), this actually discriminates
     # "last overall" from "last among the only populated collection".
@@ -838,6 +840,36 @@ def test_build_writes_truncates_a_doc_id_past_the_200_character_limit():
     assert [len(w["doc_id"]) for w in writes if w["collection"] == "sessions"] == [200]
 
 
+def test_build_writes_puts_the_pump_heartbeat_first_and_meta_status_last():
+    # Two different claims, two different documents, at opposite ends of the run on purpose.
+    # meta/status says "the rows beside me are complete", so it goes last and only a run that
+    # finished ever writes it. meta/pump says "the pump is alive and just ran", which is true the
+    # moment the run starts, so it goes FIRST and therefore lands in batch 1 of every run —
+    # including the partial ones checkpointing made routine. Without it the board's only clock
+    # was meta/status, which now freezes for the whole length of a backlog drain while data is
+    # visibly flowing, and the staleness alarm fires on a perfectly healthy pump.
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=1788900000.0, assignments=[],
+    )
+
+    assert (writes[0]["collection"], writes[0]["doc_id"]) == ("meta", "pump")
+    assert (writes[-1]["collection"], writes[-1]["doc_id"]) == ("meta", "status")
+    assert writes[0]["data"]["ran_at"] == 1788900000.0
+
+
+def test_the_heartbeat_never_claims_the_data_is_complete():
+    # Everything that says "as of when" stays on meta/status. If the heartbeat carried a sweep
+    # time too, a partial run would stamp it and the board would call incomplete data current —
+    # the exact property meta/status-goes-last exists to protect.
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=1788900000.0, ado_swept_at=1788900000.0, assignments=[],
+    )
+
+    assert set(writes[0]["data"]) == {"ran_at"}
+
+
 def test_build_writes_puts_meta_status_last():
     """`meta/status` claims the data alongside it is current. Written first, a batch that dies
     halfway would advertise a sweep whose rows never landed."""
@@ -869,8 +901,7 @@ def test_build_writes_on_empty_sources_still_writes_meta():
     from a sweep that never ran, and only meta/status can say which."""
     writes = build_writes(agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1000.0)
 
-    assert len(writes) == 1
-    assert writes[0]["doc_id"] == "status"
+    assert [w["doc_id"] for w in writes] == ["pump", "status"]
 
 
 # --- Coverage added beyond the brief -----------------------------------------------------
@@ -919,7 +950,7 @@ def test_build_writes_data_matches_the_underlying_transform_for_each_collection(
     assert _writes_for(writes, "sessions")[0]["data"] == session_docs(agents, registry)["t1"]
     assert _writes_for(writes, "escalations")[0]["data"] == escalation_docs(escalations)["e1"]
     assert _writes_for(writes, "tickets")[0]["data"] == ticket_docs(tickets, pr_by_ticket)["8311"]
-    assert _writes_for(writes, "meta")[0]["data"] == meta_status(
+    assert _writes_for(writes, "meta")[-1]["data"] == meta_status(
         now=1234.0, ado_swept_at=999.0, sessions_scanned_at=1234.0, manager=manager
     )
 
@@ -977,11 +1008,11 @@ def test_build_writes_emits_exactly_one_entry_per_document_with_no_duplicates_or
         now=1000.0,
     )
 
-    assert len(writes) == 7
+    assert len(writes) == 8
     assert len(_writes_for(writes, "sessions")) == 2
     assert len(_writes_for(writes, "escalations")) == 2
     assert len(_writes_for(writes, "tickets")) == 2
-    assert len(_writes_for(writes, "meta")) == 1
+    assert len(_writes_for(writes, "meta")) == 2  # pump heartbeat + completeness stamp
     assert {w["doc_id"] for w in _writes_for(writes, "sessions")} == {"t1", "t2"}
     assert {w["doc_id"] for w in _writes_for(writes, "escalations")} == {"e1", "e2"}
     assert {w["doc_id"] for w in _writes_for(writes, "tickets")} == {"1", "2"}

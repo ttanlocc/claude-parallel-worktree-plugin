@@ -2,7 +2,7 @@
 """assert-based checks for board_mirror_diff, the incremental-write/delete transform behind
 run-board-mirror.sh."""
 
-from board_mirror_diff import apply_batch, chunk_writes, diff_writes
+from board_mirror_diff import apply_batch, chunk_writes, diff_writes, stamp_heartbeat
 
 META = {"op": "set", "collection": "meta", "doc_id": "status", "data": {"written_at": 2}}
 
@@ -206,3 +206,42 @@ def test_apply_batch_refuses_to_record_a_document_that_cannot_exist():
     snapshot = apply_batch({}, [_set("sessions", BAD, {"state": "running"}), _set("sessions", "ok", {"n": 1})])
 
     assert set(snapshot) == {"sessions/ok"}
+
+
+# --- the heartbeat rides batch 1 so a partial run still proves the pump is alive ----------------
+
+PUMP = {"op": "set", "collection": "meta", "doc_id": "pump", "data": {"ran_at": 1}}
+
+
+def test_chunk_stamps_the_backlog_size_onto_the_heartbeat_in_the_first_batch():
+    # Only the chunker knows how many batches there are, and the board needs "still N to go" to
+    # tell a pump that is draining from one that has stopped. One number, because the heartbeat
+    # rides batch 1: all it can honestly report is how much this run found to do.
+    entries = [PUMP] + [_set("tickets", str(i), {"n": i}) for i in range(120)] + [META]
+
+    batches = chunk_writes(entries, 50)
+    stamped = stamp_heartbeat(batches)
+
+    assert stamped[0][0]["data"] == {"ran_at": 1, "batches_pending": 3}
+    # Nothing else moved: the rest of batch 1 and every later batch are untouched.
+    assert stamped[0][1:] == batches[0][1:]
+    assert stamped[1:] == batches[1:]
+
+
+def test_stamping_is_a_no_op_when_there_is_no_heartbeat_to_stamp():
+    batches = chunk_writes([_set("tickets", "1", {"n": 1}), META], 50)
+
+    assert stamp_heartbeat(batches) == batches
+    assert stamp_heartbeat([]) == []
+
+
+def test_the_heartbeat_leads_the_diff_so_it_always_lands_in_the_first_batch():
+    # It has to survive diffing: it is a real document board_state emits, so an unchanged-doc
+    # filter must not drop it, and it must stay ahead of the changed rows and the deletes.
+    previous = {"meta/pump": {"ran_at": 0}, "tickets/gone": {"n": 0}, "tickets/same": {"n": 1}}
+    writes = [PUMP, _set("tickets", "same", {"n": 1}), _set("tickets", "new", {"n": 2}), META]
+
+    result = diff_writes(previous, writes)
+
+    assert result[0] == PUMP, f"heartbeat is not first: {[r['doc_id'] for r in result]}"
+    assert result[-1] == META

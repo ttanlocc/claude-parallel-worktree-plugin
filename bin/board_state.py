@@ -1034,7 +1034,15 @@ def build_writes(
     straight through without reshaping — the transform is testable here, and the session stays
     a thin courier.
     """
-    writes = []
+    # First, always: proof the pump is alive, and nothing else. It carries no "as of" clock, so
+    # it can never be mistaken for the completeness claim meta/status makes at the other end of
+    # the run. Being first means it rides batch 1, so it lands even on a run that stops part-way
+    # through a backlog — which, since the refresh started checkpointing per batch, is every run
+    # during a drain. meta/status stayed the board's only clock through that change and froze for
+    # the whole drain, so a board with data visibly flowing rendered as hours stale and tripped
+    # the staleness alarm sized off this same cadence. See board_mirror_diff.stamp_heartbeat()
+    # for the batch counts the chunker adds, and bin/systemd/README.md for the field contract.
+    writes = [{"op": "set", "collection": "meta", "doc_id": "pump", "data": {"ran_at": now}}]
     # Built before the tickets, because the tickets' derived status is a join over both: which
     # tickets an assignment owns, and which are stuck behind an escalation nobody has answered.
     # Reusing the folded documents rather than re-walking the raw ledgers is what keeps the

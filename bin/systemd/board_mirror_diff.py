@@ -108,6 +108,30 @@ def chunk_writes(entries: list[dict], limit: int = BATCH_LIMIT) -> list[list[dic
     return [entries[i : i + limit] for i in range(0, len(entries), limit)]
 
 
+HEARTBEAT_KEY = "meta/pump"
+
+
+def stamp_heartbeat(batches: list[list[dict]]) -> list[list[dict]]:
+    """Add the backlog size to the heartbeat, if the first batch leads with one.
+
+    board_state.py mints meta/pump first and knows only when the run started; only here is the
+    batch count known at all. The two together are what let the board tell a pump draining a
+    backlog from one that has stopped: `ran_at` moves every run, and `batches_pending` shrinks
+    run over run. Neither says anything about whether the data is complete — that claim belongs
+    to meta/status alone, which rides the LAST batch and so lands only on a run that finished.
+
+    One number, not a total and a remainder: the heartbeat rides the FIRST batch, so the only
+    figure it can honestly carry is how much this run found to do. `batches_pending == 1` means
+    this run expects to finish and stamp meta/status; anything more means the board is looking at
+    data that is still catching up.
+    """
+    if not batches or _key(batches[0][0]) != HEARTBEAT_KEY:
+        return batches
+    head = dict(batches[0][0])
+    head["data"] = {**head["data"], "batches_pending": len(batches)}
+    return [[head] + batches[0][1:]] + batches[1:]
+
+
 def apply_batch(previous: dict, batch: list[dict]) -> dict:
     """Fold one batch that has ALREADY been confirmed written into the snapshot: `set` records the
     data, `delete` drops the key. Applying every batch of a diff in order leaves exactly the
@@ -177,7 +201,7 @@ def main() -> int:
 
     if mode == "chunk":
         limit = int(argv[1]) if len(argv) == 2 else BATCH_LIMIT
-        for batch in chunk_writes(payload, limit):
+        for batch in stamp_heartbeat(chunk_writes(payload, limit)):
             json.dump(batch, sys.stdout, ensure_ascii=False)
             sys.stdout.write("\n")
         return 0
