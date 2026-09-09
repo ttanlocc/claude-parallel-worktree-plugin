@@ -39,11 +39,13 @@ permission, the tool doesn't exist for that session), and every run dies at the 
 the misleading `"Artifact tool is not available in this session"`. If you ever see that exact
 message in the journal, this is the first thing to check.
 
-`run-board-mirror.sh` also keeps a snapshot of the last successful write at
+`run-board-mirror.sh` also keeps a snapshot of what it has written at
 `~/.config/board-mirror/last-writes.json`, next to `env` — not something you create, it writes
-itself after the first successful run, and only sends changed documents (plus deletes for ones
+itself as each 50-document batch lands, and only sends changed documents (plus deletes for ones
 that dropped out) from then on. Delete it to force a full resync on the next run; losing it just
-costs one full-size run, it does not lose data.
+costs one full-size run spread over a few runs, it does not lose data. Point
+`BOARD_MIRROR_SNAPSHOT` somewhere else for a dry run — never let a test write this file, since it
+is what tells the next real run "already synced".
 
 If you hold more than one ADO identity, also set `PWR_ADO_ASSIGNED_TO` in that file to a
 comma-separated list of all of them. Left unset, the WIQL query falls back to `@Me`, which
@@ -84,4 +86,17 @@ runs, that's expected, not a failure. A failed refresh (bad env, `board_state.py
 the session, a malformed `claude -p` reply) shows as `status=1/FAILURE` here and the reason in the
 journal line above it — see `run-board-mirror.sh` for what each exit path logs.
 
+A journal line reading `run-board-mirror: PARTIAL: wrote 50 documents in 1 of 4 batches, ...` is
+NOT a failure and exits 0. After a large change the refresh is split into 50-document batches and
+a run does as many as fit in its budget, recording each one as it lands; the next fire picks up
+the rest, and the backlog shrinks every run until a plain `REFRESH_OK` line comes back. Only that
+`REFRESH_OK` line means the board is fully current — `PARTIAL` deliberately never writes
+`meta/status`, so the board keeps showing the older sweep rather than claiming a fresh one over
+rows that have not landed yet. Several `PARTIAL` runs in a row are expected after a big change;
+`PARTIAL` runs that never reach `REFRESH_OK` are not, and mean the backlog is growing faster than
+one run can drain it.
+
 To force one run without waiting for the timer: `systemctl --user start board-mirror.service`.
+If a run is already in flight, the second one logs `another run holds ... — stepping aside` and
+exits 0 rather than racing it: two runs reading the same snapshot compute their diffs against
+states that have already moved apart, and write over each other.

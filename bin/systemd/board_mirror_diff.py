@@ -1,19 +1,47 @@
 #!/usr/bin/env python3
 """Cut board_state.py's full write set down to what actually changed since the last successful
-run, and turn documents that disappeared into `delete` ops.
+run, turn documents that disappeared into `delete` ops, and split the result into batches the
+artifact's write_db actually accepts.
 
-Pure transforms only, like board_state.py itself — no I/O in diff_writes()/snapshot_from_writes(),
-so this is testable without a real snapshot file. main() below is the only I/O, called twice by
-run-board-mirror.sh: once (mode "diff") before the write, once (mode "snapshot") only after the
-write actually succeeds. Snapshotting before a write that then fails would make the next run
-believe it's already synced and silently skip real changes forever — that ordering lives in
-run-board-mirror.sh, not here, but it's the whole reason "diff" and "snapshot" are separate calls
-instead of one that does both.
+Pure transforms only, like board_state.py itself — no I/O in diff_writes()/chunk_writes()/
+apply_batch(), so this is testable without a real snapshot file. main() below is the only I/O,
+called by run-board-mirror.sh once per run for "diff" and "chunk", then once per batch for
+"apply".
+
+The snapshot is a CHECKPOINT, not an end-of-run report. It used to be written exactly once, after
+the whole write finished, which meant a run killed at TimeoutStartSec mid-write recorded nothing:
+259 live documents against a 120-document snapshot produced a 156-document diff that took ~310s
+against a 240s budget, so every run wrote ~120 documents, died, recorded none of them, and the
+next run recomputed the identical diff and died identically. The pump could not recover on its
+own. "apply" replaces that: run-board-mirror.sh folds each batch in only after that batch's own
+claude -p reported it landed, so an interrupted run keeps what it actually wrote and the next run
+only does the remainder.
+
+Direction matters and is asymmetric. Re-writing a document that was already written is harmless
+(write_db set is idempotent); recording one that was NOT written is unrecoverable — the next diff
+calls it unchanged and skips it forever, leaving a silently wrong board with no error anywhere.
+So the record always happens AFTER the write, never before: a crash in between costs one rewrite.
 """
 
 import json
 import os
+import re
 import sys
+
+BATCH_LIMIT = 50  # write_db's own cap: a batch takes at most 50 entries.
+
+# write_db validates doc_id BEFORE writing anything, so an entry carrying an id outside this
+# charset does not get skipped — the server refuses the whole batch ("batch rejected before any
+# write, no documents landed"), and every other document travelling with it is lost too.
+# board_state.py normalizes ids at the mint now, but the guards below are what make that provable
+# here rather than assumed: an id the validator rejects CANNOT be in the db, so it must never be
+# sent, and must never be recorded as written. Both halves were violated live — the snapshot held
+# `sessions/code review verification`, a document that had never existed.
+DOC_ID_OK = re.compile(r"[A-Za-z0-9_\-.~:@+]{1,200}\Z")
+
+
+def _valid(doc_id: str) -> bool:
+    return bool(DOC_ID_OK.match(str(doc_id)))
 
 
 def _key(entry: dict) -> str:
@@ -21,8 +49,8 @@ def _key(entry: dict) -> str:
 
 
 def diff_writes(previous: dict, writes: list[dict]) -> list[dict]:
-    """previous: {"collection/doc_id": data} from the last successful run's snapshot, or {} if
-    there isn't one yet (first run, or a snapshot that failed to save last time).
+    """previous: {"collection/doc_id": data} from the last checkpoint, or {} if there isn't one
+    yet (first run, or a snapshot that failed to save last time).
 
     writes: this run's full "set" list from board_state.py, one entry per document that exists
     right now, meta/status last.
@@ -31,7 +59,9 @@ def diff_writes(previous: dict, writes: list[dict]) -> list[dict]:
     previously-known doc_id no longer in `writes` at all, and meta/status always kept and always
     last — it's the refresh timestamp, so "unchanged" never applies to it.
     """
-    if not previous:
+    writes = _sendable(writes)
+    previous = {k: v for k, v in previous.items() if _valid(k.split("/", 1)[-1])}
+    if not writes or not previous:
         return list(writes)
 
     meta = writes[-1]
@@ -49,43 +79,115 @@ def diff_writes(previous: dict, writes: list[dict]) -> list[dict]:
     return changed + deletes + [meta]
 
 
-def snapshot_from_writes(writes: list[dict]) -> dict:
-    """The full current state, keyed for next run's diff — every doc that exists now, not just
-    the ones this run happened to change."""
-    return {_key(w): w["data"] for w in writes}
+def _sendable(writes: list[dict]) -> list[dict]:
+    """Drop entries write_db would reject the whole batch over, loudly. Dropping one document is
+    strictly better than losing the 49 travelling with it — and better than the alternative that
+    actually happened, where the rejected id stayed in the snapshot, turned into a `delete`
+    carrying the same rejected id when its session ended, and wedged every later run permanently.
+    """
+    ok = []
+    for w in writes:
+        if _valid(w.get("doc_id", "")):
+            ok.append(w)
+        else:
+            print(f"board_mirror_diff: skipping unwritable doc_id {_key(w)!r}", file=sys.stderr)
+    return ok
+
+
+def chunk_writes(entries: list[dict], limit: int = BATCH_LIMIT) -> list[list[dict]]:
+    """Split in order into batches of at most `limit`. Order is never touched, so meta/status —
+    last in diff_writes' output — stays the last entry of the last batch: it asserts the rows
+    beside it are current, and a run that stops early must not have already claimed a sweep whose
+    rows never landed.
+
+    The caller splitting, rather than the prompt telling the model to, is what makes the
+    checkpoint provable: one claude -p per batch means one REFRESH_OK line attributes to exactly
+    these entries. When the model split, a single OK line covered several batches and the script
+    had no way to tell which of them actually landed.
+    """
+    return [entries[i : i + limit] for i in range(0, len(entries), limit)]
+
+
+def apply_batch(previous: dict, batch: list[dict]) -> dict:
+    """Fold one batch that has ALREADY been confirmed written into the snapshot: `set` records the
+    data, `delete` drops the key. Applying every batch of a diff in order leaves exactly the
+    snapshot a single end-of-run write used to leave — unchanged documents are already correct in
+    `previous` and are simply not touched.
+    """
+    snapshot = dict(previous)
+    for entry in batch:
+        if not _valid(entry.get("doc_id", "")):
+            # Unreachable if the entry came through diff_writes, and stated here anyway: this is
+            # the one direction that cannot be undone. Recording a document the validator refused
+            # makes the next diff call it unchanged and skip it forever, so the board silently
+            # loses it with no error anywhere.
+            continue
+        if entry.get("op") == "delete":
+            snapshot.pop(_key(entry), None)
+        else:
+            snapshot[_key(entry)] = entry["data"]
+    return snapshot
+
+
+def _load_snapshot(path: str) -> dict:
+    """Missing (first install) or unreadable (never synced, or a snapshot write that itself
+    failed) both mean "no previous run" — send everything, which is correct on a first run."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            snapshot = json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+    # Prune ids that cannot exist in the db, so an already-damaged snapshot heals itself on the
+    # next apply instead of needing the hand edit it needed the first time.
+    return {k: v for k, v in snapshot.items() if _valid(k.split("/", 1)[-1])}
 
 
 def main() -> int:
-    """CLI, both modes read the full write-set JSON array from stdin:
+    """CLI. All three modes read JSON from stdin:
 
-    `board_mirror_diff.py diff <snapshot-path>` prints the entries to actually send (JSON array)
-    to stdout. A missing snapshot file is treated as "no previous run" (previous={}), same as an
-    empty one — both mean "send everything", which is also correct behavior on a first run.
+    `board_mirror_diff.py diff <snapshot-path>` takes the full write-set array and prints the
+    entries to actually send (JSON array).
 
-    `board_mirror_diff.py snapshot <snapshot-path>` overwrites the snapshot with this run's full
-    state. Written via a temp file + rename so a crash mid-write can't leave a half-written,
-    unparseable snapshot for the next run to trip over.
+    `board_mirror_diff.py chunk [limit]` takes that diff array and prints one batch per line, as
+    a JSON array each. One line per batch is safe because json.dump escapes newlines, so no batch
+    can ever contain a literal one.
+
+    `board_mirror_diff.py apply <snapshot-path>` takes ONE batch array and folds it into the
+    snapshot, printing how many entries it recorded. Written via a temp file + rename so a crash
+    mid-write can't leave a half-written, unparseable snapshot for the next run to trip over.
     """
-    if len(sys.argv) != 3 or sys.argv[1] not in ("diff", "snapshot"):
-        print("usage: board_mirror_diff.py {diff|snapshot} <snapshot-path>", file=sys.stderr)
+    argv = sys.argv[1:]
+    mode = argv[0] if argv else ""
+    if mode in ("diff", "apply") and len(argv) == 2:
+        path = argv[1]
+    elif mode == "chunk" and len(argv) <= 2:
+        path = None
+    else:
+        print(
+            "usage: board_mirror_diff.py {diff|apply} <snapshot-path> | chunk [limit]",
+            file=sys.stderr,
+        )
         return 1
-    mode, path = sys.argv[1], sys.argv[2]
-    writes = json.load(sys.stdin)
+
+    payload = json.load(sys.stdin)
 
     if mode == "diff":
-        try:
-            with open(path, encoding="utf-8") as f:
-                previous = json.load(f)
-        except (FileNotFoundError, ValueError):
-            previous = {}
-        json.dump(diff_writes(previous, writes), sys.stdout, ensure_ascii=False)
+        json.dump(diff_writes(_load_snapshot(path), payload), sys.stdout, ensure_ascii=False)
+        return 0
+
+    if mode == "chunk":
+        limit = int(argv[1]) if len(argv) == 2 else BATCH_LIMIT
+        for batch in chunk_writes(payload, limit):
+            json.dump(batch, sys.stdout, ensure_ascii=False)
+            sys.stdout.write("\n")
         return 0
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(snapshot_from_writes(writes), f, ensure_ascii=False)
+        json.dump(apply_batch(_load_snapshot(path), payload), f, ensure_ascii=False)
     os.replace(tmp, path)
+    print(len(payload))
     return 0
 
 

@@ -6,6 +6,7 @@ by run-board-mirror.sh — a regression here is exactly the kind of doc/unit dri
 replaced the session-scoped cron to avoid.
 """
 
+import json
 import os
 import re
 import stat
@@ -132,10 +133,7 @@ def test_run_script_finds_board_mirror_md_when_invoked_through_a_symlink():
             )
         os.chmod(fake_claude, os.stat(fake_claude).st_mode | stat.S_IEXEC)
 
-        env = dict(os.environ)
-        env["ARTIFACT_URL"] = "https://example.invalid/artifact"
-        env["PWT_REPO_ROOT"] = tmp
-        env["CLAUDE_BIN"] = fake_claude
+        env = _mirror_env(tmp, fake_claude)
 
         proc = subprocess.run(
             [symlinked_script], env=env, capture_output=True, text=True, timeout=30
@@ -144,6 +142,197 @@ def test_run_script_finds_board_mirror_md_when_invoked_through_a_symlink():
             f"run-board-mirror.sh failed when invoked through a symlink: {proc.stderr}"
         )
         assert "REFRESH_OK" in proc.stdout
+
+
+
+# --- driving the real run-board-mirror.sh -------------------------------------------------------
+# A fake `claude` plus a scratch snapshot path: never the operator's real
+# ~/.config/board-mirror/last-writes.json, which these would otherwise overwrite with a snapshot
+# for writes that never happened (that snapshot is what tells the next real run "already synced").
+
+FAKE_CLAUDE = """#!/usr/bin/env bash
+n=$(( $(cat "$FAKE_CLAUDE_COUNT" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$FAKE_CLAUDE_COUNT"
+if [[ "$n" == "${FAKE_CLAUDE_FAIL_ON:-}" ]]; then
+  printf '{"result": "REFRESH_FAILED: injected failure on batch %s"}\\n' "$n"
+  exit 0
+fi
+printf '{"result": "REFRESH_OK: wrote a batch, last_ado_sweep=17889000%02d"}\\n' "$n"
+"""
+
+
+def _write_fake_claude(tmp):
+    path = os.path.join(tmp, "claude")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(FAKE_CLAUDE)
+    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+    return path
+
+
+def _mirror_env(tmp, fake_claude, **extra):
+    env = dict(os.environ)
+    # board_state.py reads $HOME for sessions and escalations, so an inherited one makes the
+    # number of batches depend on whatever the machine running the suite happens to hold. Pinning
+    # it leaves board_state.py emitting meta/status alone, which makes every count below exact —
+    # and doubles as a second guard on the operator's real snapshot under ~/.config.
+    env["HOME"] = tmp
+    env["ARTIFACT_URL"] = "https://example.invalid/artifact"
+    env["PWT_REPO_ROOT"] = tmp
+    env["CLAUDE_BIN"] = fake_claude
+    env["BOARD_MIRROR_SNAPSHOT"] = os.path.join(tmp, "last-writes.json")
+    env["FAKE_CLAUDE_COUNT"] = os.path.join(tmp, "claude-calls")
+    env.update(extra)
+    return env
+
+
+def _run_mirror(env):
+    return subprocess.run(
+        [os.path.join(SYSTEMD_DIR, "run-board-mirror.sh")],
+        env=env, capture_output=True, text=True, timeout=180,
+    )
+
+
+def _snapshot_keys(env):
+    path = env["BOARD_MIRROR_SNAPSHOT"]
+    if not os.path.exists(path):
+        return set()
+    with open(path, encoding="utf-8") as f:
+        return set(json.load(f))
+
+
+def _seed_stale_snapshot(env, n):
+    """Put n documents in the snapshot that board_state.py no longer emits. diff_writes turns each
+    into a `delete`, so the run has n+1 entries to send (meta/status last) no matter how much real
+    state this machine happens to have — the alternative, leaning on board_state.py's own output,
+    makes the batch count depend on whatever sessions and tickets exist when the suite runs.
+    """
+    stale = {f"tickets/stale-{i}": {"n": i} for i in range(n)}
+    with open(env["BOARD_MIRROR_SNAPSHOT"], "w", encoding="utf-8") as f:
+        json.dump(stale, f)
+    return set(stale)
+
+
+def test_a_failed_batch_records_the_batches_that_landed_and_nothing_after_them():
+    # The defect this fixes: the snapshot was written once, at the very end, so a run that wrote
+    # 120 of 156 documents recorded ZERO of them and the next run recomputed the identical diff
+    # and died identically. Batch 1 lands, batch 2 fails -> exactly batch 1 is recorded, batches
+    # 3+ are never sent, and the run still fails loudly.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(
+            tmp, _write_fake_claude(tmp),
+            BOARD_MIRROR_BATCH_LIMIT="1", FAKE_CLAUDE_FAIL_ON="2",
+        )
+        stale = _seed_stale_snapshot(env, 4)
+
+        proc = _run_mirror(env)
+
+        assert proc.returncode != 0, f"a failed batch must still fail the run loudly: {proc.stdout}"
+        recorded = _snapshot_keys(env)
+        landed = stale - recorded
+        assert len(landed) == 1, (
+            f"exactly the one batch that reported success may be recorded, got {sorted(landed)}"
+        )
+        # Nothing from the batch that failed, and nothing from the batches never sent at all.
+        assert len(stale - recorded) < len(stale)
+        # meta/status is deliberately in the final batch, so a run that died at batch 2 cannot
+        # have already claimed a sweep whose rows never landed.
+        assert "meta/status" not in recorded
+
+
+def test_repeated_interrupted_runs_drain_the_backlog_and_then_go_quiet():
+    # Property 2, against the real script: one batch per run (deadline 0 stops before the second),
+    # each run's backlog strictly smaller than the last, ending at zero remaining.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(
+            tmp, _write_fake_claude(tmp),
+            BOARD_MIRROR_BATCH_LIMIT="2", BOARD_MIRROR_DEADLINE_SEC="0",
+        )
+        stale = _seed_stale_snapshot(env, 4)
+
+        remaining = []
+        for _ in range(12):
+            proc = _run_mirror(env)
+            assert proc.returncode == 0, f"interrupted-but-progressing run failed: {proc.stderr}"
+            m = re.search(r"(\d+) batches remaining", proc.stdout)
+            # A run that finished prints the plain REFRESH_OK line and nothing about a backlog —
+            # that line is the "board is fully current" signal and must keep meaning exactly that.
+            assert m or "REFRESH_OK" in proc.stdout, f"run said nothing usable: {proc.stdout!r}"
+            remaining.append(int(m.group(1)) if m else 0)
+            if remaining[-1] == 0:
+                break
+
+        assert len(remaining) > 1, "fixture produced a single batch — this proves nothing"
+        assert remaining[-1] == 0, f"backlog never drained: {remaining}"
+        assert remaining == sorted(remaining, reverse=True), f"backlog grew: {remaining}"
+        assert len(set(remaining)) == len(remaining), f"a run made no progress: {remaining}"
+
+        final = _snapshot_keys(env)
+        assert stale.isdisjoint(final), f"documents left un-deleted after draining: {final}"
+        assert "meta/status" in final, "the finished run never recorded the sweep it completed"
+        assert "REFRESH_OK" in proc.stdout, "the completed run must print the full-refresh line"
+
+
+def test_a_stopped_run_leaves_meta_status_unwritten_so_the_board_admits_it_is_stale():
+    # meta/status carries last_ado_sweep. It is in the final batch on purpose: a partial run must
+    # not stamp a fresh sweep over rows it never wrote.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(
+            tmp, _write_fake_claude(tmp),
+            BOARD_MIRROR_BATCH_LIMIT="1", BOARD_MIRROR_DEADLINE_SEC="0",
+        )
+        _seed_stale_snapshot(env, 4)
+
+        proc = _run_mirror(env)
+
+        assert proc.returncode == 0, f"real progress is not a failed run: {proc.stderr}"
+        assert "meta/status" not in _snapshot_keys(env)
+        assert "REFRESH_OK" not in proc.stdout, (
+            "a partial run must not print the success line the journal and the staleness alarm "
+            "read as a completed refresh"
+        )
+        assert "PARTIAL:" in proc.stdout, "a partial run must still say so in the journal"
+
+
+def test_a_second_concurrent_run_refuses_instead_of_racing_the_first():
+    # Type=oneshot stops systemd starting a second instance; it does NOT stop a person running the
+    # script by hand while the timer is enabled, which README's "force one run" step invites. Two
+    # runs then read the same snapshot, compute the same diff, and write over each other — the
+    # timer's run computing its diff against a snapshot the manual run has already moved on from.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(tmp, _write_fake_claude(tmp))
+        os.makedirs(os.path.dirname(env["BOARD_MIRROR_SNAPSHOT"]) or ".", exist_ok=True)
+        lock = env["BOARD_MIRROR_SNAPSHOT"] + ".lock"
+
+        # Hold the lock the way a run in flight would, then start a second run.
+        holder = subprocess.Popen(["flock", lock, "sleep", "30"])
+        try:
+            proc = _run_mirror(env)
+        finally:
+            holder.terminate()
+            holder.wait(timeout=10)
+
+        assert "another run" in (proc.stdout + proc.stderr).lower(), (
+            f"second run said nothing about the first: {proc.stdout!r} {proc.stderr!r}"
+        )
+        assert proc.returncode == 0, "stepping aside for a run already in flight is not a failure"
+
+
+def test_the_caller_splits_batches_so_the_prompt_never_asks_the_model_to():
+    # The 50-entry cap is the write_db batch limit. It used to be the model's job to split, which
+    # meant one REFRESH_OK covered several batches and the script could not tell which of them
+    # actually landed. The script splits now, one claude -p per batch, so an OK line means
+    # exactly one batch and the snapshot can record precisely that much.
+    run_script = _read("systemd", "run-board-mirror.sh")
+    doc = _read("board-mirror.md")
+
+    assert re.search(r"BOARD_MIRROR_BATCH_LIMIT:-50\b", run_script), (
+        "run-board-mirror.sh must cap each claude -p call at the 50-entry write_db batch limit"
+    )
+    prompt_body = re.sub(r"<!--.*?-->", "", doc, flags=re.DOTALL)
+    assert not re.search(r"split them in order", prompt_body), (
+        "board-mirror.md still tells the model to split batches, but the caller already did — "
+        "a model that splits again makes one REFRESH_OK cover writes the script cannot attribute"
+    )
 
 
 def test_run_script_pre_grants_the_artifact_permission_for_headless_runs():
