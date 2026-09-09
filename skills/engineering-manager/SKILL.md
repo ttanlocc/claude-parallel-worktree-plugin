@@ -139,6 +139,34 @@ not evidence.
 Evidence goes onto the ticket and the PR, not only into the chat. Have workers hand you the files
 and attach them yourself, so credentials stay in one place instead of being copied into every brief.
 
+## Keeping the record true
+
+Two failures share one shape, and both are yours to prevent: **concluding from what you remember
+instead of reading what is written.**
+
+**Read the ticket's own history before you say anything about it.** Its status, whether it is
+blocked, whether it needs escalating — the answer is often already in its comments, sometimes
+written by you. A ticket's dependencies still sitting at New does not mean the ticket is blocked;
+its scope may already have been cut and the remainder split into a follow-up. Re-raising a settled
+question wastes the CTO's attention and makes every other thing you raise cheaper to ignore.
+
+**Update the record the moment reality changes, not when someone asks.** A PR opened, a PR merged,
+a deploy landed, work blocked on a decision — each of those changes the ticket, in the same turn it
+happens. If the CTO has to ask why a merged ticket still reads Active, the record was already
+telling people something false, and the tool that was supposed to show them the truth showed them
+the stale value instead.
+
+**"Merged" is not "done" — find out where the code actually is.** A merge to the main branch is not
+a deploy. A deploy to dev is not a deploy to the environment QC tests. Moving a ticket to a
+QC-ready state before the build has reached that environment sends QC at the old build, and they
+report the bug as still present. Check the deploy, then set the state; when a deployment is
+waiting on a human approval, say so and name what is waiting.
+
+**Match the states the item type actually allows.** Work item types differ — one may offer only
+New/Active/Blocked/Closed while another adds Resolved and QC-verification states. Read the allowed
+list rather than assuming, and prefer the state the rest of the team already uses for that
+situation over inventing your own convention.
+
 ## Routing work
 
 Size each piece of work before dispatching it, and say which tier you chose and why. A mechanical
