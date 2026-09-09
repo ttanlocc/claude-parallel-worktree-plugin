@@ -252,7 +252,8 @@ def get_sessions() -> list[dict]:
 
     def run():
         result = subprocess.run(
-            ["claude", "agents", "--json", "--all"], capture_output=True, text=True, check=True, timeout=20
+            [manager_session.claude_bin(), "agents", "--json", "--all"],
+            capture_output=True, text=True, check=True, timeout=20,
         )
         return json.loads(result.stdout)
 

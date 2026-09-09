@@ -151,6 +151,14 @@ def test_run_script_finds_board_mirror_md_when_invoked_through_a_symlink():
 # for writes that never happened (that snapshot is what tells the next real run "already synced").
 
 FAKE_CLAUDE = """#!/usr/bin/env bash
+# board_state.py resolves the CLI through $CLAUDE_BIN as well now (manager_session.claude_bin),
+# so this stand-in serves `claude agents` besides the `-p` refresh. It must answer that like the
+# real CLI and NOT count it: counting would shift FAKE_CLAUDE_FAIL_ON onto a different batch than
+# the test names, and every batch-boundary assertion below would be measuring the wrong run.
+if [[ "${1:-}" == "agents" ]]; then
+  echo '[]'
+  exit 0
+fi
 n=$(( $(cat "$FAKE_CLAUDE_COUNT" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$FAKE_CLAUDE_COUNT"
 if [[ "$n" == "${FAKE_CLAUDE_FAIL_ON:-}" ]]; then

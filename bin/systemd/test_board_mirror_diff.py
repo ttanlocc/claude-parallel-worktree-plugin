@@ -264,3 +264,50 @@ def test_a_failed_sweep_still_publishes_every_other_collection():
     result = diff_writes(previous, writes)
 
     assert result == [writes[0], META_SWEEP_FAILED]
+
+
+def _cycle(snapshot, writes, land_batches=None, limit=50):
+    """One pump run: diff -> chunk -> apply, recording only the batches that landed.
+    `land_batches=None` means every batch landed; an int means the run died after that many."""
+    batches = chunk_writes(diff_writes(dict(snapshot), writes), limit)
+    for batch in batches[: land_batches if land_batches is not None else len(batches)]:
+        snapshot = apply_batch(snapshot, batch)
+    return snapshot, len(batches)
+
+
+def test_an_interrupted_run_then_a_complete_one_leaves_the_snapshot_exactly_whole():
+    """The other half of "no more, no less". The suite proved the snapshot never records a
+    document that was not written; nothing proved it never FORGETS one that was. That half is
+    what is running in production: board_state emits 54 sessions, the live snapshot holds 0, so
+    every run re-sends all 54 and — because the pump only deletes what it remembers — no session
+    orphan can ever be cleaned up again.
+    """
+    writes = [_set("sessions", f"s{i}", {"n": i}) for i in range(60)]
+    writes += [_set("tickets", f"t{i}", {"n": i}) for i in range(60)]
+    writes += [META]
+
+    # Run 1 dies after one batch. Run 2 (and any further runs) go to completion.
+    snapshot, _ = _cycle({}, writes, land_batches=1)
+    snapshot, _ = _cycle(snapshot, writes)
+
+    emitted = {f"{w['collection']}/{w['doc_id']}" for w in writes}
+    assert set(snapshot) == emitted, (
+        f"snapshot must hold exactly what board_state emitted; "
+        f"missing={sorted(emitted - set(snapshot))} extra={sorted(set(snapshot) - emitted)}"
+    )
+
+
+def test_a_run_interrupted_at_every_batch_boundary_still_converges():
+    """Same property, driven from every possible interruption point rather than one — the real
+    pump is cut at whatever batch its 240s budget happens to land on."""
+    writes = [_set("sessions", f"s{i}", {"n": i}) for i in range(60)]
+    writes += [_set("assignments", f"a{i}", {"n": i}) for i in range(60)]
+    writes += [META]
+    emitted = {f"{w['collection']}/{w['doc_id']}" for w in writes}
+
+    _, total = _cycle({}, writes)
+    for cut in range(total + 1):
+        snapshot, _ = _cycle({}, writes, land_batches=cut)
+        for _ in range(total + 2):  # keep firing until it drains
+            snapshot, remaining = _cycle(snapshot, writes)
+        assert set(snapshot) == emitted, f"cut after {cut} batches never converged"
