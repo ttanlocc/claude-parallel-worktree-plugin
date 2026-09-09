@@ -3680,6 +3680,42 @@ def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
 
 
 # ---------------------------------------------------------------------------
+# state_drift on the board (Part 2) — a reader must see it where they already look, in the same
+# warning-icon-plus-tooltip idiom escalationCard() already uses for kind_raw drift.
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_drift_title_names_both_sides():
+    prelude = _js_function("ticketDriftTitle")
+    out = _run_node(
+        prelude
+        + """
+        console.log(ticketDriftTitle({
+          state: "New",
+          state_drift: { proposed_state: "Active", reason: "PR #726 đang chờ review", fixable: true },
+        }));
+        """
+    )
+    assert out == "ADO ghi New nhưng PR #726 đang chờ review", out
+
+
+def test_ticket_drift_title_is_null_with_no_drift():
+    prelude = _js_function("ticketDriftTitle")
+    out = _run_node(prelude + '\nconsole.log(ticketDriftTitle({ state: "Active", state_drift: null }));')
+    assert out == "null", out
+
+
+def test_ticket_row_reuses_the_drift_css_class_for_state_drift():
+    """The same look escalationCard() already uses for kind_raw drift — not a second one invented
+    for this."""
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "ticketRow() not found"
+    assert 'class: "drift"' in body.group(1), "ticketRow() does not reuse the .drift idiom"
+    assert "ticketDriftTitle(" in body.group(1), "ticketRow() never calls ticketDriftTitle()"
+    assert "state_drift" in body.group(1)
+
+
+# ---------------------------------------------------------------------------
 # The assignment card — "Việc đã giao".
 #
 # Three rules, two of them the CTO's own words:
