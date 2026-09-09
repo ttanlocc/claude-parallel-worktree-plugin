@@ -3537,3 +3537,89 @@ def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
     body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
     assert body, "ticketRow() not found"
     assert "t.state" in body.group(1) and "t.derived_status" in body.group(1)
+
+
+# ---------------------------------------------------------------------------
+# The assignment card — "Việc đã giao".
+#
+# Three rules, two of them the CTO's own words:
+#   - priority is the manager's business, not his ("tôi ko quan tâm P1 hay quan trọng mức thấp gì
+#     hết ... tôi tin tưởng bạn"), so it must not open the card — but it must stay in the data and
+#     keep deciding the order, because dropping a label is a UI change, not a schema change;
+#   - the plan must answer "where is this work right now". A row per step was already tried and
+#     rejected: "mở ra 1 nùi thông tin bên trong đọc ko hiểu gì";
+#   - and nothing may be left to be inferred from a missing row — the same rule renderAssignments
+#     already follows when the sessions listener has not loaded.
+# ---------------------------------------------------------------------------
+
+
+def _assignment_card_source():
+    body = re.search(r"function assignmentCard\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "assignmentCard() not found in board.html"
+    return body.group(1)
+
+
+def test_assignment_card_does_not_open_with_a_priority_pill():
+    """The pill was the first thing the eye landed on and the least useful thing on the card.
+    No P-word label anywhere in it."""
+    src = _assignment_card_source()
+    assert "SEVERITY_LABEL" not in src, "the card still renders the priority label"
+    assert "SEVERITY_TONE" not in src, "the card still renders the priority pill's tone"
+
+
+def test_priority_survives_the_pill_being_dropped():
+    """board_state still publishes it, the localhost dashboard still reads it, and the board still
+    sorts by it. Deleting the pill must not delete the field underneath."""
+    from board_state import assignment_docs
+
+    docs = assignment_docs([{"id": "a1", "title": "x", "priority": "P0", "ts": 1.0}], 2.0)
+    assert docs["a1"]["priority"] == "P0", "board_state stopped publishing priority"
+    assert re.search(r"SEVERITY_RANK\[a\.priority\]", _board_html_script()), (
+        "the board stopped ordering assignments by priority"
+    )
+
+
+def test_assignment_card_buckets_its_steps_instead_of_one_row_per_step():
+    """The finished steps collapse to a count — nobody needs to re-read what is already behind
+    them — and only what is running and what is left stay spelled out."""
+    src = _assignment_card_source()
+    assert "STEP_STATE_LABEL[st]" not in src, "the card still prints a state label per step"
+    for label in ('"đã xong"', '"đang làm"', '"còn lại"'):
+        assert label in src, f"the step list has no {label} bucket"
+
+
+def test_assignment_card_says_out_loud_when_no_step_is_running():
+    """A missing "đang làm" row would read as "nothing is running" by inference, and an inference
+    is exactly what this board refuses to make a reader do."""
+    assert "chưa có bước nào đang chạy" in _assignment_card_source()
+
+
+def test_assignment_card_still_names_an_unrecognised_step_state():
+    """STEP_STATE_LABEL exists because an unlabelled state renders as nothing at all, and nothing
+    at all reads as "not started". Bucketing must not quietly fold "unknown" into "còn lại"."""
+    src = _assignment_card_source()
+    assert '"không rõ"' in src, "an unrecognised step state has no bucket of its own"
+
+
+def test_step_detail_moves_to_hover_rather_than_onto_the_row():
+    """owner / eta / depends_on are secondary, and the CTO offered hover for exactly this ("khi mà
+    expose ra ko collapse hoặc hover vô"). title= needs no JS and cannot move the layout."""
+    src = _assignment_card_source()
+    assert "depends_on" in src, "dependencies vanished from the card entirely"
+    assert re.search(r"title:\s*stepDetail\(", src), "step detail is not offered on hover"
+
+
+def test_the_collapsed_step_count_answers_where_the_work_is_on_hover():
+    """"1/4 bước" on its own says nothing. Collapsed is where the board is actually read, so the
+    answer the opened card gives hangs off that count too rather than costing a click."""
+    src = _assignment_card_source()
+    assert re.search(r"title:\s*stepHint", src), "the collapsed step count carries no hover hint"
+    assert '"đang làm: "' in src, "the hover hint never names the step that is running"
+
+
+def test_assignment_summary_keeps_the_ticket_chip():
+    """The one thing the CTO said he actually wants on this card. It was already correct — dropping
+    the pill in front of it must not take it along."""
+    summary = re.search(r"const summary = \[(.*?)\n  \];", _assignment_card_source(), re.S)
+    assert summary, "the card's summary array not found"
+    assert '"AB#"' in summary.group(1), "the ADO ticket chip left the summary line"
