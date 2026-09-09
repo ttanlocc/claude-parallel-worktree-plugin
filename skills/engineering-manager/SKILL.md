@@ -102,6 +102,24 @@ A worker sees only what you write.
 `parallel-task.sh list` shows every copy. `stop` pauses one, `rm` removes the worktree and keeps the
 branch.
 
+Dispatching into a worktree that already exists — a re-dispatch, a second worker in one copy, or a
+worktree someone made by hand — goes through the SAME command. `start` will refuse (the directory
+is there), but `dispatch` adopts it:
+
+    parallel-task.sh dispatch <task-name> "<brief>" --model <model> --effort <level>
+    parallel-task.sh dispatch <new-name> "<brief>" --worktree <path-of-the-existing-worktree>
+
+The first form adopts `.claude/worktrees/<task-name>`; `--worktree` is for when the session name
+and the worktree name differ. Use one of them. **Never launch a worker with a bare `claude --bg`.**
+An unrecorded session is indistinguishable from somebody's own terminal, so everything that asks
+"did we dispatch this?" answers no about a real worker: it is missing from the board's `managed`
+sessions, gets no worker-finished wake, and — the one that bites — is invisible to the
+stuck-session watch, so when it freezes on a prompt nobody will answer, nothing notices. Three
+workers sat outside the registry for exactly this reason on 2026-09-09, and all three froze.
+
+An adopted row records the worktree and its branch but claims no dev stack, so `stop` leaves the
+stack alone and `rm` unregisters the task without deleting a worktree it did not create.
+
 ### Live verification belongs in the brief
 
 Whoever implements a ticket also proves it works in the running product, and hands you the evidence.
