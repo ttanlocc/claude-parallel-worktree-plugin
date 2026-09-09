@@ -317,6 +317,31 @@ def test_a_second_concurrent_run_refuses_instead_of_racing_the_first():
         assert proc.returncode == 0, "stepping aside for a run already in flight is not a failure"
 
 
+def test_a_partial_run_still_lands_the_heartbeat_but_never_the_completeness_stamp():
+    # The regression checkpointing introduced: during a backlog drain every run is PARTIAL, so
+    # meta/status — deliberately last — never lands, and it was the board's only clock. The board
+    # then showed "last updated 2 hours ago" while data was flowing every 5 minutes, and the
+    # staleness alarm (which sizes its threshold off the timer cadence) fired on a healthy pump.
+    # A false alarm that fires routinely is worse than none: people learn to ignore it.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(
+            tmp, _write_fake_claude(tmp),
+            BOARD_MIRROR_BATCH_LIMIT="1", BOARD_MIRROR_DEADLINE_SEC="0",
+        )
+        _seed_stale_snapshot(env, 4)
+
+        proc = _run_mirror(env)
+
+        assert proc.returncode == 0
+        recorded = _snapshot_keys(env)
+        assert "meta/pump" in recorded, (
+            "a partial run wrote nothing the board can read as proof the pump is alive"
+        )
+        assert "meta/status" not in recorded, (
+            "a partial run claimed the data is complete when it is not"
+        )
+
+
 def test_the_caller_splits_batches_so_the_prompt_never_asks_the_model_to():
     # The 50-entry cap is the write_db batch limit. It used to be the model's job to split, which
     # meant one REFRESH_OK covered several batches and the script could not tell which of them

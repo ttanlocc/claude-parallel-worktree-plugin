@@ -838,6 +838,36 @@ def test_build_writes_truncates_a_doc_id_past_the_200_character_limit():
     assert [len(w["doc_id"]) for w in writes if w["collection"] == "sessions"] == [200]
 
 
+def test_build_writes_puts_the_pump_heartbeat_first_and_meta_status_last():
+    # Two different claims, two different documents, at opposite ends of the run on purpose.
+    # meta/status says "the rows beside me are complete", so it goes last and only a run that
+    # finished ever writes it. meta/pump says "the pump is alive and just ran", which is true the
+    # moment the run starts, so it goes FIRST and therefore lands in batch 1 of every run —
+    # including the partial ones checkpointing made routine. Without it the board's only clock
+    # was meta/status, which now freezes for the whole length of a backlog drain while data is
+    # visibly flowing, and the staleness alarm fires on a perfectly healthy pump.
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=1788900000.0, assignments=[],
+    )
+
+    assert (writes[0]["collection"], writes[0]["doc_id"]) == ("meta", "pump")
+    assert (writes[-1]["collection"], writes[-1]["doc_id"]) == ("meta", "status")
+    assert writes[0]["data"]["ran_at"] == 1788900000.0
+
+
+def test_the_heartbeat_never_claims_the_data_is_complete():
+    # Everything that says "as of when" stays on meta/status. If the heartbeat carried a sweep
+    # time too, a partial run would stamp it and the board would call incomplete data current —
+    # the exact property meta/status-goes-last exists to protect.
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=1788900000.0, ado_swept_at=1788900000.0, assignments=[],
+    )
+
+    assert set(writes[0]["data"]) == {"ran_at"}
+
+
 def test_build_writes_puts_meta_status_last():
     """`meta/status` claims the data alongside it is current. Written first, a batch that dies
     halfway would advertise a sweep whose rows never landed."""
