@@ -622,7 +622,39 @@ def resolve_default_sprint(iterations: list[dict], tickets: dict[str, dict], now
     return sprint
 
 
-def meta_status(now: float, ado_swept_at=None, sessions_scanned_at=None, manager=None, default_sprint=None) -> dict:
+# `OnCalendar=*-*-* *:2/5:00` — systemd's minute-step form: fire every 5 minutes starting at :02.
+# The 5 is the cadence; the 2 is only the offset off the round marks.
+_ONCALENDAR_MINUTE_STEP = re.compile(r"^OnCalendar=.*?\*:\d+/(\d+):", re.MULTILINE)
+
+
+def timer_period_seconds(unit_text) -> int | None:
+    """How often the pump fires, read off the systemd unit rather than copied into a constant.
+
+    board.html cannot read a unit file — it is a published artifact with no filesystem — so it
+    used to carry the cadence as a literal, and that literal rotted: the page said 15 minutes for
+    weeks after the timer was retuned to 5, which meant every staleness check on the board was
+    computed off a baseline three times too long. Parsing it here and stamping it onto
+    meta/status is what keeps the two from drifting again.
+
+    None for anything unreadable — a unit written in a form other than a minute step, a missing
+    file, a zero step. None is "cadence unknown", never a guess: a fabricated baseline is exactly
+    the failure being fixed.
+    """
+    m = _ONCALENDAR_MINUTE_STEP.search(unit_text or "")
+    if not m:
+        return None
+    minutes = int(m.group(1))
+    return minutes * 60 if minutes > 0 else None
+
+
+def meta_status(
+    now: float,
+    ado_swept_at=None,
+    sessions_scanned_at=None,
+    manager=None,
+    default_sprint=None,
+    pump_period_s=None,
+) -> dict:
     """When each source was last read, and who the manager is.
 
     One document, several clocks: the page shows the age of each source separately, because a
@@ -637,6 +669,11 @@ def meta_status(now: float, ado_swept_at=None, sessions_scanned_at=None, manager
         "manager_session_id": manager.get("session_id"),
         "manager_started_at": manager.get("started_at"),
         "default_sprint": default_sprint,
+        # How often the pump that wrote this doc is supposed to fire, in seconds. The page sizes
+        # its "this board has stopped updating" threshold off it, because a published artifact
+        # has no way to read the timer unit itself. None = cadence unknown; see
+        # timer_period_seconds() and board.html's staleThreshold().
+        "pump_period_s": pump_period_s,
     }
 
 
@@ -653,6 +690,7 @@ def build_writes(
     usage_by_session=None,
     iterations=None,
     owners=None,
+    pump_period_s=None,
 ) -> list[dict]:
     """Every document to write, in the order to write it.
 
@@ -683,6 +721,7 @@ def build_writes(
                 sessions_scanned_at=now,
                 manager=manager,
                 default_sprint=resolve_default_sprint(iterations or [], tickets_docs, now),
+                pump_period_s=pump_period_s,
             ),
         }
     )
@@ -721,6 +760,7 @@ def collect(
     read_usage=lambda registry: {},
     read_iterations=list,
     owners=None,
+    read_timer_period=lambda: None,
 ) -> list[dict]:
     """Gather every source and return the write set. Readers are injected so this is testable
     without `az`, `gh`, or a live session.
@@ -759,7 +799,19 @@ def collect(
         # gathered above.
         iterations=_safe(read_iterations, [], "iterations"),
         owners=owners,
+        # None on failure, never a guessed cadence: the page treats an unknown cadence as its own
+        # reason to distrust the data, which is the right answer when the unit file that defines
+        # the pump's schedule cannot even be read.
+        pump_period_s=_safe(read_timer_period, None, "timer"),
     )
+
+
+def _timer_unit_path() -> str:
+    """The unit file shipped in this repo, which is what bin/systemd/README.md tells the operator
+    to symlink and install. Deliberately the repo copy and not `systemctl --user cat`: this must
+    not shell out, and an installed unit that has drifted from the repo is drift the operator has
+    to fix at the source anyway (test_board_timer.py already guards unit/doc agreement)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd", "board-mirror.timer")
 
 
 def _registry_path(repo_root: str) -> str:
@@ -814,6 +866,10 @@ def main() -> int:
         repo_root = manager_session.resolve_repo_root()
         return prs_by_ticket(dashboard.get_github_prs(repo_root))
 
+    def read_timer_period():
+        with open(_timer_unit_path(), encoding="utf-8") as f:
+            return timer_period_seconds(f.read())
+
     writes = collect(
         # list_agents lives in manager_daemon, not dashboard.
         read_agents=manager_daemon.list_agents,
@@ -847,6 +903,7 @@ def main() -> int:
         read_usage=read_usage,
         read_iterations=dashboard.get_ado_iterations,
         owners=dashboard._ado_identities(),
+        read_timer_period=read_timer_period,
     )
     json.dump(writes, sys.stdout, ensure_ascii=False)
     return 0
