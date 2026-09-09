@@ -598,6 +598,25 @@ def meta_status(now: float, ado_swept_at=None, sessions_scanned_at=None, manager
     }
 
 
+# write_db validates doc_id against this before writing ANYTHING, so one bad id does not skip a
+# row — it makes the server refuse the whole batch ("batch rejected before any write, no documents
+# landed"). Session documents are keyed on the task name, which Claude writes as natural English
+# and therefore full of spaces, so this is not a hypothetical: "code review verification" and
+# "git checkout test verification" each stopped an entire refresh from landing.
+DOC_ID_ALLOWED = re.compile(r"[^A-Za-z0-9_\-.~:@+]")
+DOC_ID_MAX = 200
+
+
+def as_doc_id(name: str) -> str:
+    """The name coerced into something write_db accepts, or "" if nothing usable is left.
+
+    Only the KEY is normalized — the document's own fields keep the original name, which is what
+    the board actually displays. The mapping is deterministic, so the same session keeps the same
+    key run after run; that is what lets the diff recognise it as unchanged.
+    """
+    return DOC_ID_ALLOWED.sub("_", str(name or "").strip())[:DOC_ID_MAX].strip("_") or ""
+
+
 def build_writes(
     agents,
     registry,
@@ -627,7 +646,11 @@ def build_writes(
         ("assignments", assignment_docs(assignments, now, registry, usage_by_session)),
     ):
         for doc_id, data in docs.items():
-            writes.append({"op": "set", "collection": collection, "doc_id": doc_id, "data": data})
+            key = as_doc_id(doc_id)
+            if not key:
+                print(f"board_state: dropping {collection} doc with unusable id {doc_id!r}", file=sys.stderr)
+                continue
+            writes.append({"op": "set", "collection": collection, "doc_id": key, "data": data})
     # Last, always: this document asserts the rows above it are current, so a batch that dies
     # halfway must not have already claimed a sweep that did not land.
     writes.append(

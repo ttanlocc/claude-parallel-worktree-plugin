@@ -52,6 +52,23 @@ PLUGIN_BIN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # it for documents a fake `claude` never sent is exactly the "already synced" lie described above.
 SNAPSHOT_PATH="${BOARD_MIRROR_SNAPSHOT:-$HOME/.config/board-mirror/last-writes.json}"
 
+# Type=oneshot stops systemd starting a second instance of the unit. It does NOT stop a person
+# running this script by hand while the timer is enabled — which README's "force one run" step
+# invites, and which happened: the manual run and the timer's run read the same snapshot, and the
+# timer's diff was computed against a state the other run had already moved past. Both then wrote
+# over each other and the timer's run died at the 240s budget.
+#
+# flock on a lockfile beside the snapshot, not on the snapshot itself: board_mirror_diff.py
+# rewrites that file by rename, which would drop the lock along with the old inode.
+mkdir -p "$(dirname "$SNAPSHOT_PATH")"
+exec 9>"$SNAPSHOT_PATH.lock"
+if ! flock -n 9; then
+  # Exit 0, not 1: the work is being done by the run already holding this, so a red unit here
+  # would be noise. The journal still says why nothing happened.
+  echo "run-board-mirror: another run holds $SNAPSHOT_PATH.lock — stepping aside" >&2
+  exit 0
+fi
+
 # stdout only: board_state.py's own diagnostics (e.g. a reader falling back) go to stderr and
 # are left to flow straight into the journal, not merged in here — merging would splice that text
 # into the middle of the JSON array WRITES needs to stay parseable.

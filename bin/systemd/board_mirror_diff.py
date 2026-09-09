@@ -25,9 +25,23 @@ So the record always happens AFTER the write, never before: a crash in between c
 
 import json
 import os
+import re
 import sys
 
 BATCH_LIMIT = 50  # write_db's own cap: a batch takes at most 50 entries.
+
+# write_db validates doc_id BEFORE writing anything, so an entry carrying an id outside this
+# charset does not get skipped — the server refuses the whole batch ("batch rejected before any
+# write, no documents landed"), and every other document travelling with it is lost too.
+# board_state.py normalizes ids at the mint now, but the guards below are what make that provable
+# here rather than assumed: an id the validator rejects CANNOT be in the db, so it must never be
+# sent, and must never be recorded as written. Both halves were violated live — the snapshot held
+# `sessions/code review verification`, a document that had never existed.
+DOC_ID_OK = re.compile(r"[A-Za-z0-9_\-.~:@+]{1,200}\Z")
+
+
+def _valid(doc_id: str) -> bool:
+    return bool(DOC_ID_OK.match(str(doc_id)))
 
 
 def _key(entry: dict) -> str:
@@ -45,7 +59,9 @@ def diff_writes(previous: dict, writes: list[dict]) -> list[dict]:
     previously-known doc_id no longer in `writes` at all, and meta/status always kept and always
     last — it's the refresh timestamp, so "unchanged" never applies to it.
     """
-    if not previous:
+    writes = _sendable(writes)
+    previous = {k: v for k, v in previous.items() if _valid(k.split("/", 1)[-1])}
+    if not writes or not previous:
         return list(writes)
 
     meta = writes[-1]
@@ -61,6 +77,21 @@ def diff_writes(previous: dict, writes: list[dict]) -> list[dict]:
         if key not in current_keys
     ]
     return changed + deletes + [meta]
+
+
+def _sendable(writes: list[dict]) -> list[dict]:
+    """Drop entries write_db would reject the whole batch over, loudly. Dropping one document is
+    strictly better than losing the 49 travelling with it — and better than the alternative that
+    actually happened, where the rejected id stayed in the snapshot, turned into a `delete`
+    carrying the same rejected id when its session ended, and wedged every later run permanently.
+    """
+    ok = []
+    for w in writes:
+        if _valid(w.get("doc_id", "")):
+            ok.append(w)
+        else:
+            print(f"board_mirror_diff: skipping unwritable doc_id {_key(w)!r}", file=sys.stderr)
+    return ok
 
 
 def chunk_writes(entries: list[dict], limit: int = BATCH_LIMIT) -> list[list[dict]]:
@@ -85,6 +116,12 @@ def apply_batch(previous: dict, batch: list[dict]) -> dict:
     """
     snapshot = dict(previous)
     for entry in batch:
+        if not _valid(entry.get("doc_id", "")):
+            # Unreachable if the entry came through diff_writes, and stated here anyway: this is
+            # the one direction that cannot be undone. Recording a document the validator refused
+            # makes the next diff call it unchanged and skip it forever, so the board silently
+            # loses it with no error anywhere.
+            continue
         if entry.get("op") == "delete":
             snapshot.pop(_key(entry), None)
         else:
@@ -97,9 +134,12 @@ def _load_snapshot(path: str) -> dict:
     failed) both mean "no previous run" — send everything, which is correct on a first run."""
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            snapshot = json.load(f)
     except (FileNotFoundError, ValueError):
         return {}
+    # Prune ids that cannot exist in the db, so an already-damaged snapshot heals itself on the
+    # next apply instead of needing the hand edit it needed the first time.
+    return {k: v for k, v in snapshot.items() if _valid(k.split("/", 1)[-1])}
 
 
 def main() -> int:
