@@ -1280,10 +1280,12 @@ def test_board_html_sizes_its_stale_threshold_from_the_stamped_cadence():
     assert "pump_period_s" in script, "board.html never reads meta/status.pump_period_s"
     m = re.search(r"function staleThreshold\s*\(", script)
     assert m, "no single staleThreshold() seam — every caller must size off the same rule"
-    # And the retired literals must be gone, not merely unused: a leftover ADO_CADENCE_S is the
-    # next thing someone wires back in by accident.
-    assert "ADO_CADENCE_S" not in script
-    assert "SESSION_CADENCE_S" not in script
+    # And the retired per-source constants must be gone as DECLARATIONS, not merely unused — a
+    # leftover one is the next thing someone wires back in by accident. (They may still be named
+    # in a comment; the comment explaining what rotted is the point.)
+    assert not re.search(r"const ADO_CADENCE_S\s*=", script)
+    assert not re.search(r"const SESSION_CADENCE_S\s*=", script)
+    assert not re.search(r"const ADO_STALE_MULTIPLIER\s*=", script)
 
 
 def test_board_html_fallback_cadence_matches_the_shipped_timer_unit():

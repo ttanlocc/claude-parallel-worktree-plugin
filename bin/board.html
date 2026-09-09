@@ -156,6 +156,10 @@
   .refresh-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
   .refresh-btn:disabled { cursor: default; opacity: .6; }
   .refresh-age { font-size: var(--fs-sm); color: var(--ink-soft); }
+  .refresh-age-stale {
+    color: var(--bad-ink); background: var(--bad-soft); font-weight: 700;
+    padding: 2px 8px; border-radius: var(--radius-s); border: 1px solid var(--bad-ink);
+  }
   .refresh-note { font-size: var(--fs-xs); color: var(--faint); }
   .freshness-strip { margin-left: auto; }
 
@@ -349,17 +353,29 @@
 <script>
 /* ---------- constants & vocab ---------- */
 
-// The cron that populates this board's db runs every 15 min (see board_state.py). Two missed
-// runs (30 min) means the cron's session almost certainly died, not just a slow tick — that's
-// the hard alarm threshold, kept as a multiplier of the real cadence so it can't silently drift
-// out of sync if the cadence is ever retuned. Sessions have no fixed cadence on paper ("update
-// on events"), but board_state.py stamps last_session_scan on every run of the same sweep loop
-// that drives the ADO check, and the freshness copy this page is specced against phrases
-// session age in seconds — so 60s is the nominal tick assumed here.
-const ADO_CADENCE_S = 15 * 60;
-const ADO_STALE_MULTIPLIER = 2;
-const SESSION_CADENCE_S = 60;
+// How stale is too stale. Every clock on meta/status — last_ado_sweep, last_session_scan,
+// written_at — is stamped by the SAME systemd-timer run, so they all age at one cadence and all
+// freeze together the moment that timer stops. One threshold, therefore, not one per source.
+//
+// The cadence is NOT a constant here. It arrives as meta/status.pump_period_s, which
+// board_state.py parses straight out of bin/systemd/board-mirror.timer's OnCalendar step — this
+// page runs in the artifact sandbox and has no filesystem to read a unit file from. That
+// indirection is the fix: this file used to say `ADO_CADENCE_S = 15 * 60` and kept saying it for
+// weeks after the timer was retuned to every 5 minutes, so a board could sit 14 minutes dead and
+// still render as perfectly fresh.
+//
+// Fallback for a meta doc written before pump_period_s existed. It is the last literal left, and
+// test_board_state.py reads the shipped unit file and fails if the two ever disagree.
+const PUMP_CADENCE_FALLBACK_S = 5 * 60;
+// Three cadences of silence. One slow or coalesced run is normal — the service is `oneshot` and
+// a fire landing on a still-running run is dropped by design — but two consecutive fires that
+// wrote nothing means the pump is not running, not merely late.
 const STALE_MULTIPLIER = 3;
+function staleThreshold() {
+  const p = view.meta && view.meta.pump_period_s;
+  const cadence = (typeof p === "number" && isFinite(p) && p > 0) ? p : PUMP_CADENCE_FALLBACK_S;
+  return cadence * STALE_MULTIPLIER;
+}
 
 const SEVERITY_RANK = { P0: 0, P1: 1, P2: 2 };
 const SEVERITY_LABEL = { P0: "khẩn cấp", P1: "quan trọng", P2: "mức thấp" };
@@ -969,6 +985,11 @@ function renderSummary() {
 function freshnessInfo(ts, staleThresholdS) {
   if (ts == null) return { text: "chưa từng chạy", stale: true, never: true };
   const s = ageSeconds(ts);
+  // A stamp that is present but not a finite number — a string, a NaN, a half-written doc — was
+  // the worst case of all: ageSeconds() returned null, so ageText() returned null, the text fell
+  // through to "0 giây trước" (the freshest reading the page can print) and `null > threshold`
+  // evaluated false, so it was reported fresh as well. Unreadable has to mean stale.
+  if (s == null) return { text: "không đọc được mốc thời gian", stale: true, never: true };
   return { text: (ageText(ts) || "0 giây") + " trước", stale: s > staleThresholdS, never: false };
 }
 function freshnessChip(label, info) {
@@ -1020,10 +1041,10 @@ function renderFreshness() {
         (m.manager_started_at ? " · lên " + (ageText(m.manager_started_at) || "?") + " trước" : ""))
     : pill("pill-warn", "Manager: chưa có phiên nào nhận việc");
 
-  const adoInfo = freshnessInfo(m.last_ado_sweep, ADO_CADENCE_S * ADO_STALE_MULTIPLIER);
+  const adoInfo = freshnessInfo(m.last_ado_sweep, staleThreshold());
   box.replaceChildren(
     freshnessChip("ADO", adoInfo),
-    freshnessChip("Phiên", freshnessInfo(m.last_session_scan, SESSION_CADENCE_S * STALE_MULTIPLIER)),
+    freshnessChip("Phiên", freshnessInfo(m.last_session_scan, staleThreshold())),
     managerChip,
   );
   renderStaleBanner(adoInfo);
@@ -1040,17 +1061,16 @@ function renderRefresh() {
   const box = document.getElementById("refresh");
   if (!box) return;
   const writtenAt = view.meta ? view.meta.written_at : null;
-  // The session threshold, not the ADO one: meta_status() stamps written_at and
-  // last_session_scan from the same sweep, so this stamp ages on that cadence. Only
-  // info.text is drawn here — staleness is already shouted by the banner and the chips
-  // beside this strip, and a third copy of that alarm would just be noise.
-  const info = freshnessInfo(writtenAt, SESSION_CADENCE_S * STALE_MULTIPLIER);
+  const info = freshnessInfo(writtenAt, staleThreshold());
   const clock = writtenAt == null
     ? null
     : new Date(writtenAt * 1000).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
   const age = clock == null
     ? "chưa rõ dữ liệu tính đến lúc nào"
     : "dữ liệu tính đến " + clock + " (" + info.text + ")";
+  // The banner above is not enough on its own. THIS is the line someone actually glances at, and
+  // a three-day-old timestamp rendered in the same quiet grey as a two-minute-old one still reads
+  // as current. When the pump has stopped, the number itself has to say so.
 
   // .filter(Boolean), not a bare null in the argument list: h() drops a null child, but
   // replaceChildren() renders it as the literal text "null" — which is exactly what the topbar
@@ -1063,7 +1083,8 @@ function renderRefresh() {
       title: "Đọc lại dữ liệu mà bộ hẹn giờ đã ghi vào bảng. Trang chạy trong hộp cát nên không tự gọi sang ADO được.",
       onclick: refresh,
     }, view.refresh.busy ? "Đang tải lại…" : "Làm mới"),
-    h("span", { class: "refresh-age" }, age),
+    h("span", { class: info.stale ? "refresh-age refresh-age-stale" : "refresh-age" },
+      info.stale ? "⚠ DỮ LIỆU ĐÃ CŨ — " + age : age),
     h("span", { class: "refresh-note" }, "· chỉ đọc lại dữ liệu bảng, không gọi mới sang ADO"),
     view.refresh.error ? pill("pill-bad", view.refresh.error) : null,
   ].filter(Boolean));
