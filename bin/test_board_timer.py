@@ -171,6 +171,11 @@ def _write_fake_claude(tmp):
 
 def _mirror_env(tmp, fake_claude, **extra):
     env = dict(os.environ)
+    # board_state.py reads $HOME for sessions and escalations, so an inherited one makes the
+    # number of batches depend on whatever the machine running the suite happens to hold. Pinning
+    # it leaves board_state.py emitting meta/status alone, which makes every count below exact —
+    # and doubles as a second guard on the operator's real snapshot under ~/.config.
+    env["HOME"] = tmp
     env["ARTIFACT_URL"] = "https://example.invalid/artifact"
     env["PWT_REPO_ROOT"] = tmp
     env["CLAUDE_BIN"] = fake_claude
@@ -195,23 +200,42 @@ def _snapshot_keys(env):
         return set(json.load(f))
 
 
+def _seed_stale_snapshot(env, n):
+    """Put n documents in the snapshot that board_state.py no longer emits. diff_writes turns each
+    into a `delete`, so the run has n+1 entries to send (meta/status last) no matter how much real
+    state this machine happens to have — the alternative, leaning on board_state.py's own output,
+    makes the batch count depend on whatever sessions and tickets exist when the suite runs.
+    """
+    stale = {f"tickets/stale-{i}": {"n": i} for i in range(n)}
+    with open(env["BOARD_MIRROR_SNAPSHOT"], "w", encoding="utf-8") as f:
+        json.dump(stale, f)
+    return set(stale)
+
+
 def test_a_failed_batch_records_the_batches_that_landed_and_nothing_after_them():
     # The defect this fixes: the snapshot was written once, at the very end, so a run that wrote
     # 120 of 156 documents recorded ZERO of them and the next run recomputed the identical diff
-    # and died identically. Batch 1 lands, batch 2 fails -> exactly batch 1 is recorded, and the
-    # run still fails loudly.
+    # and died identically. Batch 1 lands, batch 2 fails -> exactly batch 1 is recorded, batches
+    # 3+ are never sent, and the run still fails loudly.
     with tempfile.TemporaryDirectory() as tmp:
-        env = _mirror_env(tmp, _write_fake_claude(tmp), FAKE_CLAUDE_FAIL_ON="2")
+        env = _mirror_env(
+            tmp, _write_fake_claude(tmp),
+            BOARD_MIRROR_BATCH_LIMIT="1", FAKE_CLAUDE_FAIL_ON="2",
+        )
+        stale = _seed_stale_snapshot(env, 4)
 
         proc = _run_mirror(env)
 
-        assert proc.returncode != 0, "a failed batch must still fail the run loudly"
+        assert proc.returncode != 0, f"a failed batch must still fail the run loudly: {proc.stdout}"
         recorded = _snapshot_keys(env)
-        assert recorded, "batch 1 landed but nothing was recorded — no progress survives"
-        # Never more than one batch: the limit board-mirror.md's write_db batch actually accepts.
-        assert len(recorded) <= 50, f"recorded {len(recorded)} documents from one 50-entry batch"
-        # And meta/status is deliberately last, so a run that died at batch 2 cannot have
-        # claimed a sweep whose rows never landed.
+        landed = stale - recorded
+        assert len(landed) == 1, (
+            f"exactly the one batch that reported success may be recorded, got {sorted(landed)}"
+        )
+        # Nothing from the batch that failed, and nothing from the batches never sent at all.
+        assert len(stale - recorded) < len(stale)
+        # meta/status is deliberately in the final batch, so a run that died at batch 2 cannot
+        # have already claimed a sweep whose rows never landed.
         assert "meta/status" not in recorded
 
 
@@ -219,38 +243,52 @@ def test_repeated_interrupted_runs_drain_the_backlog_and_then_go_quiet():
     # Property 2, against the real script: one batch per run (deadline 0 stops before the second),
     # each run's backlog strictly smaller than the last, ending at zero remaining.
     with tempfile.TemporaryDirectory() as tmp:
-        env = _mirror_env(tmp, _write_fake_claude(tmp), BOARD_MIRROR_DEADLINE_SEC="0")
+        env = _mirror_env(
+            tmp, _write_fake_claude(tmp),
+            BOARD_MIRROR_BATCH_LIMIT="2", BOARD_MIRROR_DEADLINE_SEC="0",
+        )
+        stale = _seed_stale_snapshot(env, 4)
 
-        recorded, remaining = [], []
+        remaining = []
         for _ in range(12):
             proc = _run_mirror(env)
             assert proc.returncode == 0, f"interrupted-but-progressing run failed: {proc.stderr}"
-            recorded.append(len(_snapshot_keys(env)))
             m = re.search(r"(\d+) remaining", proc.stdout)
-            remaining.append(int(m.group(1)) if m else 0)
+            assert m, f"every run must report how much backlog is left: {proc.stdout!r}"
+            remaining.append(int(m.group(1)))
             if remaining[-1] == 0:
                 break
 
+        assert len(remaining) > 1, "fixture produced a single batch — this proves nothing"
         assert remaining[-1] == 0, f"backlog never drained: {remaining}"
         assert remaining == sorted(remaining, reverse=True), f"backlog grew: {remaining}"
-        assert recorded[0] < recorded[-1], f"snapshot never grew: {recorded}"
-        assert len(recorded) > 1, "fixture produced a single batch — this proves nothing"
+        assert len(set(remaining)) == len(remaining), f"a run made no progress: {remaining}"
+
+        final = _snapshot_keys(env)
+        assert stale.isdisjoint(final), f"documents left un-deleted after draining: {final}"
+        assert "meta/status" in final, "the finished run never recorded the sweep it completed"
+        assert "REFRESH_OK" in proc.stdout, "the completed run must print the full-refresh line"
 
 
 def test_a_stopped_run_leaves_meta_status_unwritten_so_the_board_admits_it_is_stale():
     # meta/status carries last_ado_sweep. It is in the final batch on purpose: a partial run must
     # not stamp a fresh sweep over rows it never wrote.
     with tempfile.TemporaryDirectory() as tmp:
-        env = _mirror_env(tmp, _write_fake_claude(tmp), BOARD_MIRROR_DEADLINE_SEC="0")
+        env = _mirror_env(
+            tmp, _write_fake_claude(tmp),
+            BOARD_MIRROR_BATCH_LIMIT="1", BOARD_MIRROR_DEADLINE_SEC="0",
+        )
+        _seed_stale_snapshot(env, 4)
 
         proc = _run_mirror(env)
 
-        assert proc.returncode == 0
+        assert proc.returncode == 0, f"real progress is not a failed run: {proc.stderr}"
         assert "meta/status" not in _snapshot_keys(env)
         assert "REFRESH_OK" not in proc.stdout, (
             "a partial run must not print the success line the journal and the staleness alarm "
             "read as a completed refresh"
         )
+        assert "PARTIAL:" in proc.stdout, "a partial run must still say so in the journal"
 
 
 def test_the_caller_splits_batches_so_the_prompt_never_asks_the_model_to():

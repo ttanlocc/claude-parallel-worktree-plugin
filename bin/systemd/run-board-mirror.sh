@@ -15,6 +15,19 @@
 # full write set down to only what changed since the last successful run (see its own docstring
 # for why) — the session downstream still just replays whatever array it's handed, same as before.
 #
+# That array is now ONE write_db batch (<=50 entries), not the whole diff: this script splits the
+# diff and runs one `claude -p` per batch, recording each batch in the snapshot as soon as that
+# batch's own reply says it landed. Before that, the snapshot was written once at the very end,
+# so a run killed at TimeoutStartSec mid-write recorded nothing it had already written — 259 live
+# documents against a 120-document snapshot meant a 156-document diff, ~310s against a 240s
+# budget, and three consecutive runs that each wrote ~120 documents, died, recorded none of them,
+# and handed the next run the identical work. The pump could not recover on its own.
+#
+# Splitting here rather than in the prompt is also what makes the record provable: one batch per
+# session means one REFRESH_OK line attributes to exactly the entries this script handed it. When
+# the model did the splitting, a single OK line covered several batches with no way to tell which
+# of them actually landed.
+#
 # Failure must be loud: any of {missing env, board_state.py failing, a broken claude -p
 # invocation, a reply with no REFRESH_OK line anywhere in it} exits non-zero, so a failed run
 # shows up as `systemctl --user status` "failed" and in the journal — not as a quietly stale
@@ -35,7 +48,9 @@ PLUGIN_BIN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # tell "unchanged" from "changed" and "gone" apart. Missing (first install) or unreadable (never
 # synced, or a prior snapshot write itself failed) both mean "no previous run" to
 # board_mirror_diff.py, which sends everything then — same as today's behavior, just once.
-SNAPSHOT_PATH="$HOME/.config/board-mirror/last-writes.json"
+# BOARD_MIRROR_SNAPSHOT overrides it for tests, which must never point at the real one: writing
+# it for documents a fake `claude` never sent is exactly the "already synced" lie described above.
+SNAPSHOT_PATH="${BOARD_MIRROR_SNAPSHOT:-$HOME/.config/board-mirror/last-writes.json}"
 
 # stdout only: board_state.py's own diagnostics (e.g. a reader falling back) go to stderr and
 # are left to flow straight into the journal, not merged in here — merging would splice that text
@@ -55,49 +70,34 @@ if ! DIFF_WRITES="$(python3 "$SCRIPT_DIR/board_mirror_diff.py" diff "$SNAPSHOT_P
   exit 1
 fi
 
-PROMPT="$(
+PROMPT_TEMPLATE="$(
   sed '/<!--/,/-->/d' "$PLUGIN_BIN_DIR/board-mirror.md" \
     | sed "s#<ARTIFACT_URL>#$ARTIFACT_URL#g"
 )"
-# Plain prefix/suffix splitting, not sed and not `${PROMPT//pat/$DIFF_WRITES}`: $DIFF_WRITES is
-# arbitrary JSON and its escaped backslashes are exactly the kind of content both of those
-# reinterpret — sed's replacement treats `&`/`\` specially, and bash's `${.../pat/string}`
-# replacement does its own backslash escaping too (a literal `\"` in $DIFF_WRITES can lose a
-# backslash). `${var%%pat*}` / `${var#*pat}` only ever match `pat` to find a split point; the
-# pieces are then joined by plain `${var}` expansion, which never reinterprets its contents.
-PROMPT="${PROMPT%%<WRITE_ENTRIES_JSON>*}${DIFF_WRITES}${PROMPT#*<WRITE_ENTRIES_JSON>}"
+
+# One JSON array per line, each at most BATCH_LIMIT entries, in the diff's own order — so
+# meta/status stays the last entry of the last batch. 50 is write_db's own cap.
+BATCH_LIMIT="${BOARD_MIRROR_BATCH_LIMIT:-50}"
+if ! BATCH_LINES="$(python3 "$SCRIPT_DIR/board_mirror_diff.py" chunk "$BATCH_LIMIT" <<<"$DIFF_WRITES")"; then
+  echo "run-board-mirror: board_mirror_diff.py failed to split the diff into batches" >&2
+  exit 1
+fi
+mapfile -t BATCHES <<<"$BATCH_LINES"
 
 # A systemd --user unit's PATH is whatever the user manager started with, not this shell's — it
 # usually does NOT include ~/.local/bin. Default to the absolute path rather than bare `claude`.
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 
-# `claude -p` is non-interactive: nothing can click "approve" a permission prompt, so without a
-# grant covering every tool the prompt actually uses, the run dies with "requires permission
-# approval that was not granted". The prompt above only ever asks Claude to write_db —
-# board_state.py and board_mirror_diff.py both run in this shell, not inside the session.
-#
-# `--allowedTools Artifact` looks like it should be enough and ISN'T — verified live (2026-09-08)
-# with a real `claude -p` run that actually tried to write_db one document and read back the
-# result:
-#   --allowedTools Artifact                                            -> PROBE_FAIL:permission_denied
-#   --permission-mode bypassPermissions
-#     --disallowedTools Bash Edit Write Agent Workflow Skill ToolSearch -> PROBE_OK
-# Artifact IS present in a headless session's tool list, but write_db is still a separate
-# approval that --allowedTools has no specifier for (unlike Bash's command patterns or WebFetch's
-# domain matching, Artifact has no per-action allow syntax) — so `Artifact` alone still hits the
-# interactive-approval wall with nothing able to click through it, and the run dies exactly like
-# an ungranted tool would. `--permission-mode bypassPermissions` clears every such approval;
-# `--disallowedTools` then narrows back down explicitly (this one-line "write_db a batch" prompt
-# has no business touching Bash/Edit/Write/Agent/Workflow/Skill/ToolSearch), which is why this is
-# bypass-then-restrict rather than the wide-open default bypassPermissions would otherwise be.
-if ! RAW_OUTPUT="$("$CLAUDE_BIN" -p --permission-mode bypassPermissions \
-  --disallowedTools Bash Edit Write Agent Workflow Skill ToolSearch \
-  --output-format json -- "$PROMPT" 2>&1)"; then
-  echo "run-board-mirror: claude -p exited non-zero: $RAW_OUTPUT" >&2
-  exit 1
-fi
+# Stop cleanly instead of being SIGTERMed mid-batch. TimeoutStartSec is 240s and stays a backstop
+# for a genuinely hung run, but with progress now durable there is nothing to gain from being
+# killed inside a batch: that batch's spend is thrown away and the run is logged as failed even
+# though it made real progress. So: never START a batch that the last batch's own duration says
+# won't finish in time. The first batch always runs — a run that records nothing makes no
+# progress, and the backlog would never drain.
+DEADLINE_SEC="${BOARD_MIRROR_DEADLINE_SEC:-210}"
 
-RESULT="$(python3 -c '
+decode_result() {
+  python3 -c '
 import json, sys
 try:
     payload = json.loads(sys.stdin.read())
@@ -109,30 +109,99 @@ if not isinstance(result, str):
     print("run-board-mirror: claude -p JSON had no string result field", file=sys.stderr)
     sys.exit(1)
 print(result)
-' <<<"$RAW_OUTPUT")" || exit 1
+'
+}
 
-# board-mirror.md now asks for a bare one-line reply, but the model isn't guaranteed to comply —
-# a live run answered with a lead-in sentence before the REFRESH_OK line. Match REFRESH_OK: as a
-# substring of any line, not just an exact-match whole string, so a stray prefix doesn't get read
-# as failure (which, via the snapshot-only-on-success write below, would silently defeat the
-# whole diff-instead-of-full-resend point of this script forever). REFRESH_FAILED or no
-# REFRESH_OK anywhere still falls through to the failure branch below.
-OK_LINE="$(grep -m1 'REFRESH_OK:' <<<"$RESULT" || true)"
-if [[ -n "$OK_LINE" ]]; then
-  echo "run-board-mirror: $OK_LINE"
-  # Snapshot the FULL write set (not $DIFF_WRITES) only now, after the write actually landed —
-  # this is $WRITES, board_state.py's complete output, so next run's diff has every current
-  # doc_id to compare against, not just the ones this run happened to send. Updating this before
-  # the write, or when the write failed, would make the next run believe it's already synced and
-  # silently skip real changes forever — a stale board with no error anywhere, the exact kind of
-  # quiet failure that cost a full day before (see board-mirror.md's Scheduling section). A
-  # failure here does NOT fail the run: the refresh itself already succeeded, so this only means
-  # next run resends everything instead of just the diff — safe, just not free.
-  if ! python3 "$SCRIPT_DIR/board_mirror_diff.py" snapshot "$SNAPSHOT_PATH" <<<"$WRITES"; then
-    echo "run-board-mirror: refresh succeeded but snapshot update failed — next run will resend everything" >&2
+WROTE=0
+DONE_BATCHES=0
+LAST_BATCH_SEC=0
+LAST_OK_LINE=""
+
+for ((i = 0; i < ${#BATCHES[@]}; i++)); do
+  if ((i > 0)) && ((SECONDS + LAST_BATCH_SEC > DEADLINE_SEC)); then
+    break
   fi
+  BATCH_STARTED_AT=$SECONDS
+
+  # Plain prefix/suffix splitting, not sed and not `${PROMPT//pat/$DIFF_WRITES}`: the batch is
+  # arbitrary JSON and its escaped backslashes are exactly the kind of content both of those
+  # reinterpret — sed's replacement treats `&`/`\` specially, and bash's `${.../pat/string}`
+  # replacement does its own backslash escaping too (a literal `\"` in $DIFF_WRITES can lose a
+  # backslash). `${var%%pat*}` / `${var#*pat}` only ever match `pat` to find a split point; the
+  # pieces are then joined by plain `${var}` expansion, which never reinterprets its contents.
+  PROMPT="${PROMPT_TEMPLATE%%<WRITE_ENTRIES_JSON>*}${BATCHES[i]}${PROMPT_TEMPLATE#*<WRITE_ENTRIES_JSON>}"
+
+  # `claude -p` is non-interactive: nothing can click "approve" a permission prompt, so without a
+  # grant covering every tool the prompt actually uses, the run dies with "requires permission
+  # approval that was not granted". The prompt above only ever asks Claude to write_db —
+  # board_state.py and board_mirror_diff.py both run in this shell, not inside the session.
+  #
+  # `--allowedTools Artifact` looks like it should be enough and ISN'T — verified live (2026-09-08)
+  # with a real `claude -p` run that actually tried to write_db one document and read back the
+  # result:
+  #   --allowedTools Artifact                                            -> PROBE_FAIL:permission_denied
+  #   --permission-mode bypassPermissions
+  #     --disallowedTools Bash Edit Write Agent Workflow Skill ToolSearch -> PROBE_OK
+  # Artifact IS present in a headless session's tool list, but write_db is still a separate
+  # approval that --allowedTools has no specifier for (unlike Bash's command patterns or WebFetch's
+  # domain matching, Artifact has no per-action allow syntax) — so `Artifact` alone still hits the
+  # interactive-approval wall with nothing able to click through it, and the run dies exactly like
+  # an ungranted tool would. `--permission-mode bypassPermissions` clears every such approval;
+  # `--disallowedTools` then narrows back down explicitly (this one-line "write_db a batch" prompt
+  # has no business touching Bash/Edit/Write/Agent/Workflow/Skill/ToolSearch), which is why this is
+  # bypass-then-restrict rather than the wide-open default bypassPermissions would otherwise be.
+  if ! RAW_OUTPUT="$("$CLAUDE_BIN" -p --permission-mode bypassPermissions \
+    --disallowedTools Bash Edit Write Agent Workflow Skill ToolSearch \
+    --output-format json -- "$PROMPT" 2>&1)"; then
+    echo "run-board-mirror: claude -p exited non-zero on batch $((i + 1))/${#BATCHES[@]}: $RAW_OUTPUT" >&2
+    exit 1
+  fi
+
+  RESULT="$(decode_result <<<"$RAW_OUTPUT")" || exit 1
+
+  # board-mirror.md now asks for a bare one-line reply, but the model isn't guaranteed to comply —
+  # a live run answered with a lead-in sentence before the REFRESH_OK line. Match REFRESH_OK: as a
+  # substring of any line, not just an exact-match whole string, so a stray prefix doesn't get read
+  # as failure (which, via the snapshot-only-on-success write below, would silently defeat the
+  # whole diff-instead-of-full-resend point of this script forever). REFRESH_FAILED or no
+  # REFRESH_OK anywhere still falls through to the failure branch below.
+  OK_LINE="$(grep -m1 'REFRESH_OK:' <<<"$RESULT" || true)"
+  if [[ -z "$OK_LINE" ]]; then
+    echo "run-board-mirror: batch $((i + 1))/${#BATCHES[@]} did not report success: $RESULT" >&2
+    exit 1
+  fi
+
+  # Checkpoint, and only now: this batch's own reply said it landed. Recording before the write,
+  # or recording entries some LATER batch was going to send, would make the next run believe it's
+  # already synced and silently skip real changes forever — a stale board with no error anywhere,
+  # the exact kind of quiet failure that cost a full day before (see board-mirror.md's Scheduling
+  # section). The reverse — dying after the write and before this line — only costs one idempotent
+  # rewrite next run, which is why the order is write-then-record and not the other way round.
+  # A failure here does NOT fail the run: the write itself already succeeded, so this only means
+  # next run resends this batch — safe, just not free.
+  if ! BATCH_COUNT="$(python3 "$SCRIPT_DIR/board_mirror_diff.py" apply "$SNAPSHOT_PATH" <<<"${BATCHES[i]}")"; then
+    echo "run-board-mirror: batch $((i + 1)) landed but the snapshot update failed — next run resends it" >&2
+    BATCH_COUNT=0
+  fi
+
+  WROTE=$((WROTE + BATCH_COUNT))
+  DONE_BATCHES=$((DONE_BATCHES + 1))
+  LAST_BATCH_SEC=$((SECONDS - BATCH_STARTED_AT))
+  LAST_OK_LINE="$OK_LINE"
+done
+
+REMAINING=$((${#BATCHES[@]} - DONE_BATCHES))
+if ((REMAINING > 0)); then
+  # Deliberately exit 0 and deliberately NOT the REFRESH_OK line: real, durable progress was made
+  # and the next timer fire picks up the rest, so this is not a failed run — but meta/status is in
+  # the final batch and did not land, so nothing here may read as a completed refresh to the
+  # journal or to anything watching for staleness.
+  echo "run-board-mirror: PARTIAL: wrote $WROTE documents in $DONE_BATCHES of ${#BATCHES[@]} batches, $REMAINING remaining for the next run"
   exit 0
 fi
 
-echo "run-board-mirror: refresh did not report success: $RESULT" >&2
-exit 1
+# The full-refresh signature the journal and the staleness check look for. last_ado_sweep comes
+# from the final batch — the one carrying meta/status — so it is only ever printed by a run that
+# actually finished.
+SWEEP="$(sed -n 's/.*last_ado_sweep=\([^ ,]*\).*/\1/p' <<<"$LAST_OK_LINE")"
+echo "run-board-mirror: REFRESH_OK: wrote $WROTE documents, last_ado_sweep=${SWEEP:-unknown}, 0 remaining"

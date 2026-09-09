@@ -14,6 +14,13 @@
   "write this array to the artifact" — this session never sees the unfiltered set, and never
   needs Bash to produce it.
 
+  That script also splits the diff into 50-entry batches and runs one session per batch, so what
+  lands in <WRITE_ENTRIES_JSON> is a single batch. It records each batch in its snapshot as soon
+  as that batch's own reply reports success, which is why the reply must describe THIS batch and
+  nothing else: a run killed part-way must leave behind exactly the documents that really landed.
+  Splitting used to be this prompt's job, which meant one REFRESH_OK covered several batches and
+  the script had no way to tell which of them the artifact actually accepted.
+
   What the operator should set before scheduling, because none of it belongs in a shipped file:
     ARTIFACT_URL — the board published from bin/board.html with capabilities {db: {}}
     PWR_ADO_ASSIGNED_TO — only if one person holds more than one ADO identity. Unset, the
@@ -28,13 +35,14 @@
 
 Refresh the manager board. Do exactly this and nothing else.
 
-1. Write these entries to the artifact at `<ARTIFACT_URL>` using the Artifact tool's `write_db`
-   with `db_op: "batch"`. Each entry is already shaped as the batch expects — `{op: "set",
-   collection, doc_id, data}` or `{op: "delete", collection, doc_id}` — pass them through
-   unchanged. Do not sort, filter or reorder them: `meta/status` is deliberately
-   last, because it asserts the rows beside it are current, and a batch that dies halfway must
-   never have already claimed a sweep whose rows never landed. A batch takes at most 50 entries —
-   if there are more, split them in order, keeping the `meta/status` entry in the final batch.
+1. Write these entries to the artifact at `<ARTIFACT_URL>` in ONE call to the Artifact tool's
+   `write_db` with `db_op: "batch"`. There are at most 50 of them — the caller already cut the
+   refresh into batches this size, so this is one batch, not a set to split again. Each entry is
+   already shaped as the batch expects — `{op: "set", collection, doc_id, data}` or `{op:
+   "delete", collection, doc_id}` — pass them through unchanged. Do not sort, filter or reorder
+   them: where `meta/status` appears it is deliberately last, because it asserts the rows beside
+   it are current, and a write that dies halfway must never have already claimed a sweep whose
+   rows never landed.
 
    <WRITE_ENTRIES_JSON>
 
