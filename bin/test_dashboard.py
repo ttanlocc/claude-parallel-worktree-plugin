@@ -947,9 +947,15 @@ def test_github_pr_query_keeps_its_existing_cache_tier():
     subprocess.run = mock_run
     try:
         dashboard.get_github_prs("/repo")
+        after_first = len(calls)
         dashboard.get_github_prs("/repo")
     finally:
         subprocess.run = original_run
         dashboard._CACHE.pop("github_prs:/repo", None)
 
-    assert len(calls) == 1, "the second call was not served from the cache"
+    # Count the SECOND fetch's subprocesses, not the total: one fetch is now two `gh` calls (a
+    # wide sweep plus an open-only check lookup — see the query test above), and what this pins is
+    # that the cache still absorbs the repeat, whatever a single fetch costs.
+    assert after_first and len(calls) == after_first, (
+        f"the second fetch was not served from the cache: {len(calls) - after_first} extra calls"
+    )

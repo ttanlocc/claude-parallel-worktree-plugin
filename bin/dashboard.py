@@ -270,16 +270,9 @@ def get_github_prs(repo_root: str) -> list[dict]:
     updates REPO_DIR — the same trap read_registry() in board_state.py works around already.
     """
 
-    def run():
+    def gh_pr_list(state, fields):
         result = subprocess.run(
-            # `reviewDecision` and `statusCheckRollup` ride along on the call that was already
-            # being made — `gh` returns them for free and a second call would double the sweep's
-            # latency AND be able to disagree with the first about which PRs exist. They are what
-            # lets the board tell "waiting for review" from "waiting for someone to click merge",
-            # which is the whole difference between a ticket needing a person and a ticket needing
-            # the CTO. See board_state.prs_by_ticket()/ticket_status().
-            ["gh", "pr", "list", "--state", "all", "--limit", "500", "--json",
-             "number,title,url,state,isDraft,reviewDecision,statusCheckRollup"],
+            ["gh", "pr", "list", "--state", state, "--limit", "500", "--json", fields],
             capture_output=True,
             text=True,
             check=True,
@@ -287,6 +280,32 @@ def get_github_prs(repo_root: str) -> list[dict]:
             cwd=repo_root,
         )
         return json.loads(result.stdout)
+
+    def run():
+        # `reviewDecision` rides along free; `statusCheckRollup` does NOT. GitHub resolves the
+        # check rollup per PR, so asking for it across `--state all --limit 500` took 42.5s
+        # against this call's own 20s timeout — measured on the repo the board pump actually
+        # sweeps. Every run hit the timeout, fell back to {} and blanked the board's PR column,
+        # while still spending 20s of the pump's budget to do it.
+        #
+        # Split, measured on that same repo: the wide sweep without the rollup is 12.5s for all
+        # 500 PRs, and an open-only rollup lookup is 1.6s for the 11 that have one. Nothing is
+        # lost — board_state.ticket_status() reads `checks` only inside `if pr["state"] ==
+        # "OPEN"`, so the rollup was being fetched for 489 PRs that never consult it. A merged
+        # PR's CI is history, not a signal.
+        #
+        # Two calls CAN disagree about which PRs exist, which is why the second is joined onto
+        # the first by number rather than replacing it: a PR that closed between the two simply
+        # gets no rollup, and one that opened is absent from the wide sweep either way.
+        prs = gh_pr_list("all", "number,title,url,state,isDraft,reviewDecision")
+        rollups = {
+            pr.get("number"): pr.get("statusCheckRollup")
+            for pr in gh_pr_list("open", "number,statusCheckRollup")
+        }
+        for pr in prs:
+            if pr.get("state") == "OPEN" and pr.get("number") in rollups:
+                pr["statusCheckRollup"] = rollups[pr["number"]]
+        return prs
 
     return _cached(f"github_prs:{repo_root}", run, ttl=_ENRICH_TTL)
 
