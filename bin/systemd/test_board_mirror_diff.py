@@ -101,9 +101,11 @@ def test_apply_batch_records_exactly_the_entries_it_was_handed():
 
 
 def test_apply_batch_removes_a_deleted_doc_rather_than_recording_it():
-    previous = apply_batch({}, [_set("tickets", "7763", {"state": "done"})])
+    previous = apply_batch({}, [_set("tickets", "retired-1", {"state": "done"})])
 
-    snapshot = apply_batch(previous, [{"op": "delete", "collection": "tickets", "doc_id": "7763"}])
+    snapshot = apply_batch(
+        previous, [{"op": "delete", "collection": "tickets", "doc_id": "retired-1"}]
+    )
 
     assert snapshot == {}
 
