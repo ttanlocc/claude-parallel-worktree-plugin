@@ -3461,6 +3461,115 @@ def test_board_state_and_board_html_agree_on_which_ticket_states_mean_done():
     assert set(re.findall(r'"([^"]+)"', block.group(1))) == set(TICKET_DONE_STATES)
 
 
+# ---------------------------------------------------------------------------
+# state_drift — the board saying `state` and `derived_status` cannot both be true. Real evidence,
+# 2026-09-09: ticket 8471 published `state: New`, `derived_status: waiting_review`, an OPEN PR
+# with green checks. A ticket nobody has started cannot have that PR.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_real_case_8471_a_new_task_with_a_pr_waiting_review_proposes_active():
+    """The exact record that prompted this file. A Task has no Resolved state, so the only
+    honest correction is Active."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Task", "waiting_review")
+    assert drift is not None
+    assert drift["proposed_state"] == "Active"
+    assert drift["fixable"] is True
+
+
+def test_todays_real_case_5061_a_resolved_bug_is_not_drift():
+    """A false alarm here would be worse than the bug this file exists to catch — 5061 is already
+    correct today."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Resolved", "Bug", "waiting_review") is None
+
+
+def test_a_bug_proposes_resolved_not_active_because_a_bug_has_a_resolved_state():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Bug", "waiting_merge")
+    assert drift["proposed_state"] == "Resolved"
+
+
+def test_checks_failing_is_also_proof_a_pr_exists():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Task", "checks_failing")
+    assert drift is not None and drift["proposed_state"] == "Active"
+
+
+def test_new_with_no_pr_backed_derived_status_is_not_drift():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("New", "Task", "unclaimed") is None
+    assert ticket_state_drift("New", "Task", None) is None
+
+
+def test_merged_not_closed_is_reported_but_proposes_nothing():
+    """Merged is not verified — a human has to confirm it, not this file."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Task", "merged_not_closed")
+    assert drift is not None
+    assert drift["proposed_state"] is None
+    assert drift["fixable"] is False
+
+
+def test_unclaimed_while_active_is_not_drift():
+    """Pinned: a person may be working outside this system entirely. Flagging this would nag at
+    honest work."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Active", "Task", "unclaimed") is None
+
+
+def test_a_task_never_proposes_resolved_task_has_no_such_state():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Task", "waiting_merge")
+    assert drift["proposed_state"] == "Active"
+
+
+def test_unknown_state_returns_none_rather_than_guessing():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Frobnicated", "Task", "waiting_review") is None
+
+
+def test_unknown_work_item_type_returns_none_rather_than_guessing():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("New", "Epic", "waiting_review") is None
+
+
+def test_state_drift_is_published_beside_state_and_derived_status_never_instead_of_them():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "8471", "title": "x", "state": "New", "type": "Task"}],
+        {"8471": _pr(number=726, state="OPEN", review="REVIEW_REQUIRED", checks="passing")},
+    )
+    doc = docs["8471"]
+    assert doc["state"] == "New"
+    assert doc["derived_status"] == "waiting_review"
+    assert doc["state_drift"]["proposed_state"] == "Active"
+    assert doc["state_drift"]["fixable"] is True
+    assert "726" in doc["state_drift"]["reason"] and "New" not in doc["state_drift"]["reason"]
+
+
+def test_state_drift_is_null_when_state_and_derived_status_agree():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "5061", "title": "x", "state": "Resolved", "type": "Bug"}],
+        {"5061": _pr(review="REVIEW_REQUIRED", checks="passing")},
+    )
+    assert docs["5061"]["state_drift"] is None
+
+
 # --- the derived status on the ticket document ---
 
 

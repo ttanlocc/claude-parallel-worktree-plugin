@@ -827,8 +827,90 @@ def ticket_status(ticket_state, pr: dict | None, claimed: bool, escalated: bool)
     return "waiting_push" if claimed else "unclaimed"
 
 
+# Allowed states by work item type — never assumed to match. A Bug can be Resolved; a Task
+# cannot, and proposing it would be exactly the kind of confidently wrong answer this file exists
+# to stop.
+ALLOWED_TICKET_STATES = {
+    "Task": frozenset({"New", "Active", "Blocked", "Closed", "Removed"}),
+    "Bug": frozenset({
+        "New", "Active", "Blocked", "Resolved",
+        "Ready for QC verify on Stag", "QC Testing on Stag", "Closed",
+    }),
+}
+
+# Any of these three is proof an OPEN PR exists. A ticket sitting at `New` while one of them is
+# true is the provable contradiction: "nobody has started" cannot be true of a ticket with an
+# open PR someone is reviewing, merging, or watching fail CI.
+_PR_PROVES_STARTED = frozenset({"waiting_review", "waiting_merge", "checks_failing"})
+
+_PR_DRIFT_PHRASE = {
+    "waiting_review": "đang chờ review",
+    "waiting_merge": "đã sẵn sàng merge",
+    "checks_failing": "đang fail checks",
+}
+
+
+def ticket_state_drift(state, work_item_type, derived_status, has_block_reason=None) -> dict | None:
+    """The state ADO should hold when it disagrees with the evidence, or None when they agree.
+
+    `None` also covers a state or work-item-type this file does not recognise — the same
+    fail-toward-silence rule the rest of this file uses for vocabulary it cannot place: guessing a
+    correction for a state nobody named to this function is worse than saying nothing.
+
+    Three contradictions, one shape (`proposed_state` / `reason` / `fixable`):
+      - `New` while the PR proves work has started: the only one with a proposed fix, because it
+        is the only one certain enough to write back — see Part 3's hard limits. Never proposes a
+        state the type does not allow (Bug -> Resolved, Task -> Active; Task has no Resolved).
+      - `merged_not_closed`: worth reporting, proposes nothing — merged is not verified, and that
+        call is a human's.
+      - `Blocked` with no assignment-ledger note explaining it (`has_block_reason=False`; `None`
+        means "not checked" and is silently skipped, never treated as a positive finding of
+        absence): the board is asserting a block it cannot explain. Proposes nothing — the fix is
+        a person writing the reason, not a state moving.
+
+    `reason` is deliberately generic (no ticket-specific PR number) — ticket_docs() is the one
+    with the actual `pr` dict, and folds the number in before publishing.
+    """
+    allowed = ALLOWED_TICKET_STATES.get(work_item_type)
+    if allowed is None or state not in allowed:
+        return None
+
+    if state == "New" and derived_status in _PR_PROVES_STARTED:
+        proposed = "Active" if "Resolved" not in allowed else "Resolved"
+        return {"proposed_state": proposed, "reason": _PR_DRIFT_PHRASE[derived_status], "fixable": True}
+
+    if derived_status == "merged_not_closed":
+        return {"proposed_state": None, "reason": "đã merged", "fixable": False}
+
+    if state == "Blocked" and has_block_reason is False:
+        return {
+            "proposed_state": None,
+            "reason": "không có ghi chú CHẶN BỞI: trong sổ giao việc",
+            "fixable": False,
+        }
+
+    return None
+
+
+def _state_drift_doc(state, work_item_type, derived_status, has_block_reason, pr: dict | None) -> dict | None:
+    """`ticket_state_drift()`'s result, enriched with the one thing it cannot know: this
+    ticket's actual PR number — so the published reason names both sides, e.g. "PR #726 đang chờ
+    review", without ticket_state_drift() taking a whole `pr` dict just to read one field.
+    """
+    drift = ticket_state_drift(state, work_item_type, derived_status, has_block_reason)
+    if drift is None:
+        return None
+    reason = drift["reason"]
+    number = (pr or {}).get("number")
+    # Only the two PR-shaped reasons ever mention a PR — a Blocked-with-no-note reason has
+    # nothing to do with any PR that ticket happens to also carry.
+    if number is not None and reason in (*_PR_DRIFT_PHRASE.values(), "đã merged"):
+        reason = f"PR #{number} {reason}"
+    return {"proposed_state": drift["proposed_state"], "reason": reason, "fixable": drift["fixable"]}
+
+
 def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | None = None,
-                assignment_refs=None, escalated_refs=None) -> dict[str, dict]:
+                assignment_refs=None, escalated_refs=None, blocked_reason_refs=None) -> dict[str, dict]:
     """One document per ADO work item, keyed by its id.
 
     "Not started", "in flight" and "done this sprint" are filters over `state` + `sprint` on
@@ -852,17 +934,21 @@ def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | Non
         ownership = _ticket_ownership(ticket, owners or [])
         key = str(ticket_id)
         pr = (pr_by_ticket or {}).get(key)
+        state = ticket.get("state") or ""
+        derived_status = ticket_status(state, pr, key in assignment_refs, key in escalated_refs)
+        has_block_reason = None if blocked_reason_refs is None else key in blocked_reason_refs
         docs[key] = {
             "id": key,
             "title": ticket.get("title") or "",
-            "state": ticket.get("state") or "",
+            "state": state,
             "sprint": ticket.get("sprint") or "",
             "type": ticket.get("type") or "",
             "url": ticket.get("url") or "",
             "pr": pr,
-            "derived_status": ticket_status(
-                ticket.get("state") or "", pr, key in assignment_refs, key in escalated_refs
-            ),
+            "derived_status": derived_status,
+            # Published BESIDE state and derived_status, never instead of either — see
+            # ticket_state_drift()'s docstring for the three contradictions this can name.
+            "state_drift": _state_drift_doc(state, ticket.get("type") or "", derived_status, has_block_reason, pr),
             "handed_off": ownership["handed_off"],
             "handed_off_to": ownership["handed_off_to"],
         }
