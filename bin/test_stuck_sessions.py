@@ -299,7 +299,7 @@ def test_the_watch_unit_fires_on_its_own_grid_and_names_a_cadence_board_state_ca
     """The stuck window is derived from this file, not from a constant. An OnCalendar that
     timer_period_seconds() cannot parse makes the watch file nothing at all — loudly, but
     nothing — so the unit is guarded the same way board-mirror.timer is."""
-    from board_state import timer_period_seconds
+    from board_state import CLAIM_STALE_MULTIPLIER, claim_stale_after, timer_period_seconds
 
     systemd_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd")
     with open(os.path.join(systemd_dir, "stuck-session-watch.timer"), encoding="utf-8") as f:
@@ -310,6 +310,15 @@ def test_the_watch_unit_fires_on_its_own_grid_and_names_a_cadence_board_state_ca
     assert timer_period_seconds(timer) is not None, "the watch's own cadence must be parseable"
     offsets = [re.search(r"\*:(\d+)/", t).group(1) for t in (timer, board)]
     assert offsets[0] != offsets[1], "the watch must not fire on the same instant as board-mirror"
+
+    # The README quotes both numbers in prose, and prose is what went stale last time. Retune the
+    # unit and this fails until the doc follows.
+    with open(os.path.join(systemd_dir, "README.md"), encoding="utf-8") as f:
+        readme = f.read()
+    period = timer_period_seconds(timer)
+    window = claim_stale_after(period)
+    assert f"stuck past {window / 60:.0f}m" in readme, "the README's sample log line names a stale window"
+    assert f"silent for at least {int(CLAIM_STALE_MULTIPLIER)} timer periods" in readme
 
 
 if __name__ == "__main__":

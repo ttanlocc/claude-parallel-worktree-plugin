@@ -177,15 +177,20 @@ def _live_records(path: str) -> dict:
     return live
 
 
-def scan(path: str, agents, registry, probe, now: float, stale_after) -> list[dict]:
+def scan(path: str, agents, registry, probe, now: float, stale_after, stuck=None) -> list[dict]:
     """One pass: file what is newly stuck, retire what is not stuck any more. Returns the actions.
 
     The condition persists across scans and the ledger is append-only, so both halves work off
     the folded latest-per-id state rather than trying to remember anything between runs. Filing a
     fresh record every scan would bury the queue within the hour; leaving one open after the
     session moved would leave the manager holding a decision nobody needs.
+
+    `stuck` is for a caller that already ran stuck_now() and wants its counts — main() does — so
+    the pass does not read every waiting session's transcript a second time to learn the same
+    thing. Left None, this runs it itself.
     """
-    stuck, _ = stuck_now(agents, registry, probe, now, stale_after)
+    if stuck is None:
+        stuck, _ = stuck_now(agents, registry, probe, now, stale_after)
     live = _live_records(path)
     actions = []
     for sid, ev in stuck.items():
@@ -252,7 +257,7 @@ def main() -> int:
 
     now = time.time()
     stuck, unmanaged = stuck_now(agents, registry, probe_transcript, now, stale_after)
-    actions = scan(path, agents, registry, probe_transcript, now, stale_after)
+    actions = scan(path, agents, registry, probe_transcript, now, stale_after, stuck=stuck)
     for a in actions:
         print(f"  {a['action']}: {a['task']} ({a['session_id']}) -> {a['id']}")
     print(
