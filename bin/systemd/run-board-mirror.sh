@@ -82,7 +82,13 @@ if ! BATCH_LINES="$(python3 "$SCRIPT_DIR/board_mirror_diff.py" chunk "$BATCH_LIM
   echo "run-board-mirror: board_mirror_diff.py failed to split the diff into batches" >&2
   exit 1
 fi
-mapfile -t BATCHES <<<"$BATCH_LINES"
+# `mapfile <<<""` would yield one empty element, not zero, and that empty "batch" would be sent
+# to claude -p as an absent JSON array. diff always returns at least meta/status so this cannot
+# happen today, but the loop below reads much worse if it ever does.
+BATCHES=()
+if [[ -n "$BATCH_LINES" ]]; then
+  mapfile -t BATCHES <<<"$BATCH_LINES"
+fi
 
 # A systemd --user unit's PATH is whatever the user manager started with, not this shell's — it
 # usually does NOT include ~/.local/bin. Default to the absolute path rather than bare `claude`.
@@ -94,6 +100,13 @@ CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 # though it made real progress. So: never START a batch that the last batch's own duration says
 # won't finish in time. The first batch always runs — a run that records nothing makes no
 # progress, and the backlog would never drain.
+#
+# 210s from the measured cost of a run: 86 successful runs fit 49s fixed + 0.76s per document, so
+# a full 50-entry batch is ~87s. Batch 1 ends near 90s (board_state.py is ~3s of that) and batch 2
+# near 177s, both under 210; batch 3 would end near 264s and is not started. That is 2 batches —
+# ~100 documents — per fire, which drains the 259-document worst case in 3 fires, ~15 minutes,
+# unattended. Raising this to fit a third batch would push a run to ~267s against a 300s cadence,
+# buying one batch for nearly all of the headroom that keeps fires from colliding.
 DEADLINE_SEC="${BOARD_MIRROR_DEADLINE_SEC:-210}"
 
 decode_result() {
