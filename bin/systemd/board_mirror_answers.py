@@ -44,6 +44,12 @@ from escalations import QUEUE_PATH, current_state, normalize_options, record_ans
 
 # The artifact-db collection board.html writes a chosen option into, and the only one this reads.
 # Never a collection board_state.py emits — see the module docstring.
+#
+# ponytail: applied answers are left in the collection rather than deleted, so the ANSWERS line
+# the pump session prints carries every answer ever given from the board — a few dozen bytes each,
+# and bounded by how many escalations get answered here at all. Prune applied documents (a delete
+# arm in the same batch, once the ledger append succeeded) if that line ever gets long enough to
+# matter; do NOT make idempotency depend on the delete, which is what the ledger gate is for.
 ANSWERS_COLLECTION = "escalation_answers"
 
 # Stamped on what this appends, alongside "human" (port 4400) and "manager" (the daemon), so the
