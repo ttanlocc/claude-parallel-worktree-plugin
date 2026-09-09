@@ -6,6 +6,7 @@ by run-board-mirror.sh — a regression here is exactly the kind of doc/unit dri
 replaced the session-scoped cron to avoid.
 """
 
+import json
 import os
 import re
 import stat
@@ -132,10 +133,7 @@ def test_run_script_finds_board_mirror_md_when_invoked_through_a_symlink():
             )
         os.chmod(fake_claude, os.stat(fake_claude).st_mode | stat.S_IEXEC)
 
-        env = dict(os.environ)
-        env["ARTIFACT_URL"] = "https://example.invalid/artifact"
-        env["PWT_REPO_ROOT"] = tmp
-        env["CLAUDE_BIN"] = fake_claude
+        env = _mirror_env(tmp, fake_claude)
 
         proc = subprocess.run(
             [symlinked_script], env=env, capture_output=True, text=True, timeout=30
@@ -144,6 +142,133 @@ def test_run_script_finds_board_mirror_md_when_invoked_through_a_symlink():
             f"run-board-mirror.sh failed when invoked through a symlink: {proc.stderr}"
         )
         assert "REFRESH_OK" in proc.stdout
+
+
+
+# --- driving the real run-board-mirror.sh -------------------------------------------------------
+# A fake `claude` plus a scratch snapshot path: never the operator's real
+# ~/.config/board-mirror/last-writes.json, which these would otherwise overwrite with a snapshot
+# for writes that never happened (that snapshot is what tells the next real run "already synced").
+
+FAKE_CLAUDE = """#!/usr/bin/env bash
+n=$(( $(cat "$FAKE_CLAUDE_COUNT" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$FAKE_CLAUDE_COUNT"
+if [[ "$n" == "${FAKE_CLAUDE_FAIL_ON:-}" ]]; then
+  printf '{"result": "REFRESH_FAILED: injected failure on batch %s"}\\n' "$n"
+  exit 0
+fi
+printf '{"result": "REFRESH_OK: wrote a batch, last_ado_sweep=17889000%02d"}\\n' "$n"
+"""
+
+
+def _write_fake_claude(tmp):
+    path = os.path.join(tmp, "claude")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(FAKE_CLAUDE)
+    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+    return path
+
+
+def _mirror_env(tmp, fake_claude, **extra):
+    env = dict(os.environ)
+    env["ARTIFACT_URL"] = "https://example.invalid/artifact"
+    env["PWT_REPO_ROOT"] = tmp
+    env["CLAUDE_BIN"] = fake_claude
+    env["BOARD_MIRROR_SNAPSHOT"] = os.path.join(tmp, "last-writes.json")
+    env["FAKE_CLAUDE_COUNT"] = os.path.join(tmp, "claude-calls")
+    env.update(extra)
+    return env
+
+
+def _run_mirror(env):
+    return subprocess.run(
+        [os.path.join(SYSTEMD_DIR, "run-board-mirror.sh")],
+        env=env, capture_output=True, text=True, timeout=180,
+    )
+
+
+def _snapshot_keys(env):
+    path = env["BOARD_MIRROR_SNAPSHOT"]
+    if not os.path.exists(path):
+        return set()
+    with open(path, encoding="utf-8") as f:
+        return set(json.load(f))
+
+
+def test_a_failed_batch_records_the_batches_that_landed_and_nothing_after_them():
+    # The defect this fixes: the snapshot was written once, at the very end, so a run that wrote
+    # 120 of 156 documents recorded ZERO of them and the next run recomputed the identical diff
+    # and died identically. Batch 1 lands, batch 2 fails -> exactly batch 1 is recorded, and the
+    # run still fails loudly.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(tmp, _write_fake_claude(tmp), FAKE_CLAUDE_FAIL_ON="2")
+
+        proc = _run_mirror(env)
+
+        assert proc.returncode != 0, "a failed batch must still fail the run loudly"
+        recorded = _snapshot_keys(env)
+        assert recorded, "batch 1 landed but nothing was recorded — no progress survives"
+        # Never more than one batch: the limit board-mirror.md's write_db batch actually accepts.
+        assert len(recorded) <= 50, f"recorded {len(recorded)} documents from one 50-entry batch"
+        # And meta/status is deliberately last, so a run that died at batch 2 cannot have
+        # claimed a sweep whose rows never landed.
+        assert "meta/status" not in recorded
+
+
+def test_repeated_interrupted_runs_drain_the_backlog_and_then_go_quiet():
+    # Property 2, against the real script: one batch per run (deadline 0 stops before the second),
+    # each run's backlog strictly smaller than the last, ending at zero remaining.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(tmp, _write_fake_claude(tmp), BOARD_MIRROR_DEADLINE_SEC="0")
+
+        recorded, remaining = [], []
+        for _ in range(12):
+            proc = _run_mirror(env)
+            assert proc.returncode == 0, f"interrupted-but-progressing run failed: {proc.stderr}"
+            recorded.append(len(_snapshot_keys(env)))
+            m = re.search(r"(\d+) remaining", proc.stdout)
+            remaining.append(int(m.group(1)) if m else 0)
+            if remaining[-1] == 0:
+                break
+
+        assert remaining[-1] == 0, f"backlog never drained: {remaining}"
+        assert remaining == sorted(remaining, reverse=True), f"backlog grew: {remaining}"
+        assert recorded[0] < recorded[-1], f"snapshot never grew: {recorded}"
+        assert len(recorded) > 1, "fixture produced a single batch — this proves nothing"
+
+
+def test_a_stopped_run_leaves_meta_status_unwritten_so_the_board_admits_it_is_stale():
+    # meta/status carries last_ado_sweep. It is in the final batch on purpose: a partial run must
+    # not stamp a fresh sweep over rows it never wrote.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(tmp, _write_fake_claude(tmp), BOARD_MIRROR_DEADLINE_SEC="0")
+
+        proc = _run_mirror(env)
+
+        assert proc.returncode == 0
+        assert "meta/status" not in _snapshot_keys(env)
+        assert "REFRESH_OK" not in proc.stdout, (
+            "a partial run must not print the success line the journal and the staleness alarm "
+            "read as a completed refresh"
+        )
+
+
+def test_the_caller_splits_batches_so_the_prompt_never_asks_the_model_to():
+    # The 50-entry cap is the write_db batch limit. It used to be the model's job to split, which
+    # meant one REFRESH_OK covered several batches and the script could not tell which of them
+    # actually landed. The script splits now, one claude -p per batch, so an OK line means
+    # exactly one batch and the snapshot can record precisely that much.
+    run_script = _read("systemd", "run-board-mirror.sh")
+    doc = _read("board-mirror.md")
+
+    assert re.search(r"BOARD_MIRROR_BATCH_LIMIT:-50\b", run_script), (
+        "run-board-mirror.sh must cap each claude -p call at the 50-entry write_db batch limit"
+    )
+    prompt_body = re.sub(r"<!--.*?-->", "", doc, flags=re.DOTALL)
+    assert not re.search(r"split them in order", prompt_body), (
+        "board-mirror.md still tells the model to split batches, but the caller already did — "
+        "a model that splits again makes one REFRESH_OK cover writes the script cannot attribute"
+    )
 
 
 def test_run_script_pre_grants_the_artifact_permission_for_headless_runs():
