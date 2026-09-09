@@ -121,6 +121,33 @@ Green tests are not this. A test that reads a prompt or config file and asserts 
 proves the sentence was written, never that the system obeys it — and that is exactly the shape of
 bug a human finds by using the product. Know which of the two a report is handing you.
 
+### Ask for a status file in the brief
+
+The board can observe a worker's session state, its PR and its ADO state. It cannot see whether
+the worker is writing a failing test, implementing, verifying, or stuck — and "stuck" is the one
+that costs whole afternoons, because a worker parked on a permission prompt looks exactly like a
+worker that is working. So ask for it, in the brief, or you will not get it:
+
+> Sau mỗi lần đổi giai đoạn, ghi `.claude/worker-status.json` trong worktree của bạn:
+> `{"ticket": "<id>", "phase": "<giai đoạn>", "note": "<một câu tiếng Việt>", "blocked_on": null,
+> "updated_at": <unix seconds>}`. `phase` là một trong sáu: `exploring`, `red_test`,
+> `implementing`, `verifying`, `blocked`, `reporting`. Khi `phase` là `blocked`, `blocked_on`
+> phải nói ai gỡ được: `{"kind": "permission|decision|dependency|environment", "what": "...",
+> "who": "..."}`.
+
+One file per worker, in that worker's own worktree — no lock, nothing two workers can tear. A
+worker that never writes one is not an error; the board simply says nothing about it.
+
+Treat what comes back as a **claim, not a fact**. The board already does: it prints the claim
+beside the session state it observed, and where the two disagree it shows both ("worker nói đang
+kiểm chứng, nhưng phiên đang: Đang chờ duyệt"). A claim nobody has refreshed for three pump
+cycles is marked stale and stops counting as current. So a worker saying `verifying` is the same
+grade of evidence as a worker saying the tests are green — see "Accepting a report" below.
+
+The part worth chasing is `blocked_on.who`. "Bị chặn" alone is the word this replaces: a
+permission, a product decision and an acceptance-criteria ruling are three different asks of
+three different people, and only the `who` tells you which one is yours.
+
 ### Accepting a report
 
 A report is incomplete until it answers: **was this verified live, and where is the evidence?**
