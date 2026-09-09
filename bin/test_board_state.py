@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """assert-based checks for board_state, the pure transform behind the artifact board."""
 
+import json
 import re
 
 from board_state import session_docs
@@ -540,7 +541,8 @@ def test_prs_by_ticket_maps_a_single_ab_ref_in_the_title():
         }
     ]
 
-    assert prs_by_ticket(prs) == {"5061": {"number": 720, "state": "MERGED", "url": "https://github.com/o/r/pull/720"}}
+    assert prs_by_ticket(prs) == {"5061": {"number": 720, "state": "MERGED", "url": "https://github.com/o/r/pull/720",
+                              "review": None, "checks": None}}
 
 
 def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
@@ -558,7 +560,8 @@ def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
     docs = prs_by_ticket(prs)
 
     assert set(docs) == {"8196", "8197"}
-    assert docs["8196"] == {"number": 100, "state": "OPEN", "url": "https://github.com/o/r/pull/100"}
+    assert docs["8196"] == {"number": 100, "state": "OPEN", "url": "https://github.com/o/r/pull/100",
+                           "review": None, "checks": None}
     assert docs["8197"] == docs["8196"]
 
 
@@ -2041,7 +2044,8 @@ def test_main_actually_wires_the_real_pr_reader_into_the_collect_call(monkeypatc
 
     writes = json.loads(capsys.readouterr().out)
     tickets = [w for w in writes if w["collection"] == "tickets"]
-    assert tickets[0]["data"]["pr"] == {"number": 1, "state": "OPEN", "url": "pu"}
+    assert tickets[0]["data"]["pr"] == {"number": 1, "state": "OPEN", "url": "pu",
+                                       "review": None, "checks": None}
 
 
 def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
@@ -2835,3 +2839,701 @@ def test_board_no_longer_computes_a_percentage_anywhere():
     card = _assignment_card_source()
     assert "a.progress" not in card, "the card still reads a field it no longer shows"
     assert "pct" not in card, "the percentage computation is dead code now"
+
+
+# ---------------------------------------------------------------------------
+# What a worker says about itself: the claim.
+#
+# A claim is the one thing no derivation can see — whether a worker is writing a failing test,
+# implementing, verifying, or stuck, and if stuck, who can clear it. It is also the one input
+# here written by an agent about itself, so every test below is about the boundary: what gets
+# through, what gets refused, and what gets refused WITH THE REASON KEPT.
+# ---------------------------------------------------------------------------
+
+
+def _claim(**over):
+    rec = {
+        "ticket": "1001",
+        "phase": "red_test",
+        "note": "đang viết test đỏ cho dòng Tổng quan",
+        "blocked_on": None,
+        "updated_at": 1000.0,
+    }
+    rec.update(over)
+    return rec
+
+
+def test_a_worker_claim_is_published_tagged_with_its_source():
+    """`source` is not decoration. Every other field on a session document is observed fact;
+    this one is a worker's own account of itself, and a reader that cannot tell the two apart
+    will read "verifying" as though the board had checked."""
+    from board_state import validate_claim
+
+    claim, reason = validate_claim(_claim(), now=1060.0, stale_after=900.0)
+
+    assert reason is None
+    assert claim["source"] == "worker_claim"
+    assert claim["phase"] == "red_test"
+    assert claim["ticket"] == "1001"
+    assert claim["note"] == "đang viết test đỏ cho dòng Tổng quan"
+    assert claim["blocked_on"] is None
+    assert claim["age_seconds"] == 60.0
+    assert claim["stale"] is False
+
+
+def test_a_missing_claim_file_is_no_claim_and_not_an_error():
+    """Most workers never write one. "No file" must be indistinguishable from "nothing to say" —
+    not an ignored-with-a-reason row that would put a complaint on the board for every worker
+    that simply predates this file existing."""
+    from board_state import validate_claim
+
+    assert validate_claim(None, now=1000.0, stale_after=900.0) == (None, None)
+
+
+def test_a_malformed_claim_is_ignored_with_the_reason_recorded():
+    """Written by an agent, so "not even an object" is normal drift rather than an emergency —
+    but silently dropping it is how a worker keeps writing into a void. The reason is what tells
+    the worker's author their file is being refused."""
+    from board_state import validate_claim
+
+    for raw in ("phase: red_test", ["red_test"], 7, True):
+        claim, reason = validate_claim(raw, now=1000.0, stale_after=900.0)
+        assert claim is None, f"{raw!r} must not reach the board"
+        assert reason, f"{raw!r} was dropped with no reason recorded"
+
+
+def test_an_unknown_phase_is_rejected_rather_than_passed_through():
+    """`phase` is a closed six-word contract, for the same reason escalations' `kind` is closed:
+    the page ranks and colours off it. An invented word renders as a bare English slug at best,
+    and at worst quietly becomes a seventh state nobody agreed to."""
+    from board_state import validate_claim
+
+    claim, reason = validate_claim(_claim(phase="almost_done"), now=1000.0, stale_after=900.0)
+
+    assert claim is None
+    assert reason and "almost_done" in reason, "the reason must name the phase that was refused"
+
+
+def test_every_phase_in_the_closed_vocabulary_is_accepted():
+    from board_state import CLAIM_PHASES, validate_claim
+
+    assert CLAIM_PHASES == {"exploring", "red_test", "implementing", "verifying", "blocked", "reporting"}
+    for phase in CLAIM_PHASES:
+        blocked_on = {"kind": "permission", "what": "docker cp", "who": "cto"} if phase == "blocked" else None
+        claim, reason = validate_claim(
+            _claim(phase=phase, blocked_on=blocked_on), now=1000.0, stale_after=900.0
+        )
+        assert reason is None, f"{phase} is in the vocabulary but was refused: {reason}"
+        assert claim["phase"] == phase
+
+
+def test_a_block_that_does_not_name_who_can_clear_it_is_rejected():
+    """The only part of "blocked" that matters is whose move it is. Three tickets blocked on a
+    permission, a product decision and an acceptance-criteria ruling are three different asks of
+    three different people; a block with no `who` collapses them back into the one word this
+    whole field exists to replace."""
+    from board_state import validate_claim
+
+    claim, reason = validate_claim(
+        _claim(phase="blocked", blocked_on={"kind": "permission", "what": "docker cp"}),
+        now=1000.0,
+        stale_after=900.0,
+    )
+
+    assert claim is None
+    assert reason and "who" in reason
+
+
+def test_a_block_of_an_unknown_kind_is_rejected():
+    from board_state import BLOCKED_KINDS, validate_claim
+
+    assert BLOCKED_KINDS == {"permission", "decision", "dependency", "environment"}
+    claim, reason = validate_claim(
+        _claim(phase="blocked", blocked_on={"kind": "vibes", "what": "x", "who": "cto"}),
+        now=1000.0,
+        stale_after=900.0,
+    )
+
+    assert claim is None
+    assert reason and "vibes" in reason
+
+
+def test_a_blocked_claim_with_no_block_reason_at_all_is_rejected():
+    from board_state import validate_claim
+
+    claim, reason = validate_claim(_claim(phase="blocked", blocked_on=None), now=1000.0, stale_after=900.0)
+
+    assert claim is None
+    assert reason
+
+
+def test_a_block_reason_on_a_phase_that_is_not_blocked_is_dropped():
+    """`blocked_on` is null unless the phase is `blocked`. Kept, it would render a worker that is
+    happily implementing as waiting on the CTO — so the field goes, not the whole claim: the
+    phase itself is still perfectly good information."""
+    from board_state import validate_claim
+
+    claim, reason = validate_claim(
+        _claim(phase="implementing", blocked_on={"kind": "permission", "what": "docker cp", "who": "cto"}),
+        now=1000.0,
+        stale_after=900.0,
+    )
+
+    assert reason is None
+    assert claim["phase"] == "implementing"
+    assert claim["blocked_on"] is None
+
+
+def test_a_claim_with_no_readable_clock_is_rejected_rather_than_dated_now():
+    """Stamping an undated claim with the sweep time would make every stale claim look fresh
+    forever — the same fabricated-baseline failure timer_period_seconds() refuses to commit."""
+    from board_state import validate_claim
+
+    for bad in (None, "just now", True):
+        claim, reason = validate_claim(_claim(updated_at=bad), now=1000.0, stale_after=900.0)
+        assert claim is None, f"updated_at={bad!r} must not reach the board"
+        assert reason
+
+
+def test_a_stale_claim_is_not_presented_as_current():
+    """It is still published — "the worker last said verifying, an hour ago" is real information
+    — but flagged, so the page can never print it as the phase the worker is in now."""
+    from board_state import validate_claim
+
+    claim, reason = validate_claim(_claim(), now=1000.0 + 901, stale_after=900.0)
+
+    assert reason is None
+    assert claim["stale"] is True
+    assert claim["age_seconds"] == 901.0
+
+
+def test_a_claim_is_stale_when_the_pump_cadence_is_unknown():
+    """No cadence means no way to size the window, and an unsized window cannot certify anything
+    as fresh. Same answer board.html gives an unknown cadence: distrust, never a guess."""
+    from board_state import validate_claim
+
+    claim, _ = validate_claim(_claim(), now=1000.0, stale_after=None)
+
+    assert claim["stale"] is True
+
+
+def test_the_claim_staleness_window_is_sized_from_the_pump_cadence():
+    """Not a hardcoded number: the pump re-reads these files once per sweep, so a claim is up to
+    one cadence old purely from sampling. The window is the cadence board_state already parses
+    out of the shipped timer unit, times the same multiplier board.html uses for the board's own
+    staleness — one definition of "too old to trust", not two that can drift."""
+    from board_state import CLAIM_STALE_MULTIPLIER, claim_stale_after
+
+    assert claim_stale_after(300) == 300 * CLAIM_STALE_MULTIPLIER
+    assert claim_stale_after(None) is None, "an unknown cadence must not fall back to a guessed window"
+    assert claim_stale_after(0) is None
+
+
+def test_board_html_and_board_state_agree_on_the_staleness_multiplier():
+    """board.html carries its own STALE_MULTIPLIER for the meta clocks. If the two drift, the
+    board would call itself fresh while calling every claim on it stale, or the reverse."""
+    from board_state import CLAIM_STALE_MULTIPLIER
+
+    m = re.search(r"const STALE_MULTIPLIER = (\d+);", _board_html_script())
+    assert m, "board.html no longer declares STALE_MULTIPLIER"
+    assert int(m.group(1)) == CLAIM_STALE_MULTIPLIER
+
+
+# --- the claim on the session document, and where it disagrees with the facts ---
+
+
+def test_session_docs_carry_the_claim_the_worker_wrote_in_its_worktree():
+    agents = [{"name": "w1", "sessionId": "s1", "state": "running"}]
+    docs = session_docs(
+        agents, {"w1": {"path": "/wt/w1"}}, claims={"w1": _claim()}, now=1060.0, stale_after=900.0
+    )
+
+    assert docs["w1"]["claim"]["phase"] == "red_test"
+    assert docs["w1"]["claim"]["source"] == "worker_claim"
+    assert docs["w1"]["claim_ignored"] is None
+    assert docs["w1"]["contradiction"] is None
+
+
+def test_session_docs_record_why_a_claim_was_ignored_instead_of_dropping_it_silently():
+    agents = [{"name": "w1", "sessionId": "s1", "state": "running"}]
+    docs = session_docs(
+        agents, {}, claims={"w1": _claim(phase="almost_done")}, now=1000.0, stale_after=900.0
+    )
+
+    assert docs["w1"]["claim"] is None, "an unknown phase must never reach the page as a status"
+    assert docs["w1"]["claim_ignored"] and "almost_done" in docs["w1"]["claim_ignored"]
+
+
+def test_session_docs_surface_a_contradiction_rather_than_picking_a_side():
+    """Fact wins — the claim is not promoted to a status — but the disagreement is what a manager
+    needs to see. Three workers reported work as verified today when at least one had not run the
+    failing-test check; a board that quietly prints either half of that is confidently wrong."""
+    agents = [{"name": "w1", "sessionId": "s1", "state": "blocked"}]
+    docs = session_docs(
+        agents, {"w1": {}}, claims={"w1": _claim(phase="verifying")}, now=1060.0, stale_after=900.0
+    )
+
+    doc = docs["w1"]
+    assert doc["state"] == "waiting", "the observed session state still wins the state field"
+    assert doc["claim"]["phase"] == "verifying", "the claim is kept, not overwritten"
+    assert doc["contradiction"] == {"claim_phase": "verifying", "session_state": "waiting"}
+
+
+def test_session_docs_do_not_call_a_stale_claim_a_contradiction():
+    """A claim nobody has refreshed for an hour is not evidence of anything current, so it cannot
+    disagree with anything current either. Only a live claim can contradict."""
+    agents = [{"name": "w1", "sessionId": "s1", "state": "blocked"}]
+    docs = session_docs(
+        agents, {}, claims={"w1": _claim(phase="verifying")}, now=1000.0 + 901, stale_after=900.0
+    )
+
+    assert docs["w1"]["claim"]["stale"] is True
+    assert docs["w1"]["contradiction"] is None
+
+
+def test_session_docs_see_no_contradiction_in_a_worker_that_says_it_is_blocked():
+    """`blocked` and `reporting` claim nothing about forward motion, so a stopped session agrees
+    with them. Only the four working phases can be contradicted by a session that is not running."""
+    agents = [{"name": "w1", "sessionId": "s1", "state": "blocked"}]
+    docs = session_docs(
+        agents,
+        {},
+        claims={"w1": _claim(phase="blocked", blocked_on={"kind": "permission", "what": "docker cp", "who": "cto"})},
+        now=1060.0,
+        stale_after=900.0,
+    )
+
+    assert docs["w1"]["contradiction"] is None
+    assert docs["w1"]["claim"]["blocked_on"]["who"] == "cto"
+
+
+def test_a_claim_from_a_worker_whose_session_is_gone_still_reaches_the_board():
+    """The headline case: a worker that says it is verifying and whose session no longer exists
+    at all. session_docs is agent-first, so without this the claim — and the contradiction —
+    would vanish exactly when they matter most."""
+    docs = session_docs(
+        [], {"w1": {"branch": "feature/x", "path": "/wt/w1"}},
+        claims={"w1": _claim(phase="verifying")}, now=1060.0, stale_after=900.0,
+    )
+
+    doc = docs["w1"]
+    assert doc["state"] == "unknown"
+    assert doc["managed"] is True
+    assert doc["branch"] == "feature/x"
+    assert doc["contradiction"] == {"claim_phase": "verifying", "session_state": "unknown"}
+
+
+def test_session_docs_without_any_claims_are_unchanged():
+    """Every existing caller passes no claims at all; those documents must keep the exact shape
+    they had, with the new fields present and null rather than missing."""
+    docs = session_docs([{"name": "w1", "sessionId": "s1", "state": "running"}], {})
+
+    assert docs["w1"]["claim"] is None
+    assert docs["w1"]["claim_ignored"] is None
+    assert docs["w1"]["contradiction"] is None
+
+
+# --- wiring: the reader, and what happens when it fails ---
+
+
+def test_collect_reads_claims_for_the_worktrees_the_registry_names():
+    from board_state import collect
+
+    seen = {}
+
+    def read_claims(registry):
+        seen.update(registry)
+        return {"w1": _claim(phase="implementing", updated_at=890.0)}
+
+    writes = collect(
+        read_agents=lambda: [{"name": "w1", "sessionId": "s1", "state": "running"}],
+        read_registry=lambda: {"w1": {"path": "/wt/w1"}},
+        read_escalations=list, read_tickets=list, read_prs=dict, now=lambda: 900.0,
+        read_claims=read_claims,
+        read_timer_period=lambda: 300,
+    )
+
+    assert "w1" in seen, "the claim reader must be given the registry to find the worktrees"
+    doc = _writes_for(writes, "sessions")[0]["data"]
+    assert doc["claim"]["phase"] == "implementing"
+    assert doc["claim"]["stale"] is False
+
+
+def test_collect_degrades_a_broken_claim_reader_without_blanking_the_sessions():
+    from board_state import collect
+
+    def boom(registry):
+        raise RuntimeError("worktree unreadable")
+
+    writes = collect(
+        read_agents=lambda: [{"name": "w1", "sessionId": "s1", "state": "running"}],
+        read_registry=lambda: {"w1": {"path": "/wt/w1"}},
+        read_escalations=list, read_tickets=list, read_prs=dict, now=lambda: 900.0,
+        read_claims=boom,
+    )
+
+    doc = _writes_for(writes, "sessions")[0]["data"]
+    assert doc["state"] == "running", "a failed claim read must not cost the board its sessions"
+    assert doc["claim"] is None
+
+
+def test_read_worker_claims_reads_one_file_per_worktree(tmp_path):
+    """One file per worker, in the worker's own worktree — so there is no lock, no contention and
+    no shared file two workers can tear."""
+    from board_state import read_worker_claims
+
+    wt = tmp_path / "w1"
+    (wt / ".claude").mkdir(parents=True)
+    (wt / ".claude" / "worker-status.json").write_text(
+        json.dumps(_claim(), ensure_ascii=False), encoding="utf-8"
+    )
+    (tmp_path / "w2").mkdir()
+
+    claims = read_worker_claims({"w1": {"path": str(wt)}, "w2": {"path": str(tmp_path / "w2")}})
+
+    assert claims["w1"]["phase"] == "red_test"
+    assert "w2" not in claims, "a worktree with no file has no claim — not an empty one"
+
+
+def test_read_worker_claims_survives_a_file_that_is_not_json(tmp_path):
+    """Torn or half-written is normal for a file an agent rewrites in place; it must cost the
+    board that one worker's claim, never the sweep."""
+    from board_state import read_worker_claims
+
+    wt = tmp_path / "w1"
+    (wt / ".claude").mkdir(parents=True)
+    (wt / ".claude" / "worker-status.json").write_text('{"phase": "red_te', encoding="utf-8")
+
+    from board_state import validate_claim
+
+    claims = read_worker_claims({"w1": {"path": str(wt)}})
+
+    assert "w1" in claims, "an unreadable file must still be reported, not silently absent"
+    claim, reason = validate_claim(claims["w1"], now=1000.0, stale_after=900.0)
+    assert claim is None and reason, "a torn file must be refused with a reason, not treated as no claim"
+
+
+# --- the page ---
+
+
+def test_board_renders_the_worker_claim_on_the_session_tile():
+    script = _board_html_script()
+    assert re.search(r"\bs\.claim\b", script), "board.html never reads the worker's claim"
+    assert "PHASE_LABEL" in script, "no Vietnamese gloss for the claim's phase vocabulary"
+
+
+def test_board_labels_every_phase_in_the_closed_vocabulary():
+    from board_state import CLAIM_PHASES
+
+    block = re.search(r"const PHASE_LABEL = \{(.*?)\};", _board_html_script(), re.S)
+    assert block, "board.html has no PHASE_LABEL map"
+    for phase in CLAIM_PHASES:
+        assert re.search(rf"\b{phase}\b", block.group(1)), f"{phase} has no label on the page"
+
+
+def test_board_shows_both_sides_of_a_contradiction():
+    """Never one value alone: the whole point is that the reader sees the worker's account and
+    the observed state side by side and knows which one the board trusts."""
+    script = _board_html_script()
+    assert re.search(r"\bs\.contradiction\b", script), "board.html never reads the contradiction"
+    body = re.search(r"function claimRow\((.*?)\n\}\n", script, re.S)
+    assert body, "claimRow() not found"
+    assert "claim_phase" in body.group(1) and "session_state" in body.group(1), \
+        "the contradiction must print both the claim and the fact"
+
+
+def test_board_marks_a_stale_claim_as_stale():
+    script = _board_html_script()
+    assert re.search(r"claim\.stale", script), "board.html renders a stale claim as though it were current"
+
+
+def test_board_says_why_a_claim_was_ignored():
+    script = _board_html_script()
+    assert re.search(r"\bs\.claim_ignored\b", script), "a refused claim is dropped silently on the page"
+
+
+# ---------------------------------------------------------------------------
+# Derived per-ticket status: whose move is it now.
+#
+# The complaint this answers: five tickets all reading "Active" while being in five genuinely
+# different situations — one needing the CTO to click merge, one waiting on a reviewer, one on a
+# product decision, one never pushed. "Active" is a true ADO field and a useless one, because it
+# does not say who has to act next. Every status below is named for exactly that.
+# ---------------------------------------------------------------------------
+
+
+def _pr_title(text, *ticket_ids):
+    """A PR title carrying the work item(s) it closes, the way this repo's CI requires.
+
+    Assembled rather than written out literally: a committed `AB#<number>` is picked up by ADO as
+    a real work-item link, and a test fixture must not mint one. The ids here are synthetic.
+    """
+    return text + " (" + ", ".join("AB#" + t for t in ticket_ids) + ")"
+
+
+def _pr(**over):
+    pr = {"number": 700, "state": "OPEN", "url": "https://example.test/pr/700",
+          "review": None, "checks": None}
+    pr.update(over)
+    return pr
+
+
+def test_a_pr_carries_its_review_decision_and_check_rollup_onto_the_ticket():
+    from board_state import prs_by_ticket
+
+    out = prs_by_ticket([{
+        "number": 718, "title": _pr_title("fix: something", "1001"), "url": "u", "state": "OPEN",
+        "isDraft": False, "reviewDecision": "APPROVED",
+        "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }])
+
+    assert out["1001"]["review"] == "APPROVED"
+    assert out["1001"]["checks"] == "passing"
+
+
+def test_a_repo_that_requires_no_review_reports_no_decision_rather_than_an_empty_string():
+    from board_state import prs_by_ticket
+
+    out = prs_by_ticket([{"number": 1, "title": _pr_title("x", "1001"), "url": "u", "state": "OPEN",
+                          "isDraft": False, "reviewDecision": ""}])
+
+    assert out["1001"]["review"] is None
+    assert out["1001"]["checks"] is None, "no rollup at all is not a green rollup"
+
+
+def test_one_failing_check_makes_the_whole_rollup_failing():
+    from board_state import check_rollup
+
+    assert check_rollup([
+        {"conclusion": "SUCCESS"}, {"conclusion": "FAILURE"}, {"conclusion": "SUCCESS"},
+    ]) == "failing"
+
+
+def test_a_check_still_running_holds_the_rollup_at_pending():
+    from board_state import check_rollup
+
+    assert check_rollup([{"conclusion": "SUCCESS"}, {"status": "IN_PROGRESS", "conclusion": None}]) == "pending"
+    assert check_rollup([{"state": "PENDING"}]) == "pending"
+
+
+def test_a_check_conclusion_nobody_recognises_is_pending_and_never_green():
+    """The same fail-toward-caution rule normalize_state() uses: an unrecognised word must never
+    become the answer that says "merge it". Pending neither shouts nor clears."""
+    from board_state import check_rollup
+
+    assert check_rollup([{"conclusion": "SOME_NEW_GITHUB_WORD"}]) == "pending"
+
+
+def test_skipped_and_neutral_checks_do_not_hold_a_pr_back():
+    from board_state import check_rollup
+
+    assert check_rollup([{"conclusion": "SUCCESS"}, {"conclusion": "SKIPPED"}, {"conclusion": "NEUTRAL"}]) == "passing"
+    assert check_rollup([]) is None
+    assert check_rollup(None) is None
+
+
+def test_status_says_nobody_has_picked_up_a_ticket_no_assignment_references():
+    from board_state import ticket_status
+
+    assert ticket_status("Active", None, claimed=False, escalated=False) == "unclaimed"
+
+
+def test_status_says_a_claimed_ticket_with_no_pr_is_waiting_to_be_pushed():
+    from board_state import ticket_status
+
+    assert ticket_status("Active", None, claimed=True, escalated=False) == "waiting_push"
+
+
+def test_status_says_an_open_unapproved_pr_is_waiting_for_review():
+    from board_state import ticket_status
+
+    assert ticket_status("Active", _pr(review="REVIEW_REQUIRED"), claimed=True, escalated=False) == "waiting_review"
+
+
+def test_status_says_an_approved_green_pr_is_waiting_for_someone_to_click_merge():
+    """The one the CTO actually wants to find: code done, reviewed, CI green, and the only thing
+    left is a click nobody has made."""
+    from board_state import ticket_status
+
+    pr = _pr(review="APPROVED", checks="passing")
+    assert ticket_status("Active", pr, claimed=True, escalated=False) == "waiting_merge"
+
+
+def test_an_approved_pr_on_a_repo_with_no_checks_is_still_waiting_to_merge():
+    from board_state import ticket_status
+
+    assert ticket_status("Active", _pr(review="APPROVED", checks=None), claimed=True, escalated=False) == "waiting_merge"
+
+
+def test_an_approved_pr_whose_checks_are_still_running_is_not_yet_waiting_to_merge():
+    from board_state import ticket_status
+
+    pr = _pr(review="APPROVED", checks="pending")
+    assert ticket_status("Active", pr, claimed=True, escalated=False) == "waiting_review"
+
+
+def test_status_says_checks_failing_even_when_the_pr_is_already_approved():
+    """Precedence, and the expensive half of it: an approval and a red check coexist all the time
+    (a reviewer approves, a later push breaks CI). Calling that "chờ bấm merge" sends the CTO to
+    click a button GitHub will refuse."""
+    from board_state import ticket_status
+
+    pr = _pr(review="APPROVED", checks="failing")
+    assert ticket_status("Active", pr, claimed=True, escalated=False) == "checks_failing"
+
+
+def test_an_open_escalation_outranks_every_pr_state():
+    """The hard stop. Every other status names work that can proceed; an open escalation names
+    work that cannot, and it is the only one here a machine can never clear."""
+    from board_state import ticket_status
+
+    pr = _pr(review="APPROVED", checks="passing")
+    assert ticket_status("Active", pr, claimed=True, escalated=True) == "waiting_decision"
+    assert ticket_status("Active", _pr(checks="failing"), claimed=True, escalated=True) == "waiting_decision"
+
+
+def test_status_says_a_merged_pr_on_a_ticket_nobody_closed():
+    from board_state import ticket_status
+
+    pr = _pr(state="MERGED")
+    assert ticket_status("Active", pr, claimed=True, escalated=False) == "merged_not_closed"
+
+
+def test_a_merged_pr_on_a_closed_ticket_has_nothing_left_to_say():
+    from board_state import ticket_status
+
+    assert ticket_status("Closed", _pr(state="MERGED"), claimed=True, escalated=False) is None
+
+
+def test_a_finished_ticket_is_never_reported_as_nobody_has_picked_it_up():
+    """"Chưa ai nhận" on a Closed ticket is a lie with an action attached — it invites the
+    manager to dispatch a worker at work that is already finished."""
+    from board_state import ticket_status
+
+    assert ticket_status("Closed", None, claimed=False, escalated=False) is None
+
+
+def test_an_abandoned_pr_falls_back_to_whoever_owns_the_ticket():
+    """A CLOSED-unmerged PR is a superseded attempt. Whose move it is now is exactly the same as
+    if it had never existed: somebody has to push a new one."""
+    from board_state import ticket_status
+
+    assert ticket_status("Active", _pr(state="CLOSED"), claimed=True, escalated=False) == "waiting_push"
+    assert ticket_status("Active", _pr(state="CLOSED"), claimed=False, escalated=False) == "unclaimed"
+
+
+def test_board_state_and_board_html_agree_on_which_ticket_states_mean_done():
+    from board_state import TICKET_DONE_STATES
+
+    block = re.search(r"const TICKET_DONE_STATES = new Set\(\[(.*?)\]\);", _board_html_script(), re.S)
+    assert block, "board.html no longer declares TICKET_DONE_STATES"
+    assert set(re.findall(r'"([^"]+)"', block.group(1))) == set(TICKET_DONE_STATES)
+
+
+# --- the derived status on the ticket document ---
+
+
+def test_ticket_docs_publish_the_derived_status_beside_the_ado_state():
+    """Beside, never instead of. The ADO state is a real field a person maintains; the derived
+    status is what the board worked out. Replacing one with the other would hide a disagreement
+    that is itself worth seeing."""
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1001", "title": "x", "state": "Active"}],
+        {"1001": _pr(review="APPROVED", checks="passing")},
+        assignment_refs={"1001"},
+    )
+
+    assert docs["1001"]["state"] == "Active"
+    assert docs["1001"]["derived_status"] == "waiting_merge"
+
+
+def test_ticket_docs_read_an_open_escalation_through_the_session_that_filed_it():
+    """Escalation records carry no ticket field at all — only `session_id`. The registry is what
+    knows which tickets a session's worktree was provisioned for, so that is the join."""
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1001", "title": "x", "state": "Active"}],
+        {"1001": _pr(review="APPROVED", checks="passing")},
+        assignment_refs={"1001"},
+        escalated_refs={"1001"},
+    )
+
+    assert docs["1001"]["derived_status"] == "waiting_decision"
+
+
+def test_build_writes_joins_assignments_and_open_escalations_onto_the_tickets():
+    writes = build_writes(
+        agents=[],
+        registry={"w1": {"session_id": "s1", "ado_ids": ["1002"]}},
+        escalations=[{"id": "e1", "session_id": "s1", "kind": "scope_question", "question": "?"}],
+        tickets=[{"id": "1001", "title": "a", "state": "Active"},
+                 {"id": "1002", "title": "b", "state": "Active"},
+                 {"id": "1003", "title": "c", "state": "Active"}],
+        pr_by_ticket={},
+        now=1000.0,
+        assignments=[{"id": "a1", "ts": 1.0, "ado_refs": ["1001"], "status": "in_progress"},
+                     {"id": "a2", "ts": 1.0, "ado_refs": ["1002"], "status": "in_progress"}],
+    )
+
+    by_id = {w["doc_id"]: w["data"] for w in _writes_for(writes, "tickets")}
+    assert by_id["1001"]["derived_status"] == "waiting_push"
+    assert by_id["1002"]["derived_status"] == "waiting_decision", "the open escalation must reach the ticket"
+    assert by_id["1003"]["derived_status"] == "unclaimed"
+
+
+def test_a_cancelled_assignment_does_not_keep_a_ticket_looking_picked_up():
+    """Cancelled is abandoned work. Counting it would tell the manager a ticket has an owner when
+    what it actually needs is dispatching again."""
+    writes = build_writes(
+        agents=[], registry={}, escalations=[],
+        tickets=[{"id": "1001", "title": "a", "state": "Active"}],
+        pr_by_ticket={}, now=1000.0,
+        assignments=[{"id": "a1", "ts": 1.0, "ado_refs": ["1001"], "status": "cancelled"}],
+    )
+
+    assert _writes_for(writes, "tickets")[0]["data"]["derived_status"] == "unclaimed"
+
+
+def test_an_answered_escalation_stops_blocking_the_ticket():
+    writes = build_writes(
+        agents=[], registry={"w1": {"session_id": "s1", "ado_ids": ["1001"]}},
+        escalations=[{"id": "e1", "session_id": "s1", "kind": "scope_question",
+                      "question": "?", "status": "answered"}],
+        tickets=[{"id": "1001", "title": "a", "state": "Active"}],
+        pr_by_ticket={}, now=1000.0,
+        assignments=[{"id": "a1", "ts": 1.0, "ado_refs": ["1001"], "status": "in_progress"}],
+    )
+
+    assert _writes_for(writes, "tickets")[0]["data"]["derived_status"] == "waiting_push"
+
+
+# --- the page ---
+
+
+def test_board_gives_the_derived_status_its_own_ticket_column():
+    script = _board_html_script()
+    assert re.search(r"\bt\.derived_status\b", script), "board.html never reads the derived status"
+    assert "DERIVED_STATUS_LABEL" in script, "no Vietnamese gloss for the derived statuses"
+
+
+def test_board_labels_every_derived_status():
+    from board_state import TICKET_STATUSES
+
+    script = _board_html_script()
+    for name in ("DERIVED_STATUS_LABEL", "DERIVED_STATUS_TONE"):
+        block = re.search(r"const " + name + r" = \{(.*?)\};", script, re.S)
+        assert block, f"board.html has no {name} map"
+        for status in TICKET_STATUSES:
+            assert re.search(rf"\b{status}\b", block.group(1)), f"{status} is missing from {name}"
+
+
+def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
+    """Both columns, always. The derived status answers "whose move"; the ADO state is what a
+    person put there, and a board that quietly replaces one with the other hides the case where
+    they disagree."""
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "ticketRow() not found"
+    assert "t.state" in body.group(1) and "t.derived_status" in body.group(1)
