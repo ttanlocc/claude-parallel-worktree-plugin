@@ -228,7 +228,7 @@ one the CTO can settle with a single click.
 
 ### `kind` is a closed list
 
-Pick one of these twelve, spelled exactly. It decides who may answer and how loudly the board
+Pick one of these thirteen, spelled exactly. It decides who may answer and how loudly the board
 shouts, so an invented name is not a harmless label.
 
 | `kind` | Use it when |
@@ -245,8 +245,12 @@ shouts, so an invented name is not a harmless label.
 | `looping` | A worker is repeating itself and needs redirecting |
 | `pick_implementation` | Two workable designs, one has to be chosen |
 | `scope_question` | In or out of scope for this piece of work |
+| `stuck_session` | A worker is frozen on a prompt nobody is there to answer |
 
-The first eight always reach a human; the last four the manager may settle alone — except that
+`stuck_session` is the one nothing files by hand: `bin/stuck_sessions.py` files it on a timer,
+and clears it again the moment the session starts moving. See bin/systemd/README.md.
+
+The first eight always reach a human; the last five the manager may settle alone — except that
 evidence overrules the kind, so anything irreversible, dependency-adding, migration-touching,
 secret-adjacent, or aimed at `main` goes to a human whatever it calls itself.
 

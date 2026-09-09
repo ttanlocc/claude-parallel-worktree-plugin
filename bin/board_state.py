@@ -380,15 +380,30 @@ def sum_usage(records) -> dict:
     return totals
 
 
+def session_transcripts(session_id: str, projects_root: str = PROJECTS_ROOT) -> list[str]:
+    """Every transcript file for one session id, newest-mtime last, or [] when there is none.
+
+    A worktree session's transcript lives under a project directory named after the WORKTREE
+    path, not the repo root, so the lookup is by session id across every project directory
+    rather than by re-deriving that encoding here.
+    """
+    return sorted(glob.glob(os.path.join(projects_root, "*", session_id + ".jsonl")), key=_mtime)
+
+
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def read_session_usage(session_id: str, projects_root: str = PROJECTS_ROOT) -> dict | None:
     """Totals for one session's transcript, or None when there is no transcript to read.
 
     None, never a zeroed dict: "no file" and "a file that recorded nothing" are different facts,
-    and only one of them may reach the page as a number. A worktree session's transcript lives
-    under a project directory named after the WORKTREE path, not the repo root, so the lookup is
-    by session id across every project directory rather than by re-deriving that encoding here.
+    and only one of them may reach the page as a number.
     """
-    matches = glob.glob(os.path.join(projects_root, "*", session_id + ".jsonl"))
+    matches = session_transcripts(session_id, projects_root)
     if not matches:
         return None
     records = []
