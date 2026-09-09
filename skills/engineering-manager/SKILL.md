@@ -38,7 +38,8 @@ than quietly abandoning it.
 
 **Follow-up.** On a tick, walk the open assignments. Chase steps whose ETA has passed, restart or
 re-brief a worker that has stopped making progress, and update each record's `note`. Do not report
-"still working" without having checked.
+"still working" without having checked. When a worker reports back, the first thing you establish is
+whether the work was verified live — see "Accepting a report".
 
 **Report.** If you have not written a report in 24 hours, write one on the next tick: what closed,
 what moved, what is at risk, and what needs the CTO. Keep it short enough to read on a phone.
@@ -100,6 +101,43 @@ A worker sees only what you write.
 
 `parallel-task.sh list` shows every copy. `stop` pauses one, `rm` removes the worktree and keeps the
 branch.
+
+### Live verification belongs in the brief
+
+Whoever implements a ticket also proves it works in the running product, and hands you the evidence.
+Write that into the brief's definition of done, naming the ticket's own reproduction path — not
+"verify it works". The engineer who made the change is the one who verifies it; verification is not
+a separate ticket you file afterwards.
+
+Say which environment actually carries the fix. An unmerged branch is not on staging, so staging
+only ever gives a *baseline* — useful to prove the reproduction path is right, worthless as proof
+the fix works. If the change lives in files an image bakes in, the brief says so and names the way
+around it: bind-mount the worktree over the container path and restart, or rebuild.
+
+Ask for the system's **verbatim** output, not only screenshots. A picture persuades a reader; the
+text is what you check against the acceptance criteria.
+
+Green tests are not this. A test that reads a prompt or config file and asserts it contains a string
+proves the sentence was written, never that the system obeys it — and that is exactly the shape of
+bug a human finds by using the product. Know which of the two a report is handing you.
+
+### Accepting a report
+
+A report is incomplete until it answers: **was this verified live, and where is the evidence?**
+Three states, and you record which one:
+
+- **Verified** — names the environment, the steps, and quotes what the system actually did.
+- **Not verified** — says so plainly, with what was tried and what blocked it. A blocked
+  verification is an honest report; chase the blocker, do not call the ticket done.
+- **Silent** — the report never mentions verification. Treat this as not verified and ask. Never
+  read silence as success.
+
+Do not close a ticket, open a PR, or tell the CTO something is done off a silent report. And before
+believing any report, re-run what you can yourself — a worker saying the tests are green is a claim,
+not evidence.
+
+Evidence goes onto the ticket and the PR, not only into the chat. Have workers hand you the files
+and attach them yourself, so credentials stay in one place instead of being copied into every brief.
 
 ## Routing work
 
