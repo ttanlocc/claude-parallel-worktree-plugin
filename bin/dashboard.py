@@ -327,6 +327,19 @@ def _ado_assignee_clause() -> str:
     id_fields = ("[System.AssignedTo]", "[Microsoft.VSTS.Common.ActivatedBy]")
     people = [p.replace("'", "''") for p in _ado_identities()]
     if not people:
+        # Said out loud, because this is the one degradation here that looks exactly like a
+        # correct answer: @Me returns a real, well-formed, SHORTER backlog. Measured on this
+        # project 2026-09-09 — two identities union to 168 tickets, @Me alone returns 21 — so a
+        # run that loses this variable publishes an eighth of the board with no error anywhere,
+        # and board_mirror_diff.py reconciles the missing seven eighths away. run-board-mirror.sh
+        # guards ARTIFACT_URL and PWT_REPO_ROOT with `:?` and cannot guard this one, because a
+        # single-identity install is a legitimate configuration; a journal line is what makes the
+        # difference between the two visible after the fact.
+        print(
+            "dashboard: PWR_ADO_ASSIGNED_TO is unset — the backlog covers only the identity `az` "
+            "is logged in as (WIQL @Me), not every identity of the board owner",
+            file=sys.stderr,
+        )
         return "(" + " OR ".join(f"{f} = @Me" for f in id_fields) + ")"
     joined = ", ".join(f"'{p}'" for p in people)
     return "(" + " OR ".join(f"{f} IN ({joined})" for f in id_fields) + ")"
@@ -373,10 +386,26 @@ def _ado_identity_ref(value) -> dict:
 
 
 def get_ado_backlog() -> list[dict]:
-    """Tickets assigned to you, not closed — the manager's read-only view into ADO. Any
-    failure (az not authenticated, network down) degrades to an empty backlog, same as every
-    other subprocess-backed source in this file — a dashboard that can't reach ADO still shows
-    live sessions."""
+    """Tickets assigned to you, not closed — the manager's read-only view into ADO.
+
+    RAISES when the sweep did not run, and returns [] only for a sweep that ran and matched
+    nothing. Those two were the same value here until 2026-09-09, and collapsing them is what
+    let a failed `az` call delete ticket rows off the published board: board_state.py's contract
+    (see its `read_tickets=` comment) is that only an exception means "did not run", and a
+    function written never to raise made that contract unenforceable — `_safe` stamped
+    last_ado_sweep on a sweep that never happened, and board_mirror_diff.py turned the resulting
+    empty ticket set into a delete per row.
+
+    This is the one reader in this file that does NOT degrade to empty, on purpose. The others
+    (get_ado_iterations, get_registry) degrade because their failure costs a derived nicety;
+    this one's failure costs the rows themselves. Both callers are already built for it:
+    board_state.py wraps it in `_safe()`, and /api/ado-tickets already answers 500 on any
+    exception — a better answer for a human than an empty table that reads as a finished sprint.
+
+    `az` prints `null`, not `[]`, when the query matches nothing. That IS a successful empty
+    sweep, so it is normalized to [] here rather than left to raise on iteration — otherwise the
+    one case the contract calls "successful and empty" would be reported as a failure.
+    """
 
     def run():
         result = subprocess.run(
@@ -386,10 +415,11 @@ def get_ado_backlog() -> list[dict]:
             timeout=20,
         )
         if result.returncode != 0:
-            return []
-        rows = json.loads(result.stdout)
+            raise RuntimeError(
+                f"az boards query exited {result.returncode}: {(result.stderr or '').strip()[:300]}"
+            )
         tickets = []
-        for r in rows:
+        for r in json.loads(result.stdout) or []:
             fields = r.get("fields") or {}
             tickets.append(
                 {
@@ -400,10 +430,7 @@ def get_ado_backlog() -> list[dict]:
             )
         return tickets
 
-    try:
-        return _cached("ado_backlog", run, ttl=60.0)
-    except _SUBPROC_ERRORS:
-        return []
+    return _cached("ado_backlog", run, ttl=60.0)
 
 
 def _iteration_leaves(node: dict) -> list[dict]:
@@ -427,9 +454,10 @@ def _iteration_leaves(node: dict) -> list[dict]:
 def get_ado_iterations() -> list[dict]:
     """Every sprint/iteration this project defines, with its date range — the ONLY place sprint
     boundaries live. A ticket's `System.IterationPath` is just a name; ADO never puts a date on
-    the ticket itself, so knowing which sprint is "today" requires this separate lookup. Same
-    degrade-to-empty contract as get_ado_backlog(): `az` failing must not blank the board, it
-    just leaves board_state.py unable to compute a default sprint filter."""
+    the ticket itself, so knowing which sprint is "today" requires this separate lookup. Unlike
+    get_ado_backlog(), this one DOES degrade to empty: `az` failing here costs only the default
+    sprint filter (the page falls back to "tất cả"), never a row, so there is nothing for a
+    caller to tell apart."""
 
     def run():
         result = subprocess.run(

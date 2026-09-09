@@ -2,6 +2,7 @@
 """assert-based checks for dashboard.py's transcript rendering. Run: python3 bin/test_dashboard.py"""
 
 import json
+import os
 import subprocess
 import tempfile
 
@@ -118,19 +119,54 @@ def test_shape_ado_ticket_handles_missing_fields():
     }
 
 
-def test_get_ado_backlog_degrades_on_timeout():
+def _backlog_with(mock_run):
     original_run = subprocess.run
     dashboard._CACHE.pop("ado_backlog", None)  # Clear cache so test runs fresh
+    subprocess.run = mock_run
+    try:
+        return get_ado_backlog()
+    finally:
+        subprocess.run = original_run
+
+
+def test_get_ado_backlog_raises_on_timeout_rather_than_reporting_an_empty_backlog():
+    """This asserted `== []` until 2026-09-09, and that was the bug. board_state.py's contract
+    is that only an exception means "the sweep did not run" — a reader that swallows every
+    failure into [] makes that unenforceable, and downstream board_mirror_diff.py turns an empty
+    ticket set into one delete per previously-known ticket. /api/ado-tickets already answers 500
+    on any exception, so the local dashboard shows an error instead of a falsely empty table."""
 
     def mock_run(*args, **kwargs):
         raise subprocess.TimeoutExpired("az", 20)
 
-    subprocess.run = mock_run
     try:
-        result = get_ado_backlog()
-        assert result == []
-    finally:
-        subprocess.run = original_run
+        _backlog_with(mock_run)
+    except subprocess.TimeoutExpired:
+        return
+    raise AssertionError("a timed-out sweep must not be reported as an empty backlog")
+
+
+def test_get_ado_backlog_raises_when_az_exits_non_zero():
+    """The path that leaves no trace at all: `az` exiting non-zero (expired auth, DNS failure)
+    used to `return []` without so much as a stderr line, so a wiped board and a genuinely empty
+    one were indistinguishable in the journal."""
+
+    def mock_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 1, "", "ERROR: Please run 'az login'.")
+
+    try:
+        _backlog_with(mock_run)
+    except RuntimeError as exc:
+        assert "az login" in str(exc), "the reason az failed must survive into the message"
+        return
+    raise AssertionError("a non-zero `az` exit must not be reported as an empty backlog")
+
+
+def test_get_ado_backlog_treats_a_null_result_as_a_successful_empty_sweep():
+    """`az boards query` prints `null`, not `[]`, when the WIQL matches nothing. That is a real
+    sweep that found nothing — it must come back as [] so last_ado_sweep stamps, not raise on
+    iteration and be misreported as a failed read."""
+    assert _backlog_with(lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "null", "")) == []
 
 
 def test_iteration_leaves_extracts_name_and_date_range():
@@ -908,3 +944,33 @@ def test_github_pr_query_keeps_its_existing_cache_tier():
         dashboard._CACHE.pop("github_prs:/repo", None)
 
     assert len(calls) == 1, "the second call was not served from the cache"
+
+
+def test_unset_identities_announce_the_at_me_fallback(capsys):
+    """@Me is not an error and not empty — it is a real, shorter backlog, which is exactly why it
+    has to say so. Measured on this project: two identities union to 168 tickets, @Me alone
+    returns 21, and nothing downstream can tell those apart."""
+    before = os.environ.pop("PWR_ADO_ASSIGNED_TO", None)
+    try:
+        clause = dashboard._ado_assignee_clause()
+    finally:
+        if before is not None:
+            os.environ["PWR_ADO_ASSIGNED_TO"] = before
+
+    assert "@Me" in clause
+    assert "PWR_ADO_ASSIGNED_TO is unset" in capsys.readouterr().err
+
+
+def test_configured_identities_are_silent_and_union_every_one_of_them(capsys):
+    before = os.environ.get("PWR_ADO_ASSIGNED_TO")
+    os.environ["PWR_ADO_ASSIGNED_TO"] = "a@x.com, b@y.com"
+    try:
+        clause = dashboard._ado_assignee_clause()
+    finally:
+        if before is None:
+            os.environ.pop("PWR_ADO_ASSIGNED_TO", None)
+        else:
+            os.environ["PWR_ADO_ASSIGNED_TO"] = before
+
+    assert "'a@x.com', 'b@y.com'" in clause and "@Me" not in clause
+    assert capsys.readouterr().err == "", "the healthy path must not add a line to every run"

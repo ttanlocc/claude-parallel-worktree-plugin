@@ -205,8 +205,14 @@ def _seed_stale_snapshot(env, n):
     into a `delete`, so the run has n+1 entries to send (meta/status last) no matter how much real
     state this machine happens to have — the alternative, leaning on board_state.py's own output,
     makes the batch count depend on whatever sessions and tickets exist when the suite runs.
+
+    `sessions`, not `tickets`: _mirror_env pins HOME to a scratch dir, so `az` has no credentials
+    and the ADO sweep genuinely cannot run here — and diff_writes deliberately withholds ticket
+    deletes when last_ado_sweep is null, so ticket ids would produce zero deletes and these
+    batching assertions would silently prove nothing. Sessions carry no such gate, which is what
+    keeps the count exact regardless of whether the suite's machine can reach ADO at all.
     """
-    stale = {f"tickets/stale-{i}": {"n": i} for i in range(n)}
+    stale = {f"sessions/stale-{i}": {"n": i} for i in range(n)}
     with open(env["BOARD_MIRROR_SNAPSHOT"], "w", encoding="utf-8") as f:
         json.dump(stale, f)
     return set(stale)

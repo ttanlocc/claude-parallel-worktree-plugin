@@ -4,7 +4,23 @@ run-board-mirror.sh."""
 
 from board_mirror_diff import apply_batch, chunk_writes, diff_writes
 
-META = {"op": "set", "collection": "meta", "doc_id": "status", "data": {"written_at": 2}}
+# The real meta/status always carries last_ado_sweep (see board_state.meta_status), and
+# diff_writes now reads it to tell "the ADO sweep found nothing" from "the ADO sweep did not
+# run". A fixture without the field would silently exercise the did-not-run path in every test
+# below, so it is stated here rather than left to default.
+META = {
+    "op": "set",
+    "collection": "meta",
+    "doc_id": "status",
+    "data": {"written_at": 2, "last_ado_sweep": 2},
+}
+# Same document from a run whose ADO reader raised and was caught by board_state._safe().
+META_SWEEP_FAILED = {
+    "op": "set",
+    "collection": "meta",
+    "doc_id": "status",
+    "data": {"written_at": 2, "last_ado_sweep": None},
+}
 
 
 def _set(collection, doc_id, data):
@@ -59,7 +75,7 @@ def test_apply_batch_keys_by_collection_slash_doc_id_and_keeps_only_data():
 
     assert apply_batch({}, writes) == {
         "sessions/a": {"state": "running"},
-        "meta/status": {"written_at": 2},
+        "meta/status": META["data"],
     }
 
 
@@ -206,3 +222,45 @@ def test_apply_batch_refuses_to_record_a_document_that_cannot_exist():
     snapshot = apply_batch({}, [_set("sessions", BAD, {"state": "running"}), _set("sessions", "ok", {"n": 1})])
 
     assert set(snapshot) == {"sessions/ok"}
+
+
+def test_a_failed_ado_sweep_does_not_delete_the_tickets_it_could_not_read():
+    """The 2026-09-09 regression: `az` failed, board_state published zero tickets, and every
+    previously-known ticket row was reconciled away — 140 deletes on the CTO's board from one
+    failed subprocess. An absent ticket collection means "not reported" when last_ado_sweep is
+    null; only a sweep that actually ran may retire a ticket."""
+    previous = apply_batch({}, [
+        _set("tickets", "7763", {"state": "Active"}),
+        _set("tickets", "8318", {"state": "Active"}),
+        _set("sessions", "a", {"state": "running"}),
+    ])
+    # The session ended for real, and the sweep did not run: only the session may be deleted.
+    writes = [META_SWEEP_FAILED]
+
+    result = diff_writes(previous, writes)
+
+    assert result == [{"op": "delete", "collection": "sessions", "doc_id": "a"}, META_SWEEP_FAILED]
+
+
+def test_a_successful_empty_sweep_still_retires_its_tickets():
+    """The other half, and why this is keyed to last_ado_sweep rather than "the collection is
+    empty": a sweep that ran and legitimately matched nothing must still clear the board."""
+    previous = apply_batch({}, [_set("tickets", "7763", {"state": "Closed"})])
+
+    result = diff_writes(previous, [META])
+
+    assert result == [{"op": "delete", "collection": "tickets", "doc_id": "7763"}, META]
+
+
+def test_a_failed_sweep_still_publishes_every_other_collection():
+    """A failed ADO read must not freeze the rest of the board — sessions and assignments are
+    independent sources and their changes still go out."""
+    previous = apply_batch({}, [
+        _set("tickets", "7763", {"state": "Active"}),
+        _set("assignments", "a1", {"status": "assigned"}),
+    ])
+    writes = [_set("assignments", "a1", {"status": "done"}), META_SWEEP_FAILED]
+
+    result = diff_writes(previous, writes)
+
+    assert result == [writes[0], META_SWEEP_FAILED]
