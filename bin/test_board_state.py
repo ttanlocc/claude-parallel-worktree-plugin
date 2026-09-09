@@ -71,6 +71,66 @@ def test_session_docs_mark_an_unregistered_task_as_not_managed():
     assert doc["managed"] is False
 
 
+# ---------------------------------------------------------------------------
+# Rule C — a live session whose name is not in the registry, while a registry entry differing
+# only by a trailing suffix exists. Real evidence: worktrees provisioned as t8309-confirm-tool /
+# t8325-e2e, sessions dispatched as t8309d / t8325b — the board went quiet with no error anywhere.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_real_case_a_mis_dispatched_session_names_both_names():
+    from board_state import session_registry_drift
+
+    registry = {"t8309-confirm-tool": {}, "t8325-e2e": {}}
+    drift = session_registry_drift("t8309d", registry)
+
+    assert drift is not None
+    assert drift["proposed_state"] is None, "never auto-patch the registry — a wrong guess is worse than an empty card"
+    assert drift["fixable"] is False
+    assert "t8309d" in drift["reason"] and "t8309-confirm-tool" in drift["reason"]
+    assert drift["registry_name"] == "t8309-confirm-tool"
+
+
+def test_todays_real_case_the_second_mis_dispatched_session_too():
+    from board_state import session_registry_drift
+
+    registry = {"t8309-confirm-tool": {}, "t8325-e2e": {}}
+    drift = session_registry_drift("t8325b", registry)
+
+    assert drift is not None and drift["registry_name"] == "t8325-e2e"
+
+
+def test_a_registered_session_is_never_drift():
+    from board_state import session_registry_drift
+
+    assert session_registry_drift("t8309-confirm-tool", {"t8309-confirm-tool": {}}) is None
+
+
+def test_a_genuinely_ad_hoc_session_with_nothing_resembling_it_stays_silent():
+    """An ad-hoc terminal session with no registry entry and nothing similar is normal — flagging
+    it would be indistinguishable from Rule C nagging every spike and smoke test."""
+    from board_state import session_registry_drift
+
+    assert session_registry_drift("someones-quick-spike", {"t8309-confirm-tool": {}}) is None
+
+
+def test_registry_drift_is_distinct_from_managed_false_on_its_own():
+    """Keep strictly distinct from `managed: false` — an unregistered session with nothing
+    resembling it must not carry state_drift even though it is unmanaged."""
+    doc = session_docs([{"name": "someones-quick-spike", "sessionId": "s1", "state": "idle"}],
+                       {"t8309-confirm-tool": {}})["someones-quick-spike"]
+    assert doc["managed"] is False
+    assert doc["state_drift"] is None
+
+
+def test_session_docs_publish_the_registry_drift_for_a_mis_dispatched_session():
+    doc = session_docs([{"name": "t8309d", "sessionId": "s1", "state": "running"}],
+                       {"t8309-confirm-tool": {}})["t8309d"]
+    assert doc["managed"] is False
+    assert doc["state_drift"]["registry_name"] == "t8309-confirm-tool"
+    assert doc["state_drift"]["fixable"] is False
+
+
 def test_session_docs_read_state_from_either_field_name():
     """`claude agents --json` has used both `state` and `status`; the dashboard already reads
     whichever is present and this must not disagree with it."""
@@ -3809,6 +3869,14 @@ def test_ticket_row_reuses_the_drift_css_class_for_state_drift():
     assert 'class: "drift"' in body.group(1), "ticketRow() does not reuse the .drift idiom"
     assert "ticketDriftTitle(" in body.group(1), "ticketRow() never calls ticketDriftTitle()"
     assert "state_drift" in body.group(1)
+
+
+def test_session_tile_reuses_the_drift_css_class_for_a_mis_dispatched_session():
+    """Rule C, same look as Rule A/B on the ticket row — one wording style across the board."""
+    body = re.search(r"function sessionTile\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "sessionTile() not found"
+    assert 'class: "drift"' in body.group(1), "sessionTile() does not reuse the .drift idiom"
+    assert "s.state_drift" in body.group(1)
 
 
 # ---------------------------------------------------------------------------

@@ -185,6 +185,45 @@ def _contradiction(claim, state: str) -> dict | None:
     return {"claim_phase": claim["phase"], "session_state": state}
 
 
+# The leading "root" of a worktree task name — parallel-task.sh names tend to start with a
+# ticket-ish token (`t8309`) and then a free-text slug. Two names sharing this root but not
+# otherwise equal is the "differs only by a trailing suffix" shape a mis-dispatch takes: the
+# session and the registry entry both extended from the same starting point, by different text.
+_TASK_ROOT = re.compile(r"^[a-z]*\d+")
+
+
+def session_registry_drift(name: str, registry: dict) -> dict | None:
+    """A probable mis-dispatch — `name` matches no registry entry, but some entry shares its
+    leading root and only the trailing suffix differs (`t8309d` vs `t8309-confirm-tool`) — or
+    None.
+
+    None also covers the ordinary case: an ad-hoc session (a spike, a smoke test, someone's own
+    terminal) with no registry entry and nothing resembling it. That is normal and must stay
+    silent — this is deliberately narrower than `managed: false` on its own, which needsAttention()
+    already reads as its own, different signal.
+
+    Never proposes anything (`proposed_state` is always None) — a wrong guess would attach a
+    session to the wrong ticket, worse than an empty card. `registry_name` names the candidate
+    explicitly so a human does not have to go looking for it.
+    """
+    if not isinstance(registry, dict) or name in registry:
+        return None
+    root = _TASK_ROOT.match(name or "")
+    if not root:
+        return None
+    root = root.group(0)
+    for candidate in registry:
+        candidate_root = _TASK_ROOT.match(candidate or "")
+        if candidate != name and candidate_root and candidate_root.group(0) == root:
+            return {
+                "proposed_state": None,
+                "fixable": False,
+                "reason": f'phiên "{name}" không khớp registry — có thể gõ nhầm tên khi giao việc, đúng ra là "{candidate}"',
+                "registry_name": candidate,
+            }
+    return None
+
+
 def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
                  now: float = 0.0, stale_after: float | None = None) -> dict[str, dict]:
     """One document per live task, keyed by task name.
@@ -222,6 +261,9 @@ def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
             "claim": claim,
             "claim_ignored": ignored,
             "contradiction": _contradiction(claim, state),
+            # Rule C: a probable mis-dispatch, never a plain unmanaged session — see
+            # session_registry_drift()'s docstring for why the two must stay distinct.
+            "state_drift": session_registry_drift(name, registry),
             # True iff parallel-task.sh actually dispatched this task — an entry EXISTS in the
             # registry, not "branch happens to be truthy". A registry row with a blank branch
             # field is still work the manager provisioned; `bool(reg)` or `bool(branch)` would
