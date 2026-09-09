@@ -1338,6 +1338,18 @@ def test_the_as_of_line_itself_changes_when_the_data_stops_arriving():
     assert "--bad-ink" in css.group(1), "the stale as-of line must use the alarm tone"
 
 
+def test_the_as_of_line_never_prints_a_clock_it_could_not_read():
+    """Two ways this line lies about a dead board, both seen in the browser before this guard:
+    an unreadable stamp rendered "dữ liệu tính đến Invalid Date", and a three-day-old stamp
+    rendered a bare "03:22" — which reads as this morning to anyone glancing at it."""
+    script = _board_html_script()
+    m = re.search(r"const clock = \(writtenAt == null \|\| info\.never\)", script)
+    assert m, "the clock is still printed for a timestamp with no usable value"
+    # Stale must carry the calendar day, not just the time.
+    m = re.search(r"info\.stale\s*\n?\s*\?\s*\{ day:", script)
+    assert m, "a stale as-of line must print the date alongside the clock"
+
+
 def test_stale_banner_markup_starts_hidden():
     """The banner must exist in the initial markup and be hidden until JS decides ADO data is
     stale — otherwise it either never appears (missing element) or flashes on every load
@@ -1450,7 +1462,10 @@ def test_refresh_shows_the_real_age_of_the_data_beside_the_button():
     script = _board_html_script()
     assert "dữ liệu tính đến" in script, "the data-age label text not found"
     assert "written_at" in script, "the age label must come from meta.written_at"
-    assert "toLocaleTimeString" in script, "the label must include a wall-clock time"
+    # toLocaleString, not toLocaleTimeString: a STALE line adds the calendar day to the same
+    # call (see test_the_as_of_line_never_prints_a_clock_it_could_not_read). What this test is
+    # actually about is that a wall-clock time is shown at all.
+    assert re.search(r'hour: "2-digit", minute: "2-digit"', script), "the label must include a wall-clock time"
 
 
 def test_refresh_label_reuses_the_existing_freshness_helpers():

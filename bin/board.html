@@ -996,7 +996,7 @@ function freshnessChip(label, info) {
   return h("span", { class: "pill " + (info.stale ? "pill-warn" : "pill-neutral") },
     label + ": " + info.text,
     info.stale ? h("span", {
-      title: info.never ? "Nguồn này chưa từng chạy." : "Lâu hơn nhiều so với chu kỳ thường thấy.",
+      title: info.never ? "Nguồn này không có mốc thời gian dùng được." : "Lâu hơn nhiều so với chu kỳ thường thấy.",
     }, " ⚠") : null);
 }
 
@@ -1010,8 +1010,10 @@ function renderStaleBanner(adoInfo) {
     banner.replaceChildren();
     return;
   }
+  // `never` covers both "no stamp at all" and "a stamp nothing could read" — adoInfo.text already
+  // says which, so the detail line just has to be true of both rather than assert the first.
   const detail = adoInfo.never
-    ? "chưa từng ghi nhận lần đồng bộ nào"
+    ? adoInfo.text
     : "chưa cập nhật trong " + (adoInfo.text.replace(/ trước$/, ""));
   banner.hidden = false;
   banner.replaceChildren(
@@ -1062,9 +1064,16 @@ function renderRefresh() {
   if (!box) return;
   const writtenAt = view.meta ? view.meta.written_at : null;
   const info = freshnessInfo(writtenAt, staleThreshold());
-  const clock = writtenAt == null
+  // No clock at all when there is no usable stamp (missing, or something Date can't read) —
+  // printing "Invalid Date" is noise, and printing anything clock-shaped from a stamp nobody
+  // could parse would be worse. Stale prints the DATE alongside the time: a bare "03:22" next to
+  // "3 ngày trước" is a riddle, and a bare clock is precisely what someone glances at and reads
+  // as today.
+  const clock = (writtenAt == null || info.never)
     ? null
-    : new Date(writtenAt * 1000).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+    : new Date(writtenAt * 1000).toLocaleString("vi-VN", info.stale
+        ? { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }
+        : { hour: "2-digit", minute: "2-digit" });
   const age = clock == null
     ? "chưa rõ dữ liệu tính đến lúc nào"
     : "dữ liệu tính đến " + clock + " (" + info.text + ")";
