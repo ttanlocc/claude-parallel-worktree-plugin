@@ -526,6 +526,83 @@ def test_board_reads_handed_off_fields_under_the_same_names_ticket_docs_writes()
     assert re.search(r"\bt\.handed_off\b(?!_to)", script), "board.html never reads t.handed_off"
 
 
+from board_state import prs_by_ticket
+
+
+def test_prs_by_ticket_maps_a_single_ab_ref_in_the_title():
+    prs = [
+        {
+            "number": 720,
+            "title": "fix: derive pack fact and skill file names from list position (AB#5061)",
+            "url": "https://github.com/o/r/pull/720",
+            "state": "MERGED",
+            "isDraft": False,
+        }
+    ]
+
+    assert prs_by_ticket(prs) == {"5061": {"number": 720, "state": "MERGED", "url": "https://github.com/o/r/pull/720"}}
+
+
+def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
+    """"(AB#8196, AB#8197)" is a real title shape — one PR can close more than one ticket."""
+    prs = [
+        {
+            "number": 100,
+            "title": "fix: shared cleanup (AB#8196, AB#8197)",
+            "url": "https://github.com/o/r/pull/100",
+            "state": "OPEN",
+            "isDraft": False,
+        }
+    ]
+
+    docs = prs_by_ticket(prs)
+
+    assert set(docs) == {"8196", "8197"}
+    assert docs["8196"] == {"number": 100, "state": "OPEN", "url": "https://github.com/o/r/pull/100"}
+    assert docs["8197"] == docs["8196"]
+
+
+def test_prs_by_ticket_ignores_a_title_with_no_ab_ref():
+    prs = [{"number": 5, "title": "chore: tidy imports", "url": "u", "state": "OPEN", "isDraft": False}]
+
+    assert prs_by_ticket(prs) == {}
+
+
+def test_prs_by_ticket_reflects_a_merged_pr_state():
+    prs = [{"number": 720, "title": "fix: x (AB#5061)", "url": "u", "state": "MERGED", "isDraft": False}]
+
+    assert prs_by_ticket(prs)["5061"]["state"] == "MERGED"
+
+
+def test_prs_by_ticket_prefers_the_open_pr_over_a_merged_one_for_the_same_ticket():
+    """An OPEN PR still needs a human decision; a MERGED one is already done. The one still
+    asking for attention is what a reviewer scanning the board cares about most."""
+    prs = [
+        {"number": 10, "title": "fix: old attempt (AB#9000)", "url": "u10", "state": "MERGED", "isDraft": False},
+        {"number": 20, "title": "fix: current attempt (AB#9000)", "url": "u20", "state": "OPEN", "isDraft": False},
+    ]
+
+    assert prs_by_ticket(prs)["9000"]["number"] == 20
+
+
+def test_prs_by_ticket_breaks_a_same_state_tie_with_the_higher_pr_number():
+    prs = [
+        {"number": 20, "title": "fix: first (AB#9001)", "url": "u20", "state": "OPEN", "isDraft": False},
+        {"number": 21, "title": "fix: second (AB#9001)", "url": "u21", "state": "OPEN", "isDraft": False},
+    ]
+
+    assert prs_by_ticket(prs)["9001"]["number"] == 21
+
+
+def test_prs_by_ticket_prefers_a_non_draft_pr_over_a_draft_one_in_the_same_state():
+    prs = [
+        {"number": 30, "title": "fix: draft (AB#9002)", "url": "u30", "state": "OPEN", "isDraft": True},
+        {"number": 31, "title": "fix: ready (AB#9002)", "url": "u31", "state": "OPEN", "isDraft": False},
+    ]
+
+    assert prs_by_ticket(prs)["9002"]["number"] == 31
+
+
 from board_state import meta_status
 
 
@@ -1715,6 +1792,48 @@ def test_main_wires_an_iterations_reader_for_the_default_sprint():
     assert "get_ado_iterations" in src
 
 
+def test_main_actually_wires_the_real_pr_reader_into_the_collect_call(monkeypatch, tmp_path, capsys):
+    """A source-string check (`"read_prs" in inspect.getsource(main)`) would stay green even if
+    the `collect(...)` call inside main() went back to `read_prs=dict` — the `def read_prs():`
+    closure would still be defined and still mention every name a string check could look for, it
+    would just sit there unused. The only thing that actually proves the wiring is running
+    main() and checking a ticket doc really has PR data.
+
+    Every OTHER subprocess-backed reader is faked here too, deliberately — this must not become
+    a test that shells out to a real `az`/`claude` and depends on this machine being logged in.
+    `dashboard.get_github_prs` is the one seam left real end to end: main() must reach it, not a
+    bypass of it.
+    """
+    import json
+
+    import board_state
+    import dashboard
+    import manager_daemon
+    import manager_session
+
+    monkeypatch.setattr(manager_daemon, "list_agents", lambda: [])
+    monkeypatch.setattr(
+        dashboard, "get_ado_backlog", lambda: [{"id": "42", "title": "t", "state": "New", "sprint": "S", "url": "u"}]
+    )
+    monkeypatch.setattr(dashboard, "get_ado_iterations", lambda: [])
+    monkeypatch.setattr(dashboard, "_ado_identities", lambda: [])
+    monkeypatch.setattr(manager_session, "_read_state", lambda: {})
+    monkeypatch.setattr(manager_session, "resolve_repo_root", lambda *a, **k: str(tmp_path))
+    monkeypatch.setattr(board_state, "QUEUE_PATH", str(tmp_path / "no-escalations.jsonl"))
+    monkeypatch.setattr(board_state, "LEDGER_PATH", str(tmp_path / "no-assignments.jsonl"))
+    monkeypatch.setattr(
+        dashboard,
+        "get_github_prs",
+        lambda repo_root: [{"number": 1, "title": "fix: x (AB#42)", "url": "pu", "state": "OPEN", "isDraft": False}],
+    )
+
+    board_state.main()
+
+    writes = json.loads(capsys.readouterr().out)
+    tickets = [w for w in writes if w["collection"] == "tickets"]
+    assert tickets[0]["data"]["pr"] == {"number": 1, "state": "OPEN", "url": "pu"}
+
+
 def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
     """open_assignments() would drop every finished assignment off the board the moment it was
     closed. read_all() hands over every record of every id — done included, and every earlier
@@ -2165,6 +2284,22 @@ def test_board_keeps_the_long_note_and_the_step_list_behind_the_toggle():
     assert "a.note" in detail, "the note must still be readable once the card is open"
     assert "steps" in detail, "the step list belongs to the opened card"
     assert "steps.map" not in summary, "the collapsed line must not render every step"
+
+
+def test_board_shows_the_ticket_chip_on_the_collapsed_summary_line():
+    """The AB# chip used to live only in `detail`, behind the click that opens the card — a
+    reader scanning the collapsed board had no way to tell which ticket a card was for. It must
+    render on `summary`, next to the title, still linked through ticketUrl()."""
+    summary = _card_part("summary")
+    assert "ticketUrl" in summary, "the collapsed summary line never renders a ticket chip"
+    assert "refs" in summary, "the collapsed summary line never reads a.ado_refs"
+
+
+def test_board_does_not_render_the_ticket_chip_twice():
+    """Once the chip moved to the summary line, an unchanged copy left behind in `detail` would
+    just be visual noise every time a card is opened."""
+    detail = _card_part("detail")
+    assert "ticketUrl" not in detail, "the ticket chip is rendered in both summary and detail"
 
 
 def test_board_formats_token_counts_for_a_reader_not_as_raw_digits():

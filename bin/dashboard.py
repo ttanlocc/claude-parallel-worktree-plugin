@@ -259,6 +259,31 @@ def get_sessions() -> list[dict]:
     return _cached("sessions", run)
 
 
+def get_github_prs(repo_root: str) -> list[dict]:
+    """Every PR `gh` knows about for `repo_root`'s remote, open and closed/merged alike — a
+    merged PR is exactly what a reviewer wants to see on a ticket that's already done.
+    board_state.prs_by_ticket() turns this into the ticket-id-keyed map the board publishes;
+    this function only fetches.
+
+    `repo_root` is taken as an argument rather than read off module-level REPO_DIR: this can be
+    called from board_state.py's own entry point, which never runs dashboard.main() and so never
+    updates REPO_DIR — the same trap read_registry() in board_state.py works around already.
+    """
+
+    def run():
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "all", "--json", "number,title,url,state,isDraft", "--limit", "500"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=20,
+            cwd=repo_root,
+        )
+        return json.loads(result.stdout)
+
+    return _cached(f"github_prs:{repo_root}", run, ttl=_ENRICH_TTL)
+
+
 _ADO_ORG = "https://dev.azure.com/agentiqai"
 _ADO_PROJECT = "AgentIQ"
 # Done work stays on the board so a manager can see it was finished, not just that it
